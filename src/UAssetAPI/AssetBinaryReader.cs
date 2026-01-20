@@ -96,8 +96,9 @@ namespace UAssetAPI
                     }
                     else
                     {
+                        // UTF-8 encoding - positive length (handles ASCII and multi-byte chars like Korean, Chinese, etc.)
                         byte[] data = this.ReadBytes(length);
-                        return new FString(Encoding.ASCII.GetString(data, 0, data.Length - 1), Encoding.ASCII);
+                        return new FString(Encoding.UTF8.GetString(data, 0, data.Length - 1), Encoding.UTF8);
                     }
             }
         }
