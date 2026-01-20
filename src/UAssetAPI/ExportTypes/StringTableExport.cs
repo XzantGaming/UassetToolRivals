@@ -57,12 +57,15 @@ namespace UAssetAPI.ExportTypes
             for (int i = 0; i < numEntries; i++)
             {
                 Table.Add(reader.ReadFString(), reader.ReadFString());
+                reader.ReadInt32(); // forward 4 bytes (padding)
             }
+            reader.ReadInt32(); // forward 4 bytes (trailing padding)
         }
 
         public override void Write(AssetBinaryWriter writer)
         {
             base.Write(writer);
+            byte[] nullbytes = { 0, 0, 0, 0 };
 
             writer.Write(Table.TableNamespace);
             writer.Write(Table.Count);
@@ -70,7 +73,9 @@ namespace UAssetAPI.ExportTypes
             {
                 writer.Write(Table.Keys.ElementAt(i));
                 writer.Write(Table[i]);
+                writer.Write(nullbytes);
             }
+            writer.Write(nullbytes);
         }
     }
 }
