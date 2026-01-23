@@ -12,6 +12,7 @@ A unified command-line tool for parsing, editing, and converting Unreal Engine a
 - **IoStore Creation** - Create IoStore mod bundles (.utoc/.ucas/.pak) for game injection
 - **IoStore Extraction** - Extract assets from game IoStore containers with dependency resolution
 - **Marvel Rivals Support** - Game-specific fixes for FGameplayTagContainer, material slots, and asset serialization
+- **NiagaraSystem Editing** - Modify particle effect colors with structured parsing
 - **GUI Backend** - JSON stdin/stdout API for frontend integration
 
 ## Installation
@@ -232,6 +233,97 @@ MarvelRivals/MarvelGame/Marvel/Content/Paks/~mods/
 ├── MyMod.ucas
 └── MyMod.pak
 ```
+
+## NiagaraSystem Editing
+
+Edit particle effect colors in NiagaraSystem assets with frontend-friendly JSON API:
+
+### CLI Commands
+
+```bash
+# List all NS files with metadata
+UAssetTool niagara_list <directory> [usmap_path]
+
+# Get detailed color curve info for a file
+UAssetTool niagara_details <asset_path> [usmap_path]
+
+# Edit colors (simple mode)
+UAssetTool niagara_edit <asset_path> <R> <G> <B> [A] [usmap_path]
+
+# Edit colors (JSON request mode)
+UAssetTool niagara_edit '{"assetPath":"...","r":0,"g":10,"b":0,"a":1}' [usmap_path]
+
+# Batch modify all colors in directory
+UAssetTool modify_colors <directory> <usmap_path> [R G B A]
+```
+
+### JSON Response Examples
+
+**List files (`niagara_list`):**
+```json
+{
+  "success": true,
+  "totalFiles": 3,
+  "files": [
+    {
+      "path": "E:\\temp\\NS_104821_Hit_01_CB.uasset",
+      "fileName": "NS_104821_Hit_01_CB.uasset",
+      "colorCurveCount": 20,
+      "totalColorCount": 2416
+    }
+  ]
+}
+```
+
+**File details (`niagara_details`):**
+```json
+{
+  "success": true,
+  "totalExports": 89,
+  "colorCurveCount": 20,
+  "colorCurves": [
+    {
+      "exportIndex": 0,
+      "exportName": "NiagaraDataInterfaceColorCurve",
+      "colorCount": 128,
+      "sampleColors": [
+        {"index": 0, "r": 1.5, "g": 0.2, "b": 2.0, "a": 1}
+      ]
+    }
+  ]
+}
+```
+
+**Edit request (advanced targeting):**
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "r": 0, "g": 10, "b": 0, "a": 1,
+  "exportIndex": 3,
+  "colorIndex": 0
+}
+```
+
+### Workflow Example
+
+```bash
+# 1. Extract NS assets from game
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output" --filter "VFX/Particles"
+
+# 2. List available NS files
+UAssetTool niagara_list "output/Content" "mappings.usmap"
+
+# 3. Inspect specific file
+UAssetTool niagara_details "output/Content/.../NS_Effect.uasset" "mappings.usmap"
+
+# 4. Modify colors to bright green
+UAssetTool niagara_edit "output/Content/.../NS_Effect.uasset" 0 10 0 1 "mappings.usmap"
+
+# 5. Create mod bundle
+UAssetTool create_mod_iostore "mods/GreenFX" output/Content/.../NS_Effect.uasset
+```
+
+See [docs/NIAGARA_EDITING_GUIDE.md](docs/NIAGARA_EDITING_GUIDE.md) for detailed technical documentation.
 
 ## Zen Package Inspection
 

@@ -67,6 +67,10 @@ public class Program
                 "from_json" => CliFromJson(args),
                 "dump_zen_from_game" => CliDumpZenFromGame(args),
                 "extract_pak" => CliExtractPak(args),
+                "modify_colors" => CliModifyColors(args),
+                "niagara_list" => CliNiagaraList(args),
+                "niagara_details" => CliNiagaraDetails(args),
+                "niagara_edit" => CliNiagaraEdit(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -1522,6 +1526,158 @@ public class Program
         
         Console.WriteLine($"Asset imported from JSON and saved to {outputPath}");
         return 0;
+    }
+    
+    private static int CliModifyColors(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool modify_colors <directory_or_file> <usmap_path> [r g b a]");
+            Console.Error.WriteLine("Default color: bright green (0, 10, 0, 1)");
+            return 1;
+        }
+
+        string path = args[1];
+        string usmapPath = args[2];
+        
+        // Default to bright green (HDR value for visibility)
+        float r = 0f, g = 10f, b = 0f, a = 1f;
+        if (args.Length >= 6)
+        {
+            float.TryParse(args[3], out r);
+            float.TryParse(args[4], out g);
+            float.TryParse(args[5], out b);
+        }
+        if (args.Length >= 7)
+        {
+            float.TryParse(args[6], out a);
+        }
+
+        Console.WriteLine($"Modifying colors to R={r}, G={g}, B={b}, A={a}");
+
+        int totalModified = 0;
+        
+        if (Directory.Exists(path))
+        {
+            var files = Directory.GetFiles(path, "*.uasset", SearchOption.AllDirectories);
+            foreach (var file in files)
+            {
+                int count = ColorModifier.ModifyColors(file, usmapPath, r, g, b, a);
+                if (count > 0) totalModified += count;
+            }
+        }
+        else if (File.Exists(path))
+        {
+            totalModified = ColorModifier.ModifyColors(path, usmapPath, r, g, b, a);
+        }
+        else
+        {
+            Console.Error.WriteLine($"Path not found: {path}");
+            return 1;
+        }
+
+        Console.WriteLine($"Total color values modified: {totalModified}");
+        return 0;
+    }
+    
+    private static int CliNiagaraList(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool niagara_list <directory> [usmap_path]");
+            Console.Error.WriteLine("Output: JSON with list of NS files and their metadata");
+            return 1;
+        }
+
+        string directory = args[1];
+        string? usmapPath = args.Length > 2 ? args[2] : null;
+
+        string json = NiagaraService.ListNiagaraFiles(directory, usmapPath);
+        Console.WriteLine(json);
+        return 0;
+    }
+
+    private static int CliNiagaraDetails(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path]");
+            Console.Error.WriteLine("Output: JSON with detailed color curve info for a specific NS file");
+            return 1;
+        }
+
+        string assetPath = args[1];
+        string? usmapPath = args.Length > 2 ? args[2] : null;
+
+        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath);
+        Console.WriteLine(json);
+        return 0;
+    }
+
+    private static int CliNiagaraEdit(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool niagara_edit <json_request> [usmap_path]");
+            Console.Error.WriteLine("       UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [usmap_path]");
+            Console.Error.WriteLine("JSON request format: {\"assetPath\":\"...\",\"r\":0,\"g\":10,\"b\":0,\"a\":1}");
+            Console.Error.WriteLine("Optional: exportIndex, colorIndex to target specific colors");
+            return 1;
+        }
+
+        // Check if first arg is JSON or a file path
+        string firstArg = args[1];
+        string? usmapPath = null;
+
+        if (firstArg.TrimStart().StartsWith("{"))
+        {
+            // JSON request mode
+            usmapPath = args.Length > 2 ? args[2] : null;
+            string json = NiagaraService.EditNiagaraColors(firstArg, usmapPath);
+            Console.WriteLine(json);
+            return 0;
+        }
+        else
+        {
+            // Simple mode: asset_path r g b [a] [usmap]
+            if (args.Length < 5)
+            {
+                Console.Error.WriteLine("Usage: UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [usmap_path]");
+                return 1;
+            }
+
+            string assetPath = args[1];
+            if (!float.TryParse(args[2], out float r) ||
+                !float.TryParse(args[3], out float g) ||
+                !float.TryParse(args[4], out float b))
+            {
+                Console.Error.WriteLine("Error: Invalid color values");
+                return 1;
+            }
+
+            float a = 1.0f;
+            int nextArg = 5;
+            if (args.Length > 5 && float.TryParse(args[5], out float parsedA))
+            {
+                a = parsedA;
+                nextArg = 6;
+            }
+
+            usmapPath = args.Length > nextArg ? args[nextArg] : null;
+
+            var request = new NiagaraService.ColorEditRequest
+            {
+                AssetPath = assetPath,
+                R = r,
+                G = g,
+                B = b,
+                A = a
+            };
+
+            string json = NiagaraService.EditNiagaraColors(request, usmapPath);
+            Console.WriteLine(json);
+            return 0;
+        }
     }
     
     #endregion

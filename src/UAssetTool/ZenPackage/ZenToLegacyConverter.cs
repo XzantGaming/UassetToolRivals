@@ -264,6 +264,8 @@ public class ZenToLegacyConverter
         // The complex rebuild logic has bugs that cause data duplication
         _needsToRebuildExportsData = false; // TODO: Fix RebuildExportData logic
         
+        bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
+        
         for (int exportIndex = 0; exportIndex < _zenPackage.ExportMap.Count; exportIndex++)
         {
             var zenExport = _zenPackage.ExportMap[exportIndex];
@@ -275,6 +277,12 @@ public class ZenToLegacyConverter
             FPackageIndex outerIndex = ResolveWithFallbackAsPackageIndex(zenExport.OuterIndex, "outer_index");
             
             string exportNameString = _zenPackage.GetName(zenExport.ObjectName);
+            
+            // Debug: Print export names to trace shifting
+            if (debugMode && exportIndex < 20)
+            {
+                Console.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Name=\"{exportNameString}\"");
+            }
             var (objectName, objectNameNumber) = StoreOrFindNameWithNumber(exportNameString);
             uint objectFlags = zenExport.ObjectFlags;
             

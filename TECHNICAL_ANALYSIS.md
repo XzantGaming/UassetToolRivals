@@ -9,10 +9,12 @@ This document provides a detailed technical analysis of the processes and algori
 3. [Mipmap Stripping](#mipmap-stripping)
 4. [SkeletalMesh Processing](#skeletalmesh-processing)
 5. [StaticMesh Processing](#staticmesh-processing)
-6. [Zen Package Conversion](#zen-package-conversion)
-7. [IoStore Container Format](#iostore-container-format)
-8. [Export Map Building](#export-map-building)
-9. [Import Resolution](#import-resolution)
+6. [NiagaraSystem Color Editing](#niagarasystem-color-editing)
+7. [Zen Package Conversion](#zen-package-conversion)
+8. [IoStore Container Format](#iostore-container-format)
+9. [Export Map Building](#export-map-building)
+10. [Import Resolution](#import-resolution)
+11. [Script Objects Database](#script-objects-database)
 
 ---
 
@@ -332,6 +334,94 @@ Total:  36 bytes
 ### Note on StaticMesh Padding
 
 Unlike SkeletalMesh, StaticMesh in Marvel Rivals does **not** require FGameplayTagContainer padding. The materials are serialized at 36-byte intervals without additional fields.
+
+---
+
+## NiagaraSystem Color Editing
+
+### Overview
+
+**Location:** `ColorModifier.cs`, `NiagaraService.cs`
+
+NiagaraSystem assets (`NS_*.uasset`) contain UE5 particle system definitions. Colors are stored in `NiagaraDataInterfaceColorCurve` exports within the `ShaderLUT` property.
+
+### ShaderLUT Structure
+
+**Critical Discovery:** ShaderLUT is stored as a **flat float array**, NOT as an array of LinearColor structs:
+
+```
+ShaderLUT: ArrayPropertyData<FloatProperty>
+├── [0]  R0 (float32)
+├── [1]  G0 (float32)
+├── [2]  B0 (float32)
+├── [3]  A0 (float32)
+├── [4]  R1 (float32)
+├── [5]  G1 (float32)
+├── [6]  B1 (float32)
+├── [7]  A1 (float32)
+└── ... (typically 256-1024 floats = 64-256 colors)
+```
+
+### Binary Layout
+
+```
+Offset  Size  Field
+──────  ────  ─────────────────────────────
++0      4     ArrayType name index
++4      4     Array count (number of floats)
++8      4     Color 0 - R (float32)
++12     4     Color 0 - G (float32)
++16     4     Color 0 - B (float32)
++20     4     Color 0 - A (float32)
++24     4     Color 1 - R (float32)
+...
+```
+
+### HDR Color Values
+
+Colors use **HDR (High Dynamic Range)** values:
+
+| Value | Appearance |
+|-------|------------|
+| 0.0 | Black/transparent |
+| 1.0 | Standard brightness |
+| 2.0-5.0 | Bright/glowing |
+| 10.0+ | Very bright bloom |
+
+### Systematic Parsing Approach
+
+```csharp
+// Process ShaderLUT as groups of 4 floats (RGBA)
+if (prop.Name?.Value?.Value == "ShaderLUT" && prop is ArrayPropertyData lutArray)
+{
+    for (int i = 0; i + 3 < lutArray.Value.Length; i += 4)
+    {
+        var rProp = lutArray.Value[i] as FloatPropertyData;
+        var gProp = lutArray.Value[i + 1] as FloatPropertyData;
+        var bProp = lutArray.Value[i + 2] as FloatPropertyData;
+        var aProp = lutArray.Value[i + 3] as FloatPropertyData;
+        
+        rProp.Value = targetColor.R;
+        gProp.Value = targetColor.G;
+        bProp.Value = targetColor.B;
+        aProp.Value = targetColor.A;
+    }
+}
+```
+
+### Why Not LinearColorPropertyData?
+
+The USMAP mappings define ShaderLUT as `Array<FloatProperty>` for GPU efficiency. The baked LUT is a raw float buffer that shaders sample directly, not structured LinearColor objects.
+
+### Frontend API
+
+`NiagaraService.cs` provides JSON-based methods for GUI integration:
+
+| Method | Purpose |
+|--------|---------|
+| `ListNiagaraFiles()` | List NS files with color curve counts |
+| `GetNiagaraDetails()` | Get color curves with sample colors |
+| `EditNiagaraColors()` | Modify colors with optional targeting |
 
 ---
 
@@ -695,3 +785,66 @@ The conversion process handles numerous UE5-specific requirements:
 7. **Preload Data** - Calculates correct CookedHeaderSize
 
 Each step is critical for the game to successfully load modded assets.
+
+---
+
+## Script Objects Database
+
+### Overview
+
+**Location:** `ScriptObjectsDatabase.cs`
+
+The ScriptObjects database provides global name resolution for engine classes referenced by hash in Zen packages.
+
+### Name Batch String Storage
+
+**Critical Fix:** Names are stored **consecutively without alignment padding**. An earlier bug incorrectly added 2-byte alignment for UTF-16 strings, causing off-by-one truncation:
+
+```
+WRONG: "iagaraEmitterN" (first char skipped)
+RIGHT: "NiagaraEmitter"
+```
+
+### Correct Parsing
+
+```csharp
+// Names stored consecutively WITHOUT alignment padding
+int currentOffset = 0;
+for (int i = 0; i < nameCount; i++)
+{
+    if (rawLengths[i] < 0)
+    {
+        // UTF-16 string
+        int charCount = Math.Abs(short.MinValue - rawLengths[i]);
+        nameByteLengths[i] = charCount * 2;
+        // NO alignment padding in serialized format
+    }
+    else
+    {
+        // ASCII string
+        nameByteLengths[i] = rawLengths[i];
+    }
+    nameOffsets[i] = currentOffset;
+    currentOffset += nameByteLengths[i];
+}
+```
+
+### FPackageObjectIndex Resolution
+
+```csharp
+public FName? GetName(FPackageObjectIndex index)
+{
+    if (!index.IsScriptImport) return null;
+    
+    uint typeAndId = index.TypeAndId;
+    if (_scriptObjectMap.TryGetValue(typeAndId, out int nameIndex))
+    {
+        return _names[nameIndex];
+    }
+    return null;
+}
+```
+
+### Impact on NiagaraSystem
+
+This fix was essential for NiagaraSystem editing - truncated class names like `iagaraDataInterfaceColorCurve` prevented proper export type detection.

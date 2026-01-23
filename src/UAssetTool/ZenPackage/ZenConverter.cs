@@ -192,30 +192,73 @@ public class ZenConverter
         bool isStaticMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "StaticMesh");
         
+        bool isStringTable = asset.Exports.Any(e => 
+            e.GetExportClassType()?.Value?.Value == "StringTable" ||
+            e.GetExportClassType()?.Value?.Value?.EndsWith("StringTable") == true);
+        
         int materialPaddingToAdd = 0;
+        int stringTablePaddingToAdd = 0;
         if (isSkeletalMesh)
         {
-            // Calculate how much padding will be added (without actually patching yet)
-            materialPaddingToAdd = CalculateSkeletalMeshMaterialPadding(uexpData);
-            if (materialPaddingToAdd > 0)
+            // For SkeletalMesh, try to use UAssetAPI's proper serialization via SkeletalMeshExport
+            // which automatically includes FGameplayTagContainer padding
+            var skeletalExport = asset.Exports.FirstOrDefault(e => 
+                e is UAssetAPI.ExportTypes.SkeletalMeshExport skelExp && skelExp.Materials != null && skelExp.Materials.Count > 0)
+                as UAssetAPI.ExportTypes.SkeletalMeshExport;
+            
+            if (skeletalExport != null)
             {
-                Console.Error.WriteLine($"[ZenConverter] SkeletalMesh will need {materialPaddingToAdd} bytes of material padding");
+                // Enable FGameplayTagContainer writing and re-serialize
+                skeletalExport.IncludeGameplayTags = true;
+                var reserializedData = ReserializeExportData(asset);
+                if (reserializedData != null && reserializedData.Length > 0)
+                {
+                    int sizeDiff = reserializedData.Length - uexpData.Length;
+                    Console.Error.WriteLine($"[ZenConverter] SkeletalMesh re-serialized: {uexpData.Length} -> {reserializedData.Length} bytes (diff={sizeDiff}, {skeletalExport.Materials.Count} materials)");
+                    uexpData = reserializedData;
+                    materialPaddingToAdd = sizeDiff;
+                }
+            }
+            else
+            {
+                // Fallback to byte patching if materials weren't parsed
+                materialPaddingToAdd = CalculateSkeletalMeshMaterialPadding(uexpData);
+                if (materialPaddingToAdd > 0)
+                {
+                    Console.Error.WriteLine($"[ZenConverter] SkeletalMesh will need {materialPaddingToAdd} bytes of material padding (byte patching fallback)");
+                }
             }
         }
         else if (isStaticMesh)
         {
-            // DISABLED: StaticMesh padding - testing without it first
-            // materialPaddingToAdd = CalculateStaticMeshMaterialPadding(uexpData);
-            // if (materialPaddingToAdd > 0)
-            // {
-            //     Console.Error.WriteLine($"[ZenConverter] StaticMesh will need {materialPaddingToAdd} bytes of material padding");
-            // }
-            Console.Error.WriteLine($"[ZenConverter] StaticMesh detected - padding disabled for testing");
+            // StaticMesh doesn't need FGameplayTagContainer padding for Marvel Rivals
+            Console.Error.WriteLine($"[ZenConverter] StaticMesh detected - no padding needed");
         }
+        
+        if (isStringTable)
+        {
+            // For StringTable, use UAssetAPI's proper serialization which automatically includes
+            // FGameplayTagContainer padding via StringTableExport.Write()
+            // Re-serialize the asset to get properly formatted export data
+            var reserializedData = ReserializeExportData(asset);
+            if (reserializedData != null && reserializedData.Length > 0)
+            {
+                int sizeDiff = reserializedData.Length - uexpData.Length;
+                if (sizeDiff != 0)
+                {
+                    Console.Error.WriteLine($"[ZenConverter] StringTable re-serialized: {uexpData.Length} -> {reserializedData.Length} bytes (diff={sizeDiff})");
+                    uexpData = reserializedData;
+                    stringTablePaddingToAdd = sizeDiff;
+                }
+            }
+        }
+        
+        // Total padding to add
+        int totalPaddingToAdd = materialPaddingToAdd + stringTablePaddingToAdd;
 
         // Build export map with RECALCULATED SerialSize from actual data
         // Pass the padding amount so the last export's size is correct
-        BuildExportMapWithRecalculatedSizes(asset, zenPackage, uexpData, headerSize, materialPaddingToAdd);
+        BuildExportMapWithRecalculatedSizes(asset, zenPackage, uexpData, headerSize, totalPaddingToAdd);
 
         // Build export bundles (required for UE5 to load assets)
         BuildExportBundles(asset, zenPackage);
@@ -766,14 +809,14 @@ public class ZenConverter
         if (names.Count == 0)
             return;
 
-        // Calculate total string bytes
+        // Calculate total string bytes - NO alignment padding in serialized format
         uint totalStringBytes = 0;
         foreach (var name in names)
         {
             if (IsAscii(name))
                 totalStringBytes += (uint)name.Length;
             else
-                totalStringBytes += (uint)(Encoding.Unicode.GetByteCount(name));
+                totalStringBytes += (uint)Encoding.Unicode.GetByteCount(name);
         }
         writer.Write(totalStringBytes);
 
@@ -812,7 +855,7 @@ public class ZenConverter
             writer.Write(beBytes);
         }
 
-        // Write string data
+        // Write string data - NO alignment padding, strings are consecutive
         foreach (var name in names)
         {
             if (IsAscii(name))
@@ -1350,7 +1393,7 @@ public class ZenConverter
         
         Console.Error.WriteLine($"[ZenConverter] Preload calculation: preloadSize={preloadSize}, preloadDependencyCount={preloadDependencyCount}");
         
-        // Check if this is a SkeletalMesh or StaticMesh that needs material slot padding
+        // Check if this is a SkeletalMesh, StaticMesh, or StringTable that needs padding
         bool isSkeletalMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "SkeletalMesh" ||
             e.GetExportClassType()?.Value?.Value?.Contains("SkeletalMesh") == true);
@@ -1358,24 +1401,24 @@ public class ZenConverter
         bool isStaticMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "StaticMesh");
         
+        bool isStringTable = asset.Exports.Any(e => 
+            e.GetExportClassType()?.Value?.Value == "StringTable" ||
+            e.GetExportClassType()?.Value?.Value?.EndsWith("StringTable") == true);
+        
         byte[] exportDataToWrite = uexpData;
         
-        if (isSkeletalMesh)
+        // SkeletalMesh and StringTable padding is now handled via UAssetAPI re-serialization in ConvertToZen()
+        // Only use byte patching as fallback if systematic approach failed
+        if (isSkeletalMesh && exportDataToWrite.Length == uexpData.Length)
         {
-            // Apply material slot padding fix for SkeletalMesh assets
-            // Note: The export map size was already updated in BuildExportMapWithRecalculatedSizes
+            // Fallback: Apply material slot padding via byte patching if re-serialization didn't work
             var patchResult = PatchSkeletalMeshMaterialSlots(uexpData, exportDataLength);
             if (patchResult.patchedData != null)
             {
                 exportDataToWrite = patchResult.patchedData;
                 exportDataLength = patchResult.patchedData.Length;
-                Console.Error.WriteLine($"[ZenConverter] Applied SkeletalMesh material padding: {patchResult.materialCount} materials, added {patchResult.materialCount * 4} bytes");
+                Console.Error.WriteLine($"[ZenConverter] Applied SkeletalMesh material padding (fallback): {patchResult.materialCount} materials, added {patchResult.materialCount * 4} bytes");
             }
-        }
-        else if (isStaticMesh)
-        {
-            // DISABLED: StaticMesh padding - testing without it first
-            Console.Error.WriteLine($"[ZenConverter] StaticMesh patching disabled for testing");
         }
         
         // Write export data (possibly patched)
@@ -1801,6 +1844,246 @@ public class ZenConverter
         Console.Error.WriteLine($"[ZenConverter] Original data length: {dataLength}, Patched data length: {newLength}");
         Console.Error.WriteLine($"[ZenConverter] srcOffset after patching: {srcOffset}, dstOffset after patching: {dstOffset}, remainingBytes: {remainingBytes}");
         return (patchedData, materialCount);
+    }
+    
+    /// <summary>
+    /// Re-serialize the asset's export data using UAssetAPI's proper serialization.
+    /// This ensures types like StringTable get proper FGameplayTagContainer padding automatically.
+    /// Returns just the export data portion (equivalent to .uexp content).
+    /// </summary>
+    private static byte[]? ReserializeExportData(UAsset asset)
+    {
+        try
+        {
+            // Use UAssetAPI's WriteData to get properly serialized data
+            using var fullStream = asset.WriteData();
+            
+            if (fullStream == null || fullStream.Length == 0)
+                return null;
+            
+            // Find where export data starts (minimum SerialOffset of all exports)
+            long exportStart = asset.Exports.Min(e => e.SerialOffset);
+            
+            // Export data goes from exportStart to end of stream
+            long exportDataLength = fullStream.Length - exportStart;
+            
+            if (exportDataLength <= 0)
+                return null;
+            
+            // Extract just the export data portion
+            byte[] exportData = new byte[exportDataLength];
+            fullStream.Seek(exportStart, SeekOrigin.Begin);
+            fullStream.Read(exportData, 0, (int)exportDataLength);
+            
+            Console.Error.WriteLine($"[ZenConverter] Re-serialized export data: {exportDataLength} bytes (from offset {exportStart})");
+            return exportData;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ZenConverter] Failed to re-serialize export data: {ex.Message}");
+            return null;
+        }
+    }
+    
+    /// <summary>
+    /// Calculate how much padding will be needed for a StringTable.
+    /// Each string table entry (Key + Value) needs 4 bytes (FGameplayTagContainer count=0).
+    /// Plus 4 bytes trailing padding at the end.
+    /// 
+    /// StringTable structure in .uexp:
+    /// - FString TableNamespace
+    /// - int32 NumEntries
+    /// - For each entry: FString Key, FString Value, [FGameplayTagContainer - needs to be added]
+    /// - [FGameplayTagContainer trailing - needs to be added]
+    /// </summary>
+    private static int CalculateStringTablePadding(byte[] uexpData)
+    {
+        const int PADDING_SIZE = 4; // Empty FGameplayTagContainer = int32 count of 0
+        int dataLength = uexpData.Length;
+        
+        // StringTable has a simple structure:
+        // 1. TableNamespace (FString: int32 length + chars + null)
+        // 2. NumEntries (int32)
+        // 3. For each entry: Key FString + Value FString
+        
+        // Search for the entry count - look for a reasonable int32 followed by FString patterns
+        // FString format: int32 length (positive, reasonable size) followed by ASCII/UTF-8 chars
+        
+        for (int i = 0; i < dataLength - 20; i++)
+        {
+            // First, try to find the TableNamespace FString
+            int nsLen = BitConverter.ToInt32(uexpData, i);
+            if (nsLen <= 0 || nsLen > 256)
+                continue;
+            
+            // Check if the string content looks valid (printable ASCII or null terminator)
+            bool validString = true;
+            for (int j = 0; j < Math.Min(nsLen, 10); j++)
+            {
+                byte b = uexpData[i + 4 + j];
+                if (b != 0 && (b < 32 || b > 126))
+                {
+                    validString = false;
+                    break;
+                }
+            }
+            if (!validString)
+                continue;
+            
+            // After the namespace string, we should have the entry count
+            int entryCountOffset = i + 4 + nsLen;
+            if (entryCountOffset + 4 > dataLength)
+                continue;
+            
+            int entryCount = BitConverter.ToInt32(uexpData, entryCountOffset);
+            if (entryCount <= 0 || entryCount > 10000)
+                continue;
+            
+            // Validate by checking if next bytes look like an FString (key)
+            int keyOffset = entryCountOffset + 4;
+            if (keyOffset + 4 > dataLength)
+                continue;
+            
+            int keyLen = BitConverter.ToInt32(uexpData, keyOffset);
+            if (keyLen <= 0 || keyLen > 1024)
+                continue;
+            
+            // Looks like a valid StringTable structure
+            // Each entry needs 4 bytes padding + 4 bytes trailing
+            int totalPadding = (entryCount * PADDING_SIZE) + PADDING_SIZE;
+            Console.Error.WriteLine($"[ZenConverter] Found StringTable: namespace at 0x{i:X}, {entryCount} entries, will add {totalPadding} bytes padding");
+            return totalPadding;
+        }
+        
+        return 0;
+    }
+    
+    /// <summary>
+    /// Patch StringTable .uexp data by adding 4-byte FGameplayTagContainer padding after each entry.
+    /// Marvel Rivals expects an FGameplayTagContainer (empty = 4 bytes of zeros) after each Key+Value pair.
+    /// Plus a trailing FGameplayTagContainer at the end.
+    /// </summary>
+    private static (byte[]? patchedData, int entryCount, int paddingAdded) PatchStringTableEntries(byte[] uexpData, int dataLength)
+    {
+        const int PADDING_SIZE = 4; // Empty FGameplayTagContainer = int32 count of 0
+        
+        // Find the StringTable structure
+        int namespaceOffset = -1;
+        int namespaceLen = 0;
+        int entryCountOffset = -1;
+        int entryCount = 0;
+        int firstEntryOffset = -1;
+        
+        for (int i = 0; i < dataLength - 20; i++)
+        {
+            int nsLen = BitConverter.ToInt32(uexpData, i);
+            if (nsLen <= 0 || nsLen > 256)
+                continue;
+            
+            bool validString = true;
+            for (int j = 0; j < Math.Min(nsLen, 10); j++)
+            {
+                byte b = uexpData[i + 4 + j];
+                if (b != 0 && (b < 32 || b > 126))
+                {
+                    validString = false;
+                    break;
+                }
+            }
+            if (!validString)
+                continue;
+            
+            int ecOffset = i + 4 + nsLen;
+            if (ecOffset + 4 > dataLength)
+                continue;
+            
+            int ec = BitConverter.ToInt32(uexpData, ecOffset);
+            if (ec <= 0 || ec > 10000)
+                continue;
+            
+            int keyOffset = ecOffset + 4;
+            if (keyOffset + 4 > dataLength)
+                continue;
+            
+            int keyLen = BitConverter.ToInt32(uexpData, keyOffset);
+            if (keyLen <= 0 || keyLen > 1024)
+                continue;
+            
+            namespaceOffset = i;
+            namespaceLen = nsLen;
+            entryCountOffset = ecOffset;
+            entryCount = ec;
+            firstEntryOffset = keyOffset;
+            Console.Error.WriteLine($"[ZenConverter] Found StringTable for patching: namespace=\"{System.Text.Encoding.UTF8.GetString(uexpData, i + 4, Math.Min(nsLen - 1, 50))}\", {entryCount} entries");
+            break;
+        }
+        
+        if (entryCount == 0 || firstEntryOffset < 0)
+        {
+            Console.Error.WriteLine($"[ZenConverter] No StringTable structure found to patch");
+            return (null, 0, 0);
+        }
+        
+        // Calculate new size: original + (entryCount * 4) + 4 trailing
+        int paddingTotal = (entryCount * PADDING_SIZE) + PADDING_SIZE;
+        int newLength = dataLength + paddingTotal;
+        byte[] patchedData = new byte[newLength];
+        
+        // Copy data up to first entry
+        Array.Copy(uexpData, 0, patchedData, 0, firstEntryOffset);
+        
+        int srcOffset = firstEntryOffset;
+        int dstOffset = firstEntryOffset;
+        
+        // For each entry, copy Key + Value, then add 4 bytes padding
+        for (int e = 0; e < entryCount; e++)
+        {
+            // Read and copy Key FString
+            if (srcOffset + 4 > dataLength)
+                break;
+            int keyLen = BitConverter.ToInt32(uexpData, srcOffset);
+            int keyTotalLen = 4 + keyLen; // length field + string bytes
+            if (srcOffset + keyTotalLen > dataLength)
+                break;
+            Array.Copy(uexpData, srcOffset, patchedData, dstOffset, keyTotalLen);
+            srcOffset += keyTotalLen;
+            dstOffset += keyTotalLen;
+            
+            // Read and copy Value FString
+            if (srcOffset + 4 > dataLength)
+                break;
+            int valLen = BitConverter.ToInt32(uexpData, srcOffset);
+            int valTotalLen = 4 + valLen;
+            if (srcOffset + valTotalLen > dataLength)
+                break;
+            Array.Copy(uexpData, srcOffset, patchedData, dstOffset, valTotalLen);
+            srcOffset += valTotalLen;
+            dstOffset += valTotalLen;
+            
+            // Add 4 bytes padding (empty FGameplayTagContainer: count = 0)
+            patchedData[dstOffset] = 0x00;
+            patchedData[dstOffset + 1] = 0x00;
+            patchedData[dstOffset + 2] = 0x00;
+            patchedData[dstOffset + 3] = 0x00;
+            dstOffset += PADDING_SIZE;
+        }
+        
+        // Add trailing 4 bytes padding
+        patchedData[dstOffset] = 0x00;
+        patchedData[dstOffset + 1] = 0x00;
+        patchedData[dstOffset + 2] = 0x00;
+        patchedData[dstOffset + 3] = 0x00;
+        dstOffset += PADDING_SIZE;
+        
+        // Copy remaining data after StringTable entries
+        int remainingBytes = dataLength - srcOffset;
+        if (remainingBytes > 0)
+        {
+            Array.Copy(uexpData, srcOffset, patchedData, dstOffset, remainingBytes);
+        }
+        
+        Console.Error.WriteLine($"[ZenConverter] Patched StringTable: {entryCount} entries with FGameplayTagContainer padding (+{paddingTotal} bytes)");
+        return (patchedData, entryCount, paddingTotal);
     }
 }
 

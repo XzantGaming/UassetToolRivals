@@ -325,6 +325,9 @@ public class FZenPackageHeader
 
     private void ReadNameBatchStrings(BinaryReader reader, int numNames, int numStringBytes)
     {
+        bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
+        long headersStartPos = reader.BaseStream.Position;
+        
         // Read headers first - lengths are in BIG ENDIAN format
         var headers = new List<(int length, bool isWide)>();
         for (int i = 0; i < numNames; i++)
@@ -350,9 +353,18 @@ public class FZenPackageHeader
             headers.Add((actualLen, isWide));
         }
 
-        // Read string data
+        long stringsStartPos = reader.BaseStream.Position;
+        
+        // Read string data - strings are stored consecutively WITHOUT alignment padding in the file
+        // Alignment is only for runtime memory layout, not serialization
         byte[] stringData = reader.ReadBytes(numStringBytes);
+        
+        if (debugMode)
+        {
+            Console.WriteLine($"[ZenPackage] NameMap: {numNames} names, headersStart={headersStartPos}, stringsStart={stringsStartPos}, stringDataLen={stringData.Length}");
+        }
 
+        // Parse strings - NO alignment padding in serialized format, strings are consecutive
         int currentOffset = 0;
         for (int i = 0; i < numNames; i++)
         {
@@ -361,10 +373,8 @@ public class FZenPackageHeader
             
             if (isWide)
             {
-                // UTF-16 strings are aligned to 2 bytes
-                if (currentOffset % 2 != 0)
-                    currentOffset++;
-                    
+                // Wide strings: length is char count, byte count = length * 2
+                // NO alignment padding in serialized format
                 int byteLen = length * 2;
                 if (currentOffset + byteLen <= stringData.Length)
                 {
@@ -373,6 +383,8 @@ public class FZenPackageHeader
                 }
                 else
                 {
+                    if (debugMode)
+                        Console.WriteLine($"[ZenPackage] Name {i}: INVALID WIDE - offset={currentOffset}, byteLen={byteLen}, dataLen={stringData.Length}");
                     name = $"__invalid_wide_{i}__";
                 }
             }
@@ -385,10 +397,23 @@ public class FZenPackageHeader
                 }
                 else
                 {
+                    if (debugMode)
+                        Console.WriteLine($"[ZenPackage] Name {i}: INVALID - offset={currentOffset}, length={length}, dataLen={stringData.Length}");
                     name = $"__invalid_{i}__";
                 }
             }
+            
+            if (debugMode && i < 20)
+            {
+                Console.WriteLine($"[ZenPackage] Name {i}: \"{name}\" (len={length}, wide={isWide})");
+            }
+            
             NameMap.Add(name);
+        }
+        
+        if (debugMode)
+        {
+            Console.WriteLine($"[ZenPackage] NameMap complete: {NameMap.Count} names, finalOffset={currentOffset}");
         }
     }
 

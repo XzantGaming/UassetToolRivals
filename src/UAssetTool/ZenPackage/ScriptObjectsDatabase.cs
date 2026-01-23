@@ -63,7 +63,8 @@ public class ScriptObjectsDatabase
             rawLengths[i] = (short)((hi << 8) | lo);
         }
         
-        // Calculate proper byte offsets accounting for UTF-16 strings and alignment
+        // Calculate proper byte offsets - strings are stored consecutively WITHOUT alignment padding
+        // Alignment is only for runtime memory layout, not serialization
         var nameOffsets = new int[nameCount];
         var nameByteLengths = new int[nameCount];
         var isWide = new bool[nameCount];
@@ -77,9 +78,7 @@ public class ScriptObjectsDatabase
                 int charCount = Math.Abs(short.MinValue - rawLengths[i]);
                 nameByteLengths[i] = charCount * 2;
                 isWide[i] = true;
-                // UTF-16 strings must be 2-byte aligned - add padding if at odd offset
-                if ((currentOffset & 1) != 0)
-                    currentOffset++;
+                // NO alignment padding in serialized format
             }
             else
             {

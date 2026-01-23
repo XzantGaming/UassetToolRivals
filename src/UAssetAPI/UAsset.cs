@@ -928,6 +928,14 @@ namespace UAssetAPI
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<StringTableExport>();
                         }
+                        else if (exportClassType == "SkeletalMesh" || exportClassType.EndsWith("SkeletalMesh"))
+                        {
+                            Exports[i] = Exports[i].ConvertToChildExport<SkeletalMeshExport>();
+                        }
+                        else if (exportClassType == "StaticMesh")
+                        {
+                            Exports[i] = Exports[i].ConvertToChildExport<StaticMeshExport>();
+                        }
                         else if (exportClassType.EndsWith("BlueprintGeneratedClass"))
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<ClassExport>();

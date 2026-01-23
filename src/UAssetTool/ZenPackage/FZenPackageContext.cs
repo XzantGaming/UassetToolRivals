@@ -171,22 +171,38 @@ public class FZenPackageContext : IDisposable
             lengths.Add((actualLen, isWide));
         }
         
-        // Read strings
+        // Read string data - strings are stored consecutively WITHOUT alignment padding
+        byte[] stringData = reader.ReadBytes(numStringBytes);
+        
+        // Parse strings - NO alignment padding in serialized format
+        int currentOffset = 0;
         for (int i = 0; i < numNames; i++)
         {
             var (len, isWide) = lengths[i];
             if (isWide)
             {
-                // Align to 2 bytes
-                if (reader.BaseStream.Position % 2 != 0)
-                    reader.ReadByte();
-                byte[] bytes = reader.ReadBytes(len * 2);
-                names.Add(System.Text.Encoding.Unicode.GetString(bytes));
+                int byteLen = len * 2;
+                if (currentOffset + byteLen <= stringData.Length)
+                {
+                    names.Add(System.Text.Encoding.Unicode.GetString(stringData, currentOffset, byteLen));
+                    currentOffset += byteLen;
+                }
+                else
+                {
+                    names.Add($"__invalid_wide_{i}__");
+                }
             }
             else
             {
-                byte[] bytes = reader.ReadBytes(len);
-                names.Add(System.Text.Encoding.UTF8.GetString(bytes));
+                if (currentOffset + len <= stringData.Length)
+                {
+                    names.Add(System.Text.Encoding.UTF8.GetString(stringData, currentOffset, len));
+                    currentOffset += len;
+                }
+                else
+                {
+                    names.Add($"__invalid_{i}__");
+                }
             }
         }
         
