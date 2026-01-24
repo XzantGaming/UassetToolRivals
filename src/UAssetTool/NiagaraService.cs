@@ -225,6 +225,22 @@ public static class NiagaraService
         public bool? ModifyG { get; set; }  // Optional: if false, don't modify G channel (default: true)
         public bool? ModifyB { get; set; }  // Optional: if false, don't modify B channel (default: true)
         public bool? ModifyA { get; set; }  // Optional: if false, don't modify A channel (default: true)
+
+        // Batch mode: array of colors to write (index in array = color index in LUT)
+        // When provided, R/G/B/A are ignored and each color is written to its corresponding index
+        public List<ColorWriteValue>? Colors { get; set; }
+    }
+
+    /// <summary>
+    /// Single color value for batch write mode
+    /// </summary>
+    public class ColorWriteValue
+    {
+        public int Index { get; set; }  // Color index in the LUT
+        public float R { get; set; }
+        public float G { get; set; }
+        public float B { get; set; }
+        public float A { get; set; } = 1.0f;
     }
 
     public class ColorEditResult
@@ -908,6 +924,14 @@ public static class NiagaraService
             bool modifyG = request.ModifyG ?? true;
             bool modifyB = request.ModifyB ?? true;
             bool modifyA = request.ModifyA ?? true;
+            
+            // Check if batch mode (Colors array provided)
+            bool batchMode = request.Colors != null && request.Colors.Count > 0;
+            Dictionary<int, ColorWriteValue>? colorMap = null;
+            if (batchMode)
+            {
+                colorMap = request.Colors!.ToDictionary(c => c.Index, c => c);
+            }
 
             for (int exportIdx = 0; exportIdx < asset.Exports.Count; exportIdx++)
             {
@@ -938,11 +962,31 @@ public static class NiagaraService
                         if (request.ColorIndexEnd.HasValue && i > request.ColorIndexEnd.Value)
                             continue;
 
-                        var current = colorCurveExport.ShaderLUT.Colors[i];
-                        float newR = modifyR ? request.R : current.R;
-                        float newG = modifyG ? request.G : current.G;
-                        float newB = modifyB ? request.B : current.B;
-                        float newA = modifyA ? request.A : current.A;
+                        float newR, newG, newB, newA;
+                        
+                        if (batchMode && colorMap!.TryGetValue(i, out var batchColor))
+                        {
+                            // Batch mode: use specific color for this index
+                            newR = batchColor.R;
+                            newG = batchColor.G;
+                            newB = batchColor.B;
+                            newA = batchColor.A;
+                        }
+                        else if (batchMode)
+                        {
+                            // Batch mode but no color for this index - skip
+                            continue;
+                        }
+                        else
+                        {
+                            // Flat mode: apply same color with channel filtering
+                            var current = colorCurveExport.ShaderLUT.Colors[i];
+                            newR = modifyR ? request.R : current.R;
+                            newG = modifyG ? request.G : current.G;
+                            newB = modifyB ? request.B : current.B;
+                            newA = modifyA ? request.A : current.A;
+                        }
+                        
                         colorCurveExport.SetColor(i, newR, newG, newB, newA);
                         modifiedCount++;
                     }

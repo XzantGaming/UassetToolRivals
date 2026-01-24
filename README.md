@@ -398,7 +398,7 @@ UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Color --color-range 
 
 **Edit requests by curve type:**
 
-*ColorCurve (RGBA - 4 components):*
+*ColorCurve (RGBA - 4 components) - Flat mode:*
 ```json
 {
   "assetPath": "path/to/NS_Effect.uasset",
@@ -408,6 +408,21 @@ UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Color --color-range 
   "modifyR": true, "modifyG": true, "modifyB": true, "modifyA": true
 }
 ```
+
+*ColorCurve - Batch mode (preserves gradients):*
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "exportIndex": 3,
+  "colors": [
+    {"index": 0, "r": 0.0, "g": 0.5, "b": 0.0, "a": 1.0},
+    {"index": 1, "r": 0.0, "g": 0.6, "b": 0.0, "a": 1.0},
+    {"index": 2, "r": 0.0, "g": 0.7, "b": 0.0, "a": 1.0},
+    {"index": 31, "r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}
+  ]
+}
+```
+> **Tip:** Use `niagara_details --full` to get all color values, modify them, then send back via batch mode.
 
 *Vector3Curve (XYZ/RGB - 3 components):*
 ```json
