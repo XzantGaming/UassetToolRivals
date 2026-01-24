@@ -356,13 +356,48 @@ UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Color --color-range 
 }
 ```
 
-**Edit request (advanced targeting):**
+**Edit requests by curve type:**
+
+*ColorCurve (RGBA - 4 components):*
 ```json
 {
   "assetPath": "path/to/NS_Effect.uasset",
   "r": 0, "g": 10, "b": 0, "a": 1,
   "exportIndex": 3,
-  "colorIndex": 0
+  "colorIndex": 0,
+  "modifyR": true, "modifyG": true, "modifyB": true, "modifyA": true
+}
+```
+
+*Vector3Curve (XYZ/RGB - 3 components):*
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "x": 0, "y": 10, "z": 0,
+  "exportIndex": 22,
+  "valueIndex": 0,
+  "modifyX": true, "modifyY": true, "modifyZ": true
+}
+```
+
+*Vector2DCurve (XY - 2 components):*
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "x": 1.5, "y": 2.0,
+  "exportIndex": 79,
+  "valueIndexStart": 0, "valueIndexEnd": 31,
+  "modifyX": true, "modifyY": false
+}
+```
+
+*FloatCurve (single value):*
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "value": 0.5,
+  "exportIndex": 31,
+  "valueIndex": 0
 }
 ```
 

@@ -266,6 +266,25 @@ public static class NiagaraService
         public bool? ModifyY { get; set; }  // Default: true
     }
 
+    /// <summary>
+    /// Request to edit Vector3 curve values (NiagaraDataInterfaceVectorCurve - XYZ/RGB)
+    /// </summary>
+    public class Vector3CurveEditRequest
+    {
+        public string AssetPath { get; set; } = "";
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
+        public int? ExportIndex { get; set; }
+        public string? ExportNameFilter { get; set; }
+        public int? ValueIndex { get; set; }
+        public int? ValueIndexStart { get; set; }
+        public int? ValueIndexEnd { get; set; }
+        public bool? ModifyX { get; set; }  // Default: true
+        public bool? ModifyY { get; set; }  // Default: true
+        public bool? ModifyZ { get; set; }  // Default: true
+    }
+
     #endregion
 
     #region Public API
@@ -991,6 +1010,89 @@ public static class NiagaraService
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
+    /// <summary>
+    /// Edit Vector3 curve values in a NiagaraSystem file (XYZ/RGB)
+    /// </summary>
+    public static string EditVector3Curve(Vector3CurveEditRequest request, string? usmapPath = null)
+    {
+        var result = new ColorEditResult { Path = request.AssetPath };
+
+        try
+        {
+            if (!File.Exists(request.AssetPath))
+            {
+                result.Success = false;
+                result.Error = $"File not found: {request.AssetPath}";
+                return JsonSerializer.Serialize(result, JsonOptions);
+            }
+
+            Usmap? mappings = LoadMappings(usmapPath);
+            var asset = new UAsset(request.AssetPath, EngineVersion.VER_UE5_3, mappings);
+
+            bool modifyX = request.ModifyX ?? true;
+            bool modifyY = request.ModifyY ?? true;
+            bool modifyZ = request.ModifyZ ?? true;
+            int modifiedCount = 0;
+
+            for (int exportIdx = 0; exportIdx < asset.Exports.Count; exportIdx++)
+            {
+                if (request.ExportIndex.HasValue && request.ExportIndex.Value != exportIdx)
+                    continue;
+
+                var export = asset.Exports[exportIdx];
+                string exportName = export.ObjectName?.Value?.Value ?? "";
+                string className = export.GetExportClassType()?.Value?.Value ?? "";
+
+                if (!string.IsNullOrEmpty(request.ExportNameFilter))
+                {
+                    if (!exportName.Contains(request.ExportNameFilter, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+
+                // Handle structured export
+                if (export is NiagaraDataInterfaceVectorCurveExport vec3CurveExport && vec3CurveExport.ShaderLUT != null)
+                {
+                    for (int i = 0; i < vec3CurveExport.ShaderLUT.Values.Count; i++)
+                    {
+                        if (request.ValueIndex.HasValue && request.ValueIndex.Value != i)
+                            continue;
+                        if (request.ValueIndexStart.HasValue && i < request.ValueIndexStart.Value)
+                            continue;
+                        if (request.ValueIndexEnd.HasValue && i > request.ValueIndexEnd.Value)
+                            continue;
+
+                        var current = vec3CurveExport.ShaderLUT.Values[i];
+                        float newX = modifyX ? request.X : current.X;
+                        float newY = modifyY ? request.Y : current.Y;
+                        float newZ = modifyZ ? request.Z : current.Z;
+                        vec3CurveExport.SetValue(i, newX, newY, newZ);
+                        modifiedCount++;
+                    }
+                }
+                // Fallback for unrecognized types
+                else if (className.Contains("VectorCurve") && export is NormalExport normalExport)
+                {
+                    modifiedCount += ModifyVector3ShaderLUT(normalExport.Data, request.X, request.Y, request.Z, request.ValueIndex, request.ValueIndexStart, request.ValueIndexEnd, modifyX, modifyY, modifyZ);
+                }
+            }
+
+            if (modifiedCount > 0)
+            {
+                asset.Write(request.AssetPath);
+            }
+
+            result.Success = true;
+            result.ModifiedCount = modifiedCount;
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.Error = ex.Message;
+        }
+
+        return JsonSerializer.Serialize(result, JsonOptions);
+    }
+
     #endregion
 
     #region Helper Methods
@@ -1209,6 +1311,41 @@ public static class NiagaraService
                 {
                     if (modifyX) xProp.Value = x;
                     if (modifyY) yProp.Value = y;
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private static int ModifyVector3ShaderLUT(List<PropertyData> properties, float x, float y, float z, int? specificIndex, int? indexStart, int? indexEnd, bool modifyX, bool modifyY, bool modifyZ)
+    {
+        int count = 0;
+
+        foreach (var prop in properties)
+        {
+            if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+            if (prop is not ArrayPropertyData lutArray) continue;
+
+            for (int i = 0; i + 2 < lutArray.Value.Length; i += 3)
+            {
+                int vecIndex = i / 3;
+
+                if (specificIndex.HasValue && specificIndex.Value != vecIndex)
+                    continue;
+                if (indexStart.HasValue && vecIndex < indexStart.Value)
+                    continue;
+                if (indexEnd.HasValue && vecIndex > indexEnd.Value)
+                    continue;
+
+                if (lutArray.Value[i] is FloatPropertyData xProp &&
+                    lutArray.Value[i + 1] is FloatPropertyData yProp &&
+                    lutArray.Value[i + 2] is FloatPropertyData zProp)
+                {
+                    if (modifyX) xProp.Value = x;
+                    if (modifyY) yProp.Value = y;
+                    if (modifyZ) zProp.Value = z;
                     count++;
                 }
             }
