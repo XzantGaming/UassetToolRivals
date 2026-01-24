@@ -74,6 +74,30 @@ public static class NiagaraService
         public string ClassName { get; set; } = "";
         public int ColorCount { get; set; }
         public List<ColorValue> SampleColors { get; set; } = new();
+        
+        // Classification info
+        public string? ParentName { get; set; }           // Name of parent export (emitter/module)
+        public string? ParentChain { get; set; }          // Full parent chain for context
+        public CurveClassification? Classification { get; set; }
+    }
+    
+    /// <summary>
+    /// Classification of what a ColorCurve is used for
+    /// </summary>
+    public class CurveClassification
+    {
+        public string Type { get; set; } = "unknown";     // "color", "opacity", "emission", "unknown"
+        public double Confidence { get; set; }            // 0.0 - 1.0
+        public string Reason { get; set; } = "";          // Why this classification was chosen
+        public bool SuggestEdit { get; set; }             // Whether this curve should be edited for color changes
+        
+        // Value analysis
+        public bool IsGrayscale { get; set; }             // R ≈ G ≈ B
+        public bool IsHDR { get; set; }                   // Values > 1.0
+        public bool HasAlphaVariation { get; set; }       // Alpha varies significantly
+        public bool IsConstant { get; set; }              // All values roughly the same
+        public double MaxValue { get; set; }              // Highest RGB value
+        public double MinValue { get; set; }              // Lowest RGB value
     }
 
     public class ColorValue
@@ -427,8 +451,16 @@ public static class NiagaraService
                         ClassName = className
                     };
 
+                    // Get parent context for classification
+                    var (parentName, parentChain) = GetParentChain(asset, export);
+                    curveInfo.ParentName = parentName;
+                    curveInfo.ParentChain = parentChain;
+
                     var colors = ExtractColorsFromStructuredExport(colorCurveExport);
                     curveInfo.ColorCount = colors.Count;
+
+                    // Classify the curve
+                    curveInfo.Classification = ClassifyColorCurve(colors, exportName, parentName, parentChain);
 
                     if (fullData)
                     {
@@ -1584,6 +1616,183 @@ public static class NiagaraService
         }
 
         return count;
+    }
+
+    #endregion
+
+    #region Classification Helpers
+
+    /// <summary>
+    /// Get the parent chain for an export (traces OuterIndex up the hierarchy)
+    /// </summary>
+    private static (string? parentName, string parentChain) GetParentChain(UAsset asset, Export export)
+    {
+        var chain = new List<string>();
+        string? directParent = null;
+        
+        var currentIndex = export.OuterIndex;
+        int depth = 0;
+        const int maxDepth = 10; // Prevent infinite loops
+        
+        while (currentIndex != null && !currentIndex.IsNull() && depth < maxDepth)
+        {
+            depth++;
+            
+            if (currentIndex.IsExport())
+            {
+                var parentExport = currentIndex.ToExport(asset);
+                var parentName = parentExport.ObjectName?.Value?.Value ?? $"Export_{currentIndex.Index}";
+                chain.Add(parentName);
+                if (directParent == null) directParent = parentName;
+                currentIndex = parentExport.OuterIndex;
+            }
+            else if (currentIndex.IsImport())
+            {
+                var parentImport = currentIndex.ToImport(asset);
+                var parentName = parentImport.ObjectName?.Value?.Value ?? $"Import_{-currentIndex.Index}";
+                chain.Add(parentName);
+                if (directParent == null) directParent = parentName;
+                break; // Imports don't have further OuterIndex we can trace
+            }
+            else
+            {
+                break;
+            }
+        }
+        
+        chain.Reverse();
+        return (directParent, string.Join(" > ", chain));
+    }
+
+    /// <summary>
+    /// Classify a ColorCurve based on its context and values
+    /// </summary>
+    private static CurveClassification ClassifyColorCurve(List<ColorValue> colors, string exportName, string? parentName, string? parentChain)
+    {
+        var classification = new CurveClassification();
+        
+        if (colors.Count == 0)
+        {
+            classification.Type = "empty";
+            classification.Confidence = 1.0;
+            classification.Reason = "No color values";
+            classification.SuggestEdit = false;
+            return classification;
+        }
+
+        // Analyze values
+        double minR = double.MaxValue, maxR = double.MinValue;
+        double minG = double.MaxValue, maxG = double.MinValue;
+        double minB = double.MaxValue, maxB = double.MinValue;
+        double minA = double.MaxValue, maxA = double.MinValue;
+        double sumR = 0, sumG = 0, sumB = 0;
+        
+        foreach (var c in colors)
+        {
+            minR = Math.Min(minR, c.R); maxR = Math.Max(maxR, c.R);
+            minG = Math.Min(minG, c.G); maxG = Math.Max(maxG, c.G);
+            minB = Math.Min(minB, c.B); maxB = Math.Max(maxB, c.B);
+            minA = Math.Min(minA, c.A); maxA = Math.Max(maxA, c.A);
+            sumR += c.R; sumG += c.G; sumB += c.B;
+        }
+        
+        double avgR = sumR / colors.Count;
+        double avgG = sumG / colors.Count;
+        double avgB = sumB / colors.Count;
+        
+        classification.MinValue = Math.Min(Math.Min(minR, minG), minB);
+        classification.MaxValue = Math.Max(Math.Max(maxR, maxG), maxB);
+        classification.IsHDR = classification.MaxValue > 1.0;
+        classification.HasAlphaVariation = (maxA - minA) > 0.1;
+        
+        // Check if grayscale (R ≈ G ≈ B for all colors)
+        bool isGrayscale = true;
+        foreach (var c in colors)
+        {
+            double maxDiff = Math.Max(Math.Abs(c.R - c.G), Math.Max(Math.Abs(c.G - c.B), Math.Abs(c.R - c.B)));
+            if (maxDiff > 0.05) // 5% tolerance
+            {
+                isGrayscale = false;
+                break;
+            }
+        }
+        classification.IsGrayscale = isGrayscale;
+        
+        // Check if constant (all values roughly the same)
+        double rgbRange = Math.Max(maxR - minR, Math.Max(maxG - minG, maxB - minB));
+        classification.IsConstant = rgbRange < 0.05;
+        
+        // Name-based classification
+        string context = $"{exportName} {parentName} {parentChain}".ToLowerInvariant();
+        
+        var reasons = new List<string>();
+        double confidence = 0.5;
+        
+        // Strong indicators for actual color
+        if (context.Contains("colorfromcurve") || context.Contains("color curve"))
+        {
+            classification.Type = "color";
+            confidence = 0.9;
+            reasons.Add("name contains 'ColorFromCurve'");
+        }
+        else if (context.Contains("glow") || context.Contains("emission"))
+        {
+            classification.Type = "emission";
+            confidence = 0.85;
+            reasons.Add("name contains 'Glow' or 'Emission'");
+        }
+        else if (context.Contains("alpha") || context.Contains("opacity") || context.Contains("fade"))
+        {
+            classification.Type = "opacity";
+            confidence = 0.85;
+            reasons.Add("name contains 'Alpha/Opacity/Fade'");
+        }
+        
+        // Value-based adjustments
+        if (classification.IsHDR)
+        {
+            if (classification.Type == "unknown") classification.Type = "emission";
+            confidence = Math.Min(confidence + 0.1, 1.0);
+            reasons.Add($"HDR values (max={classification.MaxValue:F2})");
+        }
+        
+        if (isGrayscale && !classification.IsHDR)
+        {
+            if (classification.Type == "unknown") classification.Type = "opacity";
+            confidence = Math.Max(confidence - 0.1, 0.3);
+            reasons.Add("grayscale values (R≈G≈B)");
+        }
+        
+        if (!isGrayscale && classification.Type == "unknown")
+        {
+            classification.Type = "color";
+            confidence = 0.7;
+            reasons.Add("has color variation (R≠G≠B)");
+        }
+        
+        if (classification.IsConstant)
+        {
+            confidence = Math.Max(confidence - 0.2, 0.3);
+            reasons.Add("constant values (no gradient)");
+        }
+        
+        // Default fallback
+        if (classification.Type == "unknown")
+        {
+            classification.Type = "color";
+            confidence = 0.4;
+            reasons.Add("default classification");
+        }
+        
+        classification.Confidence = confidence;
+        classification.Reason = string.Join("; ", reasons);
+        
+        // Suggest edit for color and emission types with decent confidence
+        classification.SuggestEdit = (classification.Type == "color" || classification.Type == "emission") 
+                                     && confidence >= 0.6 
+                                     && !classification.IsGrayscale;
+        
+        return classification;
     }
 
     #endregion

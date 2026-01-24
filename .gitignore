@@ -2,6 +2,7 @@
 bin/
 obj/
 publish/
+src/UAssetAPI/git_commit.txt
 
 # IDE
 .vs/

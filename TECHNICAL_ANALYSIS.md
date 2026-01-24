@@ -595,6 +595,133 @@ else if (exportClassType == "NiagaraDataInterfaceArrayInt32")
     Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayInt32Export>();
 ```
 
+### ColorCurve Classification System
+
+**Location:** `NiagaraService.cs`
+
+To help frontends determine which ColorCurves should be edited for color changes, a classification system analyzes each curve based on context and values.
+
+#### Classification Output
+
+```json
+{
+  "exportIndex": 3,
+  "exportName": "NiagaraDataInterfaceColorCurve_0",
+  "parentName": "NE_Basic",
+  "parentChain": "NS_104821_Hit_01_CB > NE_Basic",
+  "classification": {
+    "type": "color",
+    "confidence": 0.9,
+    "reason": "name contains 'ColorFromCurve'; HDR values (max=10.50)",
+    "suggestEdit": true,
+    "isGrayscale": false,
+    "isHDR": true,
+    "hasAlphaVariation": false,
+    "isConstant": false,
+    "maxValue": 10.5,
+    "minValue": 0.0
+  }
+}
+```
+
+#### Classification Types
+
+| Type | Description | Edit Recommended |
+|------|-------------|------------------|
+| `color` | Actual particle color | ✅ Yes |
+| `emission` | HDR glow/emission color | ✅ Yes |
+| `opacity` | Alpha/fade curves | ❌ No (grayscale) |
+| `unknown` | Cannot determine | ⚠️ Manual review |
+
+#### Classification Algorithm
+
+**1. Parent Chain Analysis**
+
+Each export has an `OuterIndex` pointing to its parent. The parent chain is traced to build context:
+
+```
+NiagaraDataInterfaceColorCurve_0
+  └─ OuterIndex → NE_Basic (emitter)
+       └─ OuterIndex → NS_104821_Hit_01_CB (system)
+```
+
+**2. Name-Based Classification**
+
+| Pattern in Context | Classification | Confidence |
+|-------------------|----------------|------------|
+| `ColorFromCurve` | `color` | 90% |
+| `Glow`, `Emission` | `emission` | 85% |
+| `Alpha`, `Opacity`, `Fade` | `opacity` | 85% |
+
+**3. Value-Based Analysis**
+
+| Indicator | Effect |
+|-----------|--------|
+| HDR values (max > 1.0) | Boost confidence, suggest `emission` |
+| Grayscale (R ≈ G ≈ B) | Reduce confidence, suggest `opacity` |
+| Color variation (R ≠ G ≠ B) | Suggest `color` |
+| Constant values (no gradient) | Reduce confidence |
+
+**4. SuggestEdit Flag**
+
+The `suggestEdit` boolean is `true` when:
+- Type is `color` or `emission`
+- Confidence ≥ 60%
+- Not grayscale
+
+#### Implementation
+
+```csharp
+private static CurveClassification ClassifyColorCurve(
+    List<ColorValue> colors, 
+    string exportName, 
+    string? parentName, 
+    string? parentChain)
+{
+    // Analyze min/max/range for each channel
+    // Check grayscale: R ≈ G ≈ B within 5% tolerance
+    // Check HDR: max value > 1.0
+    // Check constant: RGB range < 5%
+    
+    // Name-based classification from context string
+    string context = $"{exportName} {parentName} {parentChain}".ToLowerInvariant();
+    
+    // Combine indicators for final classification
+    return classification;
+}
+```
+
+### Batch Color Write Mode
+
+For gradient-preserving edits, the `Colors` array allows writing specific values per index:
+
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "exportIndex": 3,
+  "colors": [
+    {"index": 0, "r": 0.0, "g": 0.5, "b": 0.0, "a": 1.0},
+    {"index": 1, "r": 0.0, "g": 0.6, "b": 0.0, "a": 1.0},
+    {"index": 31, "r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}
+  ]
+}
+```
+
+**Workflow:**
+1. Use `niagara_details --full` to get all color values
+2. Modify colors in frontend (apply hue shift, scale, etc.)
+3. Send back via batch mode - only specified indices are written
+
+### Known Warnings
+
+When editing Niagara assets, you may see warnings like:
+
+```
+[UAssetAPI] Failed to parse export 126: Index was out of range
+```
+
+**This is expected and safe.** Complex Niagara script exports (bytecode, compiled graphs) may fail to parse, but this doesn't affect ColorCurve editing. The edit will succeed as long as the ColorCurve exports themselves parse correctly.
+
 ---
 
 ## Complete Niagara Data Interface Support
