@@ -474,6 +474,60 @@ else if (exportClassType == "NiagaraDataInterfaceColorCurve" ||
 }
 ```
 
+### Understanding ShaderLUT Contents
+
+**Important:** Not all ShaderLUT arrays control visible colors. A typical NiagaraSystem file contains multiple `NiagaraDataInterfaceColorCurve` exports, each with its own ShaderLUT. These can control:
+
+| LUT Type | Typical Export Name Pattern | What It Controls |
+|----------|----------------------------|------------------|
+| **Color** | `*Color*`, `*Glow*`, `*Emissive*` | Actual visible particle colors |
+| **Alpha/Opacity** | `*Alpha*`, `*Opacity*`, `*Fade*` | Transparency over lifetime |
+| **Scale** | `*Scale*`, `*Size*` | Particle size multipliers |
+| **Velocity** | `*Speed*`, `*Velocity*` | Movement parameters |
+| **Timing** | `*Lifetime*`, `*Spawn*` | Timing curves |
+
+**Best Practice:** Use `niagara_details` to inspect export names before editing, then use `--export-name` to target only color-related LUTs.
+
+### ShaderLUT Memory Layout
+
+```
+ShaderLUT Array (128 colors = 512 floats):
+┌─────────────────────────────────────────────────────────┐
+│ Color 0: [R₀, G₀, B₀, A₀]  (indices 0-3)               │
+│ Color 1: [R₁, G₁, B₁, A₁]  (indices 4-7)               │
+│ Color 2: [R₂, G₂, B₂, A₂]  (indices 8-11)              │
+│ ...                                                     │
+│ Color 127: [R₁₂₇, G₁₂₇, B₁₂₇, A₁₂₇]  (indices 508-511)│
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Color Index** = Float Index ÷ 4
+- **Typical LUT Size**: 128 colors (512 floats) for smooth gradients
+- **HDR Values**: Color values can exceed 1.0 for HDR/bloom effects (e.g., 10.0 for bright glow)
+
+### Selective Editing Strategy
+
+When modifying particle effects, consider:
+
+1. **Preserve Alpha Gradients**: Use `--channels rgb` to keep original alpha/fade curves
+2. **Target Specific LUTs**: Use `--export-name` to only modify color-related exports
+3. **Gradient Preservation**: Use `--color-range` to modify only part of a gradient
+4. **Single Color Edits**: Use `--color-index` for precise control
+
+**Example Workflow:**
+```bash
+# 1. Inspect the file to see all LUTs
+UAssetTool niagara_details NS_Effect.uasset mappings.usmap
+
+# Output shows:
+# Export 3: "NiagaraDataInterfaceColorCurve_Glow" - 128 colors
+# Export 5: "NiagaraDataInterfaceColorCurve_Alpha" - 128 colors  
+# Export 7: "NiagaraDataInterfaceColorCurve_Scale" - 64 colors
+
+# 2. Only modify the Glow LUT, preserve RGB only
+UAssetTool niagara_edit NS_Effect.uasset 0 10 0 1 --export-name Glow --channels rgb
+```
+
 ### Frontend API
 
 `NiagaraService.cs` provides JSON-based methods for GUI integration:
@@ -482,7 +536,33 @@ else if (exportClassType == "NiagaraDataInterfaceColorCurve" ||
 |--------|---------|
 | `ListNiagaraFiles()` | List NS files with color curve counts |
 | `GetNiagaraDetails()` | Get color curves with sample colors |
-| `EditNiagaraColors()` | Modify colors with optional targeting |
+| `EditNiagaraColors()` | Modify colors with selective targeting |
+
+### ColorEditRequest Options
+
+```csharp
+public class ColorEditRequest
+{
+    public string AssetPath { get; set; }
+    public float R { get; set; }
+    public float G { get; set; }
+    public float B { get; set; }
+    public float A { get; set; } = 1.0f;
+    
+    // Selective targeting
+    public int? ExportIndex { get; set; }        // Target by export index
+    public string? ExportNameFilter { get; set; } // Target by name pattern
+    public int? ColorIndex { get; set; }          // Single color index
+    public int? ColorIndexStart { get; set; }     // Range start (inclusive)
+    public int? ColorIndexEnd { get; set; }       // Range end (inclusive)
+    
+    // Per-channel control
+    public bool? ModifyR { get; set; }  // Default: true
+    public bool? ModifyG { get; set; }  // Default: true
+    public bool? ModifyB { get; set; }  // Default: true
+    public bool? ModifyA { get; set; }  // Default: true
+}
+```
 
 ### Implementation Files
 
@@ -639,6 +719,62 @@ FIoChunkId chunkId = new FIoChunkId(packageId, 0, EIoChunkType.ExportBundleData)
 // Bulk data chunk ID
 FIoChunkId bulkChunkId = new FIoChunkId(packageId, 0, EIoChunkType.BulkData);
 ```
+
+### Container Header Chunk
+
+The Container Header chunk (type 5) contains metadata about all packages in the container. It is written as the last chunk in the UCAS file.
+
+**Critical:** The Container Header must NOT be compressed. Compressing it causes the game to fail loading mods with 4+ packages.
+
+```csharp
+// In IoStoreWriter.Complete()
+if (_containerHeaderVersion.HasValue && _packageStoreEntries.Count > 0)
+{
+    byte[] containerHeaderData = BuildContainerHeader();
+    var headerChunkId = FIoChunkId.Create(_containerId.Value, 0, EIoChunkType.ContainerHeader);
+    WriteChunkUncompressed(headerChunkId, containerHeaderData);  // NO compression!
+}
+```
+
+### Container Header Structure
+
+```
+┌─────────────────────────────────────────┐
+│ Magic: "IoCn" (0x496F436E)              │  4 bytes
+│ Version: uint32                         │  4 bytes
+│ Container ID: uint64                    │  8 bytes
+├─────────────────────────────────────────┤
+│ Package Count: uint32                   │  4 bytes
+│ Package IDs: FPackageId[]               │  8 bytes each
+├─────────────────────────────────────────┤
+│ Store Entries Buffer Length: uint32     │  4 bytes
+│ Store Entries Buffer:                   │
+│   - Fixed entries (16 bytes each)       │
+│   - Array data (imported packages)      │
+└─────────────────────────────────────────┘
+```
+
+### Store Entry Serialization
+
+Each package has a store entry with imported package references. The serialization uses a two-pass approach to avoid buffer corruption:
+
+```csharp
+// Pass 1: Calculate offsets for all array data
+int fixedDataSize = packages.Count * entrySize;  // 16 bytes per entry
+int currentArrayOffset = fixedDataSize;
+
+foreach (var entry in packages)
+{
+    arrayDataOffsets.Add(currentArrayOffset);
+    currentArrayOffset += entry.ImportedPackages.Count * 8;  // FPackageId = 8 bytes
+}
+
+// Pass 2: Write fixed entries, then array data sequentially
+// Fixed entries contain relative offsets to their array data
+// Array data is written contiguously after all fixed entries
+```
+
+**Bug Fixed:** The original implementation used buffer position jumping which corrupted data when there were 4+ packages with imported packages. The two-pass approach writes all fixed entries first, then all array data sequentially.
 
 ---
 

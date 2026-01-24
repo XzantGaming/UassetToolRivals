@@ -85,8 +85,15 @@ public static class NiagaraService
         public float G { get; set; }
         public float B { get; set; }
         public float A { get; set; } = 1.0f;
-        public int? ExportIndex { get; set; }  // Optional: only edit specific export
-        public int? ColorIndex { get; set; }   // Optional: only edit specific color
+        public int? ExportIndex { get; set; }  // Optional: only edit specific export by index
+        public string? ExportNameFilter { get; set; }  // Optional: only edit exports matching this pattern (case-insensitive)
+        public int? ColorIndex { get; set; }   // Optional: only edit specific color by index
+        public int? ColorIndexStart { get; set; }  // Optional: start of color index range (inclusive)
+        public int? ColorIndexEnd { get; set; }    // Optional: end of color index range (inclusive)
+        public bool? ModifyR { get; set; }  // Optional: if false, don't modify R channel (default: true)
+        public bool? ModifyG { get; set; }  // Optional: if false, don't modify G channel (default: true)
+        public bool? ModifyB { get; set; }  // Optional: if false, don't modify B channel (default: true)
+        public bool? ModifyA { get; set; }  // Optional: if false, don't modify A channel (default: true)
     }
 
     public class ColorEditResult
@@ -329,18 +336,39 @@ public static class NiagaraService
             var targetColor = new FLinearColor(request.R, request.G, request.B, request.A);
             int modifiedCount = 0;
 
+            // Determine which channels to modify (default: all)
+            bool modifyR = request.ModifyR ?? true;
+            bool modifyG = request.ModifyG ?? true;
+            bool modifyB = request.ModifyB ?? true;
+            bool modifyA = request.ModifyA ?? true;
+
             for (int exportIdx = 0; exportIdx < asset.Exports.Count; exportIdx++)
             {
-                // Skip if targeting specific export
+                // Skip if targeting specific export by index
                 if (request.ExportIndex.HasValue && request.ExportIndex.Value != exportIdx)
                     continue;
 
                 var export = asset.Exports[exportIdx];
+                string exportName = export.ObjectName?.Value?.Value ?? "";
                 string className = export.GetExportClassType()?.Value?.Value ?? "";
+
+                // Skip if export name doesn't match filter pattern
+                if (!string.IsNullOrEmpty(request.ExportNameFilter))
+                {
+                    if (!exportName.Contains(request.ExportNameFilter, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
 
                 if (className.Contains("ColorCurve") && export is NormalExport normalExport)
                 {
-                    modifiedCount += ModifyShaderLUT(normalExport.Data, targetColor, request.ColorIndex);
+                    modifiedCount += ModifyShaderLUTSelective(
+                        normalExport.Data, 
+                        targetColor, 
+                        request.ColorIndex,
+                        request.ColorIndexStart,
+                        request.ColorIndexEnd,
+                        modifyR, modifyG, modifyB, modifyA
+                    );
                 }
             }
 
@@ -443,6 +471,29 @@ public static class NiagaraService
 
     private static int ModifyShaderLUT(List<PropertyData> properties, FLinearColor targetColor, int? specificColorIndex = null)
     {
+        return ModifyShaderLUTSelective(properties, targetColor, specificColorIndex, null, null, true, true, true, true);
+    }
+
+    /// <summary>
+    /// Modify ShaderLUT with selective filtering options.
+    /// </summary>
+    /// <param name="properties">The property list containing ShaderLUT</param>
+    /// <param name="targetColor">Target color values</param>
+    /// <param name="specificColorIndex">If set, only modify this exact color index</param>
+    /// <param name="colorIndexStart">If set, start of color index range (inclusive)</param>
+    /// <param name="colorIndexEnd">If set, end of color index range (inclusive)</param>
+    /// <param name="modifyR">Whether to modify R channel</param>
+    /// <param name="modifyG">Whether to modify G channel</param>
+    /// <param name="modifyB">Whether to modify B channel</param>
+    /// <param name="modifyA">Whether to modify A channel</param>
+    private static int ModifyShaderLUTSelective(
+        List<PropertyData> properties, 
+        FLinearColor targetColor, 
+        int? specificColorIndex,
+        int? colorIndexStart,
+        int? colorIndexEnd,
+        bool modifyR, bool modifyG, bool modifyB, bool modifyA)
+    {
         int count = 0;
 
         foreach (var prop in properties)
@@ -454,8 +505,14 @@ public static class NiagaraService
             {
                 int colorIndex = i / 4;
 
-                // Skip if targeting specific color
+                // Skip if targeting specific color index
                 if (specificColorIndex.HasValue && specificColorIndex.Value != colorIndex)
+                    continue;
+
+                // Skip if outside color index range
+                if (colorIndexStart.HasValue && colorIndex < colorIndexStart.Value)
+                    continue;
+                if (colorIndexEnd.HasValue && colorIndex > colorIndexEnd.Value)
                     continue;
 
                 if (lutArray.Value[i] is FloatPropertyData rProp &&
@@ -463,10 +520,10 @@ public static class NiagaraService
                     lutArray.Value[i + 2] is FloatPropertyData bProp &&
                     lutArray.Value[i + 3] is FloatPropertyData aProp)
                 {
-                    rProp.Value = targetColor.R;
-                    gProp.Value = targetColor.G;
-                    bProp.Value = targetColor.B;
-                    aProp.Value = targetColor.A;
+                    if (modifyR) rProp.Value = targetColor.R;
+                    if (modifyG) gProp.Value = targetColor.G;
+                    if (modifyB) bProp.Value = targetColor.B;
+                    if (modifyA) aProp.Value = targetColor.A;
                     count++;
                 }
             }

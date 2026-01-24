@@ -248,7 +248,7 @@ UAssetTool niagara_list <directory> [usmap_path]
 UAssetTool niagara_details <asset_path> [usmap_path]
 
 # Edit colors (simple mode)
-UAssetTool niagara_edit <asset_path> <R> <G> <B> [A] [usmap_path]
+UAssetTool niagara_edit <asset_path> <R> <G> <B> [A] [options...] [usmap_path]
 
 # Edit colors (JSON request mode)
 UAssetTool niagara_edit '{"assetPath":"...","r":0,"g":10,"b":0,"a":1}' [usmap_path]
@@ -256,6 +256,56 @@ UAssetTool niagara_edit '{"assetPath":"...","r":0,"g":10,"b":0,"a":1}' [usmap_pa
 # Batch modify all colors in directory
 UAssetTool modify_colors <directory> <usmap_path> [R G B A]
 ```
+
+### Selective LUT Targeting
+
+NiagaraSystem files contain multiple ShaderLUT arrays that control different aspects of particle effects. Not all LUTs control visible colors - some control timing, scale, opacity gradients, etc. Use selective targeting to modify only the LUTs you want:
+
+**CLI Options:**
+```bash
+# Only modify exports with "Glow" in the name
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Glow
+
+# Only modify specific export by index
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-index 5
+
+# Only modify colors 0-10 in the LUT (useful for gradients)
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --color-range 0 10
+
+# Only modify a single color at index 0
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --color-index 0
+
+# Only modify RGB channels, leave Alpha unchanged
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --channels rgb
+
+# Combine multiple filters
+UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Color --color-range 0 10 --channels rgb
+```
+
+**JSON Request Options:**
+```json
+{
+  "assetPath": "path/to/NS_Effect.uasset",
+  "r": 0, "g": 10, "b": 0, "a": 1,
+  "exportNameFilter": "ColorCurve_Glow",
+  "exportIndex": 5,
+  "colorIndexStart": 0,
+  "colorIndexEnd": 10,
+  "modifyR": true,
+  "modifyG": true,
+  "modifyB": false,
+  "modifyA": false
+}
+```
+
+| Option | CLI Flag | Description |
+|--------|----------|-------------|
+| `exportIndex` | `--export-index <n>` | Target specific export by index |
+| `exportNameFilter` | `--export-name <pattern>` | Filter exports by name (case-insensitive) |
+| `colorIndex` | `--color-index <n>` | Modify only this color index |
+| `colorIndexStart` | `--color-range <start> <end>` | Start of color range (inclusive) |
+| `colorIndexEnd` | (part of --color-range) | End of color range (inclusive) |
+| `modifyR/G/B/A` | `--channels <rgba>` | Which channels to modify |
 
 ### JSON Response Examples
 

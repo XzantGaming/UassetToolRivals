@@ -1629,9 +1629,26 @@ public class Program
         if (args.Length < 2)
         {
             Console.Error.WriteLine("Usage: UAssetTool niagara_edit <json_request> [usmap_path]");
-            Console.Error.WriteLine("       UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [usmap_path]");
+            Console.Error.WriteLine("       UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [options...] [usmap_path]");
+            Console.Error.WriteLine();
             Console.Error.WriteLine("JSON request format: {\"assetPath\":\"...\",\"r\":0,\"g\":10,\"b\":0,\"a\":1}");
-            Console.Error.WriteLine("Optional: exportIndex, colorIndex to target specific colors");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Selective targeting options (JSON):");
+            Console.Error.WriteLine("  exportIndex: int       - Only edit specific export by index");
+            Console.Error.WriteLine("  exportNameFilter: str  - Only edit exports matching this pattern (case-insensitive)");
+            Console.Error.WriteLine("  colorIndex: int        - Only edit specific color by index");
+            Console.Error.WriteLine("  colorIndexStart: int   - Start of color index range (inclusive)");
+            Console.Error.WriteLine("  colorIndexEnd: int     - End of color index range (inclusive)");
+            Console.Error.WriteLine("  modifyR: bool          - Whether to modify R channel (default: true)");
+            Console.Error.WriteLine("  modifyG: bool          - Whether to modify G channel (default: true)");
+            Console.Error.WriteLine("  modifyB: bool          - Whether to modify B channel (default: true)");
+            Console.Error.WriteLine("  modifyA: bool          - Whether to modify A channel (default: true)");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("CLI options (simple mode):");
+            Console.Error.WriteLine("  --export-name <pattern>  - Filter by export name");
+            Console.Error.WriteLine("  --export-index <n>       - Target specific export index");
+            Console.Error.WriteLine("  --color-range <start> <end> - Only modify colors in range");
+            Console.Error.WriteLine("  --channels <rgba>        - Which channels to modify (e.g., 'rgb', 'rg', 'a')");
             return 1;
         }
 
@@ -1649,10 +1666,10 @@ public class Program
         }
         else
         {
-            // Simple mode: asset_path r g b [a] [usmap]
+            // Simple mode: asset_path r g b [a] [options...] [usmap]
             if (args.Length < 5)
             {
-                Console.Error.WriteLine("Usage: UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [usmap_path]");
+                Console.Error.WriteLine("Usage: UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [options...] [usmap_path]");
                 return 1;
             }
 
@@ -1673,8 +1690,6 @@ public class Program
                 nextArg = 6;
             }
 
-            usmapPath = args.Length > nextArg ? args[nextArg] : null;
-
             var request = new NiagaraService.ColorEditRequest
             {
                 AssetPath = assetPath,
@@ -1683,6 +1698,47 @@ public class Program
                 B = b,
                 A = a
             };
+
+            // Parse optional arguments
+            for (int i = nextArg; i < args.Length; i++)
+            {
+                string arg = args[i];
+                
+                if (arg == "--export-name" && i + 1 < args.Length)
+                {
+                    request.ExportNameFilter = args[++i];
+                }
+                else if (arg == "--export-index" && i + 1 < args.Length)
+                {
+                    if (int.TryParse(args[++i], out int exportIdx))
+                        request.ExportIndex = exportIdx;
+                }
+                else if (arg == "--color-range" && i + 2 < args.Length)
+                {
+                    if (int.TryParse(args[++i], out int start))
+                        request.ColorIndexStart = start;
+                    if (int.TryParse(args[++i], out int end))
+                        request.ColorIndexEnd = end;
+                }
+                else if (arg == "--color-index" && i + 1 < args.Length)
+                {
+                    if (int.TryParse(args[++i], out int colorIdx))
+                        request.ColorIndex = colorIdx;
+                }
+                else if (arg == "--channels" && i + 1 < args.Length)
+                {
+                    string channels = args[++i].ToLowerInvariant();
+                    request.ModifyR = channels.Contains('r');
+                    request.ModifyG = channels.Contains('g');
+                    request.ModifyB = channels.Contains('b');
+                    request.ModifyA = channels.Contains('a');
+                }
+                else if (!arg.StartsWith("--") && usmapPath == null)
+                {
+                    // Assume it's the usmap path if it doesn't start with --
+                    usmapPath = arg;
+                }
+            }
 
             string json = NiagaraService.EditNiagaraColors(request, usmapPath);
             Console.WriteLine(json);
