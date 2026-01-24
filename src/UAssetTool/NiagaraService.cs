@@ -137,16 +137,23 @@ public static class NiagaraService
                         LastModified = fileInfo.LastWriteTime
                     };
 
-                    // Quick scan for color curve count
+                    // Quick scan for color curve count using structured exports
                     var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings);
                     foreach (var export in asset.Exports)
                     {
-                        string className = export.GetExportClassType()?.Value?.Value ?? "";
-                        if (className.Contains("ColorCurve"))
+                        // Use structured NiagaraDataInterfaceColorCurveExport if available
+                        if (export is NiagaraDataInterfaceColorCurveExport colorCurveExport)
                         {
                             info.ColorCurveCount++;
-                            if (export is NormalExport normalExport)
+                            info.TotalColorCount += colorCurveExport.ColorCount;
+                        }
+                        else
+                        {
+                            // Fallback for unrecognized color curve types
+                            string className = export.GetExportClassType()?.Value?.Value ?? "";
+                            if (className.Contains("ColorCurve") && export is NormalExport normalExport)
                             {
+                                info.ColorCurveCount++;
                                 info.TotalColorCount += CountColorsInExport(normalExport);
                             }
                         }
@@ -202,7 +209,8 @@ public static class NiagaraService
                 var export = asset.Exports[i];
                 string className = export.GetExportClassType()?.Value?.Value ?? "";
 
-                if (className.Contains("ColorCurve") && export is NormalExport normalExport)
+                // Use structured NiagaraDataInterfaceColorCurveExport if available
+                if (export is NiagaraDataInterfaceColorCurveExport colorCurveExport)
                 {
                     var curveInfo = new ColorCurveInfo
                     {
@@ -211,7 +219,34 @@ public static class NiagaraService
                         ClassName = className
                     };
 
-                    // Extract color data
+                    // Extract color data from structured export
+                    var colors = ExtractColorsFromStructuredExport(colorCurveExport);
+                    curveInfo.ColorCount = colors.Count;
+
+                    // Sample first, middle, and last colors
+                    if (colors.Count > 0)
+                    {
+                        curveInfo.SampleColors.Add(colors[0]);
+                        if (colors.Count > 2)
+                            curveInfo.SampleColors.Add(colors[colors.Count / 2]);
+                        if (colors.Count > 1)
+                            curveInfo.SampleColors.Add(colors[colors.Count - 1]);
+                    }
+
+                    result.ColorCurves.Add(curveInfo);
+                    result.TotalColorCount += curveInfo.ColorCount;
+                }
+                else if (className.Contains("ColorCurve") && export is NormalExport normalExport)
+                {
+                    // Fallback for unrecognized color curve types
+                    var curveInfo = new ColorCurveInfo
+                    {
+                        ExportIndex = i,
+                        ExportName = export.ObjectName?.Value?.Value ?? $"Export_{i}",
+                        ClassName = className
+                    };
+
+                    // Extract color data from properties
                     var colors = ExtractColorsFromExport(normalExport);
                     curveInfo.ColorCount = colors.Count;
 
@@ -380,6 +415,27 @@ public static class NiagaraService
                     });
                 }
             }
+        }
+
+        return colors;
+    }
+
+    private static List<ColorValue> ExtractColorsFromStructuredExport(NiagaraDataInterfaceColorCurveExport export)
+    {
+        var colors = new List<ColorValue>();
+        if (export.ShaderLUT == null) return colors;
+
+        for (int i = 0; i < export.ShaderLUT.Colors.Count; i++)
+        {
+            var color = export.ShaderLUT.Colors[i];
+            colors.Add(new ColorValue
+            {
+                Index = i,
+                R = color.R,
+                G = color.G,
+                B = color.B,
+                A = color.A
+            });
         }
 
         return colors;

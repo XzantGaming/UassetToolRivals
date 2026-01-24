@@ -208,12 +208,71 @@ public class IoStoreWriter : IDisposable
     }
 
     /// <summary>
+    /// Write a chunk without compression (used for Container Header which must not be compressed).
+    /// </summary>
+    private void WriteChunkUncompressed(FIoChunkId chunkId, byte[] data)
+    {
+        long chunkStartOffset = _casStream.Position;
+        int startBlock = _compressionBlocks.Count;
+
+        // Create BLAKE3 hasher for chunk hash
+        using var hasher = Hasher.New();
+
+        // Write data in blocks without compression
+        long blockOffset = chunkStartOffset;
+        foreach (var block in ChunkData(data, (int)_compressionBlockSize))
+        {
+            hasher.Update(block);
+
+            byte[] finalBytes = block;
+
+            // Apply AES encryption if enabled
+            if (_enableEncryption && _aesKey != null)
+            {
+                int paddedLength = (block.Length + 15) & ~15;
+                byte[] paddedData = new byte[paddedLength];
+                Array.Copy(block, paddedData, block.Length);
+                finalBytes = EncryptAes(paddedData);
+            }
+
+            _casStream.Write(finalBytes, 0, finalBytes.Length);
+
+            // Add compression block entry with NO compression (method = 0)
+            _compressionBlocks.Add(new FIoStoreTocCompressedBlockEntry(
+                (ulong)blockOffset,
+                (uint)block.Length,  // compressed size = uncompressed size (no compression)
+                (uint)block.Length,
+                0  // compression method = None
+            ));
+
+            blockOffset += finalBytes.Length;
+        }
+
+        // Create chunk meta with BLAKE3 hash
+        byte[] hashBytes = hasher.Finalize().AsSpan().ToArray();
+        var meta = new FIoStoreTocEntryMeta
+        {
+            ChunkHash = new FIoChunkHash(hashBytes),
+            Flags = 0
+        };
+
+        // Add to TOC
+        _chunks.Add(chunkId);
+        _chunkOffsetLengths.Add(new FIoOffsetAndLength(
+            (ulong)(startBlock * _compressionBlockSize),
+            (ulong)data.Length
+        ));
+        _chunkMetas.Add(meta);
+    }
+
+    /// <summary>
     /// Complete and write the container.
     /// Reference: retoc-rivals/src/iostore_writer.rs finalize()
     /// </summary>
     public void Complete()
     {
         // Write container header chunk if needed
+        // Container Header should NOT be compressed - write it directly without compression
         if (_containerHeaderVersion.HasValue && _packageStoreEntries.Count > 0)
         {
             byte[] containerHeaderData = BuildContainerHeader();
@@ -223,7 +282,7 @@ public class IoStoreWriter : IDisposable
             Array.Copy(containerHeaderData, aligned, containerHeaderData.Length);
 
             var headerChunkId = FIoChunkId.Create(_containerId.Value, 0, EIoChunkType.ContainerHeader);
-            WriteChunk(headerChunkId, null, aligned);
+            WriteChunkUncompressed(headerChunkId, aligned);
         }
 
         // Build and write TOC

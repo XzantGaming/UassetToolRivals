@@ -296,6 +296,10 @@ public class FIoContainerHeader
     /// <summary>
     /// Serialize store entries in the complex UE format.
     /// Reference: retoc-rivals/src/container_header.rs StoreEntries::serialize()
+    /// 
+    /// Uses two-pass approach to avoid buffer corruption with 4+ packages:
+    /// Pass 1: Calculate offsets for all array data
+    /// Pass 2: Write fixed entries, then write all array data sequentially
     /// </summary>
     private void SerializeStoreEntries(BinaryWriter writer)
     {
@@ -332,15 +336,29 @@ public class FIoContainerHeader
                 break;
         }
 
-        // Build the store entries buffer
+        // Pass 1: Calculate where each entry's array data will be located
+        int fixedDataSize = Packages.Count * entrySize;
+        var arrayDataOffsets = new List<int>(); // Offset from start of buffer for each entry's array data
+        int currentArrayOffset = fixedDataSize;
+        
+        foreach (var (_, entry) in Packages)
+        {
+            arrayDataOffsets.Add(currentArrayOffset);
+            currentArrayOffset += entry.ImportedPackages.Count * 8; // FPackageId is 8 bytes
+            if (Version > EIoContainerHeaderVersion.Initial)
+            {
+                currentArrayOffset += entry.ShaderMapHashes.Count * 20; // FSHAHash is 20 bytes
+            }
+        }
+
+        // Pass 2: Build the buffer - write fixed entries first, then array data
         using var bufferMs = new MemoryStream();
         using var bufferWriter = new BinaryWriter(bufferMs);
 
-        // Calculate array data offset (after all fixed-size entries)
-        int arrayOffset = Packages.Count * entrySize;
-
-        foreach (var (_, entry) in Packages)
+        // Write all fixed entries
+        for (int i = 0; i < Packages.Count; i++)
         {
+            var (_, entry) = Packages[i];
             long entryOffset = bufferMs.Position;
 
             // Write fixed part of entry
@@ -362,7 +380,7 @@ public class FIoContainerHeader
             // Imported packages array view
             if (entry.ImportedPackages.Count > 0)
             {
-                int offset = arrayOffset - (int)entryOffset - memberOffset;
+                int offset = arrayDataOffsets[i] - (int)entryOffset - memberOffset;
                 bufferWriter.Write((uint)entry.ImportedPackages.Count);
                 bufferWriter.Write((uint)offset);
             }
@@ -377,7 +395,8 @@ public class FIoContainerHeader
             {
                 if (entry.ShaderMapHashes.Count > 0)
                 {
-                    int offset = arrayOffset - (int)entryOffset - memberOffset - 8;
+                    int shaderOffset = arrayDataOffsets[i] + entry.ImportedPackages.Count * 8;
+                    int offset = shaderOffset - (int)entryOffset - memberOffset - 8;
                     bufferWriter.Write((uint)entry.ShaderMapHashes.Count);
                     bufferWriter.Write((uint)offset);
                 }
@@ -387,11 +406,11 @@ public class FIoContainerHeader
                     bufferWriter.Write(0u); // offset
                 }
             }
+        }
 
-            // Save position and write array data
-            long savedPos = bufferMs.Position;
-            bufferMs.Position = arrayOffset;
-
+        // Write all array data sequentially (no position jumping)
+        foreach (var (_, entry) in Packages)
+        {
             // Write imported packages
             foreach (var pkg in entry.ImportedPackages)
             {
@@ -406,12 +425,6 @@ public class FIoContainerHeader
                     bufferWriter.Write(hash);
                 }
             }
-
-            // Update array offset
-            arrayOffset = (int)bufferMs.Position;
-
-            // Restore position for next entry
-            bufferMs.Position = savedPos;
         }
 
         // Write buffer with length prefix

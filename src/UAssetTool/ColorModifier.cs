@@ -39,11 +39,20 @@ public static class ColorModifier
             // Process all exports
             foreach (var export in asset.Exports)
             {
-                if (export is NormalExport normalExport && normalExport.Data != null)
+                // Use structured NiagaraDataInterfaceColorCurveExport if available
+                if (export is NiagaraDataInterfaceColorCurveExport colorCurveExport)
+                {
+                    if (colorCurveExport.ShaderLUT != null)
+                    {
+                        colorCurveExport.SetAllColors(r, g, b, a);
+                        modifiedCount += colorCurveExport.ColorCount;
+                    }
+                }
+                else if (export is NormalExport normalExport && normalExport.Data != null)
                 {
                     string className = export.GetExportClassType()?.Value?.Value ?? "";
                     
-                    // NiagaraDataInterfaceColorCurve: colors stored in ShaderLUT array
+                    // Fallback: NiagaraDataInterfaceColorCurve not parsed as structured export
                     if (className.Contains("ColorCurve"))
                     {
                         modifiedCount += ModifyShaderLUT(normalExport.Data, targetColor);

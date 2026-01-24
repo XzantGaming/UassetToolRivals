@@ -936,6 +936,11 @@ namespace UAssetAPI
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<StaticMeshExport>();
                         }
+                        else if (exportClassType == "NiagaraDataInterfaceColorCurve" || 
+                                 exportClassType.EndsWith("DataInterfaceColorCurve"))
+                        {
+                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceColorCurveExport>();
+                        }
                         else if (exportClassType.EndsWith("BlueprintGeneratedClass"))
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<ClassExport>();

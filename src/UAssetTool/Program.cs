@@ -610,6 +610,16 @@ public class Program
             {
                 uassetFiles.Add(Path.GetFullPath(args[i]));
             }
+            else if (Directory.Exists(args[i]))
+            {
+                // Support directory input - recursively find all .uasset files
+                var dirFiles = Directory.GetFiles(args[i], "*.uasset", SearchOption.AllDirectories);
+                foreach (var f in dirFiles)
+                {
+                    uassetFiles.Add(Path.GetFullPath(f));
+                }
+                Console.Error.WriteLine($"Found {dirFiles.Length} .uasset files in directory: {args[i]}");
+            }
             else if (File.Exists(args[i]))
             {
                 Console.Error.WriteLine($"Warning: Skipping non-.uasset file: {args[i]}");

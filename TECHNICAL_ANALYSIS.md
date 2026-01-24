@@ -413,6 +413,67 @@ if (prop.Name?.Value?.Value == "ShaderLUT" && prop is ArrayPropertyData lutArray
 
 The USMAP mappings define ShaderLUT as `Array<FloatProperty>` for GPU efficiency. The baked LUT is a raw float buffer that shaders sample directly, not structured LinearColor objects.
 
+### Structured Export Type
+
+Like `SkeletalMeshExport` and `StaticMeshExport`, we implement a dedicated export class for consistent handling:
+
+**`NiagaraDataInterfaceColorCurveExport`** - Dedicated export type for color curve data interfaces.
+
+```csharp
+public class NiagaraDataInterfaceColorCurveExport : NormalExport
+{
+    public FShaderLUT ShaderLUT { get; set; }
+    
+    public override void Read(AssetBinaryReader reader, int nextStarting)
+    {
+        base.Read(reader, nextStarting);
+        ParseShaderLUT(); // Extract structured colors from properties
+    }
+    
+    public override void Write(AssetBinaryWriter writer)
+    {
+        SyncShaderLUTToProperties(); // Sync back before writing
+        base.Write(writer);
+    }
+    
+    public void SetAllColors(float r, float g, float b, float a);
+    public void SetColor(int index, float r, float g, float b, float a);
+    public FShaderLUTColor? GetColor(int index);
+    public int ColorCount { get; }
+}
+```
+
+### FShaderLUT Struct
+
+```csharp
+public struct FShaderLUTColor
+{
+    public float R, G, B, A;
+    public static int SerializedSize => 16; // 4 floats × 4 bytes
+}
+
+public class FShaderLUT
+{
+    public List<FShaderLUTColor> Colors;
+    public int FloatCount => Colors.Count * 4;
+    
+    public void SetAllColors(float r, float g, float b, float a);
+    public void SetColor(int index, float r, float g, float b, float a);
+}
+```
+
+### Export Type Resolution
+
+Added to `UAsset.cs` alongside other structured exports:
+
+```csharp
+else if (exportClassType == "NiagaraDataInterfaceColorCurve" || 
+         exportClassType.EndsWith("DataInterfaceColorCurve"))
+{
+    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceColorCurveExport>();
+}
+```
+
 ### Frontend API
 
 `NiagaraService.cs` provides JSON-based methods for GUI integration:
@@ -422,6 +483,15 @@ The USMAP mappings define ShaderLUT as `Array<FloatProperty>` for GPU efficiency
 | `ListNiagaraFiles()` | List NS files with color curve counts |
 | `GetNiagaraDetails()` | Get color curves with sample colors |
 | `EditNiagaraColors()` | Modify colors with optional targeting |
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `NiagaraStructs.cs` | `FShaderLUT`, `FShaderLUTColor`, `FRichCurve` structs |
+| `NiagaraDataInterfaceColorCurveExport.cs` | Structured export type |
+| `ColorModifier.cs` | Uses structured export for color modification |
+| `NiagaraService.cs` | Frontend JSON API |
 
 ---
 
