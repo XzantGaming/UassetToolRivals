@@ -236,11 +236,68 @@ int mipSize = blocksX * blocksY * bytesPerBlock;
 
 ## SkeletalMesh Processing
 
-### FGameplayTagContainer Padding
+### Overview
 
-**Location:** `ZenConverter.cs` - `PatchSkeletalMeshMaterialSlots()`
+**Location:** `SkeletalMeshExport.cs`, `SkeletalMeshStructs.cs`
 
-Marvel Rivals expects an `FGameplayTagContainer` after each `FSkeletalMaterial` in the materials array. Legacy assets don't have this field, so we inject it during conversion.
+SkeletalMesh assets contain complex binary data in the "Extra Data" section after the tagged properties. This data includes mesh bounds, materials, bone hierarchy, and LOD render data.
+
+### Extra Data Structure
+
+The extra data section follows this order (per CUE4Parse USkeletalMesh.cs):
+
+```
+┌─────────────────────────────────────────┐
+│ FStripDataFlags (2 bytes)               │
+├─────────────────────────────────────────┤
+│ FBoxSphereBounds (28 or 56 bytes)       │
+│ - Origin (FVector)                      │
+│ - BoxExtent (FVector)                   │
+│ - SphereRadius (float/double)           │
+├─────────────────────────────────────────┤
+│ FSkeletalMaterial[] array               │
+│ - int32 count                           │
+│ - FSkeletalMaterial × count             │
+├─────────────────────────────────────────┤
+│ FReferenceSkeleton                      │
+│ - FMeshBoneInfo[] (bone hierarchy)      │
+│ - FTransform[] (reference pose)         │
+│ - TMap<FName, int32> (name to index)    │
+├─────────────────────────────────────────┤
+│ bCooked (int32 as bool)                 │
+├─────────────────────────────────────────┤
+│ LOD Count (int32)                       │
+├─────────────────────────────────────────┤
+│ FSkeletalMeshLODRenderData[] (complex)  │
+└─────────────────────────────────────────┘
+```
+
+### FStripDataFlags Structure
+
+```
+Offset  Size  Field
+──────  ────  ─────────────────────────────
++0      1     GlobalStripFlags
++1      1     ClassStripFlags
+──────  ────  ─────────────────────────────
+Total:  2 bytes
+
+Flags:
+- Bit 0: Editor data stripped
+- Bit 1: Data stripped for server
+```
+
+### FBoxSphereBounds Structure
+
+```
+Offset  Size  Field (non-LWC / LWC)
+──────  ────  ─────────────────────────────
++0      12/24 Origin (FVector: 3 floats or 3 doubles)
++12/24  12/24 BoxExtent (FVector)
++24/48  4/8   SphereRadius (float or double)
+──────  ────  ─────────────────────────────
+Total:  28 bytes (float) or 56 bytes (double with LWC)
+```
 
 ### FSkeletalMaterial Structure (Legacy)
 
@@ -273,6 +330,48 @@ Offset  Size  Field
 Total:  44 bytes
 ```
 
+### FReferenceSkeleton Structure
+
+The reference skeleton contains the bone hierarchy and reference pose:
+
+```
+┌─────────────────────────────────────────┐
+│ RefBoneInfo Array                       │
+│ - int32 count                           │
+│ - FMeshBoneInfo × count                 │
+│   - FName BoneName (8 bytes)            │
+│   - int32 ParentIndex (4 bytes)         │
+├─────────────────────────────────────────┤
+│ RefBonePose Array                       │
+│ - int32 count                           │
+│ - FTransform × count                    │
+│   - FQuat Rotation (16/32 bytes)        │
+│   - FVector Translation (12/24 bytes)   │
+│   - FVector Scale3D (12/24 bytes)       │
+├─────────────────────────────────────────┤
+│ NameToIndexMap (TMap<FName, int32>)     │
+│ - int32 count                           │
+│ - (FName, int32) × count                │
+└─────────────────────────────────────────┘
+```
+
+### FMeshBoneInfo Structure
+
+```
+Offset  Size  Field
+──────  ────  ─────────────────────────────
++0      8     BoneName (FName)
++8      4     ParentIndex (int32, -1 for root)
+──────  ────  ─────────────────────────────
+Total:  12 bytes
+```
+
+### FGameplayTagContainer Padding
+
+**Location:** `ZenConverter.cs` - `PatchSkeletalMeshMaterialSlots()`
+
+Marvel Rivals expects an `FGameplayTagContainer` after each `FSkeletalMaterial` in the materials array. Legacy assets don't have this field, so we inject it during conversion.
+
 ### Patching Algorithm
 
 1. **Find material array** by searching for pattern:
@@ -289,28 +388,36 @@ Total:  44 bytes
 
 5. **Copy remaining data** after material array
 
-### Detection Pattern
+### SkeletalMeshExport API
+
+The `SkeletalMeshExport` class provides structured access to skeletal mesh data:
+
 ```csharp
-// Search for: count + materials at 40-byte intervals
-for (int i = 4; i < dataLength - 80; i++)
-{
-    int count = BitConverter.ToInt32(data, i);
-    if (count < 1 || count > 50) continue;
-    
-    int firstPkgIdx = BitConverter.ToInt32(data, i + 4);
-    if (firstPkgIdx >= 0 || firstPkgIdx < -100) continue;
-    
-    // Verify subsequent materials are 40 bytes apart
-    bool valid = true;
-    for (int m = 1; m < count; m++)
-    {
-        int pkgIdx = BitConverter.ToInt32(data, i + 4 + (m * 40));
-        if (pkgIdx >= 0 || pkgIdx < -100) { valid = false; break; }
-    }
-    
-    if (valid) return (offset: i, count: count);
-}
+// Parsed fields
+public FStripDataFlags StripFlags;
+public FBoxSphereBounds ImportedBounds;
+public List<FSkeletalMaterial> Materials;
+public FReferenceSkeleton ReferenceSkeleton;
+public bool bCooked;
+public int LODCount;
+public byte[] RemainingExtraData;  // Unparsed LOD render data
+
+// Helper methods
+int GetBoneCount();
+FMeshBoneInfo GetBone(int index);
+FTransform? GetBoneTransform(int index);
+int FindBoneIndex(FName boneName);
+FSkeletalMaterial GetMaterial(int index);
+int GetMaterialCount();
 ```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `SkeletalMeshStructs.cs` | FStripDataFlags, FBoxSphereBounds, FMeshBoneInfo, FReferenceSkeleton |
+| `SkeletalMeshExport.cs` | Main export class with parsing and serialization |
+| `MeshMaterials.cs` | FSkeletalMaterial, FStaticMaterial, FMeshUVChannelInfo |
 
 ---
 
@@ -878,6 +985,171 @@ foreach (var entry in packages)
 ```
 
 **Bug Fixed:** The original implementation used buffer position jumping which corrupted data when there were 4+ packages with imported packages. The two-pass approach writes all fixed entries first, then all array data sequentially.
+
+---
+
+## Mod Extraction (--mod argument)
+
+### Overview
+
+**Location:** `Program.cs` - `CliExtractIoStoreLegacy()`, `FZenPackageContext.cs`
+
+The `--mod` argument enables extracting assets from modded IoStore containers while using the game's pak files for import resolution. This is essential for reverse-engineering mods or extracting modified assets back to legacy format.
+
+### Use Cases
+
+1. **Mod Analysis** - Extract modded assets to inspect changes
+2. **Mod Porting** - Convert mod assets to legacy format for editing
+3. **Dependency Resolution** - Extract mod assets with their game dependencies
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     FZenPackageContext                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Game Containers (encrypted, AES key required)                  │
+│  ├── global.utoc (script objects, loaded first)                 │
+│  ├── pakchunk0-WindowsClient.utoc                               │
+│  ├── pakchunk1-WindowsClient.utoc                               │
+│  └── ... (import resolution source)                             │
+├─────────────────────────────────────────────────────────────────┤
+│  Mod Containers (unencrypted, loaded with PRIORITY)             │
+│  ├── my_mod_P.utoc                                              │
+│  └── ... (extraction source, overrides game packages)           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Priority Loading
+
+Mod containers are loaded with `LoadContainerWithPriority()` which:
+
+1. **Overrides existing packages** - If a mod contains a package that also exists in game files, the mod version takes precedence
+2. **Clears cached data** - Any previously cached package data is invalidated when overridden
+3. **No encryption** - Mod containers are loaded without AES key (mods are not encrypted)
+
+```csharp
+// Game containers use AES key
+context.LoadContainer(gameUtocPath);  // Uses _aesKey
+
+// Mod containers skip encryption
+context.LoadContainerWithPriority(modUtocPath);  // Uses null for AES key
+```
+
+### Extraction Modes
+
+#### Mode 1: Extract All Mod Packages
+When `--mod` is specified without `--filter`, extracts all packages from mod containers:
+
+```bash
+UAssetTool extract_iostore_legacy "C:/Game/Paks" output --mod "C:/Mods/my_mod.utoc"
+```
+
+#### Mode 2: Filtered Extraction from Mods
+When both `--mod` and `--filter` are specified, filters apply to mod packages:
+
+```bash
+UAssetTool extract_iostore_legacy "C:/Game/Paks" output --mod "C:/Mods/" --filter SK_1014
+```
+
+#### Mode 3: With Dependencies
+When `--with-deps` is added, dependencies are resolved from game containers:
+
+```bash
+UAssetTool extract_iostore_legacy "C:/Game/Paks" output --mod "C:/Mods/my_mod.utoc" --with-deps
+```
+
+### Path Handling
+
+The `--mod` argument accepts:
+
+| Input Type | Behavior |
+|------------|----------|
+| Single `.utoc` file | Loads that specific container |
+| Directory path | Loads all `.utoc` files in the directory |
+| Multiple paths | Loads each path (files or directories) |
+
+```bash
+# Single utoc file
+--mod "C:/Mods/my_mod_P.utoc"
+
+# Directory (loads all .utoc files)
+--mod "C:/Mods/MyModFolder/"
+
+# Multiple paths
+--mod "C:/Mods/mod1.utoc" "C:/Mods/mod2.utoc" "C:/Mods/SharedAssets/"
+```
+
+### Container Index Tracking
+
+The extraction process tracks which container indices are mod containers:
+
+```csharp
+HashSet<int> modContainerIndices = new();
+
+foreach (var modPath in modPaths)
+{
+    int containerIdx = context.ContainerCount;
+    context.LoadContainerWithPriority(modPath);
+    modContainerIndices.Add(containerIdx);
+}
+
+// Get packages only from mod containers
+foreach (var containerIdx in modContainerIndices)
+{
+    foreach (var pkgId in context.GetPackageIdsFromContainer(containerIdx))
+    {
+        packageIds.Add(pkgId);
+    }
+}
+```
+
+### Import Resolution Flow
+
+```
+1. Load game containers (with AES key)
+   └── Packages indexed, available for import resolution
+
+2. Load mod containers (no encryption, with priority)
+   └── Mod packages override game packages in index
+
+3. For each mod package to extract:
+   a. Read package data from mod container
+   b. Parse Zen header and export map
+   c. Resolve imports:
+      - Script imports → ScriptObjects database (from global.utoc)
+      - Package imports → Game containers (original assets)
+   d. Convert to legacy .uasset/.uexp format
+   e. Write output files
+
+4. If --with-deps:
+   a. Collect imported package IDs from converted packages
+   b. Extract dependencies from game containers
+   c. Repeat until no new dependencies
+```
+
+### Example Workflow
+
+```bash
+# 1. Extract a character skin mod with dependencies
+UAssetTool extract_iostore_legacy ^
+    "C:/MarvelRivals/Paks" ^
+    "./extracted" ^
+    --mod "C:/Mods/CustomSkin_P.utoc" ^
+    --with-deps
+
+# Output:
+# Loading game containers from: C:/MarvelRivals/Paks
+#   Loading global.utoc...
+#   Loading 15 game containers...
+# Loading mod containers...
+# [Context] Loaded container [PRIORITY]: CustomSkin_P (3 new packages, 0 overridden)
+# Extracting all 3 packages from mod container(s)
+# Converted: /Game/Marvel/Characters/1014/Skins/Custom/SK_1014_Custom
+# Converted: /Game/Marvel/Characters/1014/Skins/Custom/MI_1014_Custom_Body
+# [DEP] Converted: /Game/Marvel/Characters/1014/Meshes/SK_1014
+# Extraction complete: 3 converted, 0 failed, 0 skipped
+```
 
 ---
 

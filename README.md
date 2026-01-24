@@ -179,8 +179,9 @@ UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --filter SK_1014_1
 - `<output_dir>` - Output directory for extracted assets
 
 **Options:**
-- `--filter <patterns...>` - Only extract packages matching patterns (space-separated, OR logic, **required**)
+- `--filter <patterns...>` - Only extract packages matching patterns (space-separated, OR logic)
 - `--with-deps` - Also extract imported/referenced packages
+- `--mod <path>` - Extract from mod containers (see [Mod Extraction](#mod-extraction) below)
 - `--script-objects <path>` - Path to ScriptObjects.bin for import resolution
 - `--global <path>` - Path to global.utoc for script objects
 - `--container <path>` - Additional container to load for cross-package imports
@@ -191,6 +192,42 @@ The tool automatically:
 - Handles encrypted containers with AES key
 - Extracts `.uasset`, `.uexp`, and `.ubulk` files
 - Converts Zen format to legacy format during extraction
+
+### Mod Extraction
+
+Extract assets from modded IoStore containers while using game files for import resolution:
+
+```bash
+# Extract all packages from a mod file
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/my_mod.utoc"
+
+# Extract from mod with filter
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/my_mod.utoc" --filter SK_1014
+
+# Extract from all mods in a directory
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/"
+
+# Extract mod assets with their dependencies from game files
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/my_mod.utoc" --with-deps
+
+# Multiple mod paths
+UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/mod1.utoc" "C:/Mods/mod2.utoc"
+```
+
+**How it works:**
+1. Game containers are loaded first (encrypted, uses AES key) for import resolution
+2. Mod containers are loaded with **priority** (unencrypted) - mod packages override game packages
+3. When `--mod` is specified without `--filter`, extracts **all packages** from mod containers
+4. When `--with-deps` is used, dependencies are resolved from game containers
+
+**Path handling:**
+| Input | Behavior |
+|-------|----------|
+| `--mod "path/to/mod.utoc"` | Loads single mod container |
+| `--mod "path/to/mods/"` | Loads all `.utoc` files in directory |
+| `--mod "mod1.utoc" "mod2.utoc"` | Loads multiple specified containers |
+
+**Note:** Mod containers are loaded without encryption (mods are not encrypted), while game containers use the AES key for decryption.
 
 ## IoStore Creation (Mod Bundling)
 

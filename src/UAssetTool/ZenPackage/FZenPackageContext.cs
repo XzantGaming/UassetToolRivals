@@ -43,7 +43,22 @@ public class FZenPackageContext : IDisposable
     /// </summary>
     public void LoadContainer(string utocPath)
     {
-        var reader = new IoStoreReader(utocPath, _aesKey);
+        LoadContainerInternal(utocPath, overridePriority: false);
+    }
+    
+    /// <summary>
+    /// Load an IoStore container with priority - packages in this container will override
+    /// any previously loaded packages with the same ID. Used for mod containers.
+    /// Mod containers are loaded WITHOUT encryption (no AES key).
+    /// </summary>
+    public void LoadContainerWithPriority(string utocPath)
+    {
+        LoadContainerInternal(utocPath, overridePriority: true, useEncryption: false);
+    }
+    
+    private void LoadContainerInternal(string utocPath, bool overridePriority, bool useEncryption = true)
+    {
+        var reader = new IoStoreReader(utocPath, useEncryption ? _aesKey : null);
         int containerIndex = _containers.Count;
         _containers.Add(reader);
         
@@ -86,6 +101,9 @@ public class FZenPackageContext : IDisposable
             }
         }
         
+        int newPackages = 0;
+        int overriddenPackages = 0;
+        
         // Index all ExportBundleData chunks (actual packages)
         foreach (var chunk in reader.GetChunks())
         {
@@ -94,8 +112,22 @@ public class FZenPackageContext : IDisposable
             
             ulong packageId = chunk.Id;
             
-            if (!_packageIdToChunk.ContainsKey(packageId))
+            bool exists = _packageIdToChunk.ContainsKey(packageId);
+            
+            // Add package if it doesn't exist, or override if priority mode
+            if (!exists || overridePriority)
             {
+                if (exists && overridePriority)
+                {
+                    // Clear cached data for overridden package
+                    _packageCache.TryRemove(packageId, out _);
+                    overriddenPackages++;
+                }
+                else
+                {
+                    newPackages++;
+                }
+                
                 _packageIdToChunk[packageId] = (containerIndex, chunk);
                 
                 // Get full package path from TOC directory index
@@ -109,7 +141,9 @@ public class FZenPackageContext : IDisposable
             }
         }
         
-        Console.WriteLine($"[Context] Loaded container: {reader.ContainerName} ({_packageIdToChunk.Count} packages indexed)");
+        string priorityStr = overridePriority ? " [PRIORITY]" : "";
+        string overrideStr = overriddenPackages > 0 ? $", {overriddenPackages} overridden" : "";
+        Console.WriteLine($"[Context] Loaded container{priorityStr}: {reader.ContainerName} ({newPackages} new packages{overrideStr}, {_packageIdToChunk.Count} total)");
     }
     
     /// <summary>

@@ -19,7 +19,7 @@ namespace UAssetTool;
 /// Unified UAsset Tool - Combines detection, fixing, and patching for all UE asset types.
 /// Supports both interactive JSON mode (stdin/stdout) and CLI mode.
 /// </summary>
-public class Program
+public partial class Program
 {
     public static async Task<int> Main(string[] args)
     {
@@ -71,6 +71,10 @@ public class Program
                 "niagara_list" => CliNiagaraList(args),
                 "niagara_details" => CliNiagaraDetails(args),
                 "niagara_edit" => CliNiagaraEdit(args),
+                "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
+                "test_mesh_modify" => CliTestMeshModify(args),
+                "analyze_sections" => CliAnalyzeSections(args),
+                "set_disabled" => CliSetDisabled(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -1011,10 +1015,16 @@ public class Program
             Console.Error.WriteLine("  --container <path>       Additional container to load for cross-package imports");
             Console.Error.WriteLine("  --filter <patterns...>   Only extract packages matching patterns (space-separated)");
             Console.Error.WriteLine("  --with-deps              Also extract imported/referenced packages");
+            Console.Error.WriteLine("  --mod <path>             Path to modded .utoc file or directory containing .utoc files.");
+            Console.Error.WriteLine("                           Extracts from mod containers, uses game paks for import resolution.");
+            Console.Error.WriteLine("                           If path is a .utoc file, loads that single bundle.");
+            Console.Error.WriteLine("                           If path is a directory, loads all .utoc files in it.");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Examples:");
             Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --filter SK_1014 SK_1057 SK_1036");
             Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --filter Characters/1014 Characters/1057");
+            Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --mod \"C:/Mods/my_mod.utoc\" --filter SK_1014");
+            Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --mod \"C:/Mods/\" --with-deps");
             return 1;
         }
 
@@ -1024,6 +1034,7 @@ public class Program
         string? globalUtocPath = null;
         List<string> additionalContainers = new();
         List<string> filterPatterns = new();
+        List<string> modPaths = new(); // Mod utoc files or directories
         bool extractDependencies = false;
 
         for (int i = 3; i < args.Length; i++)
@@ -1034,6 +1045,14 @@ public class Program
                 globalUtocPath = args[++i];
             else if (args[i] == "--container" && i + 1 < args.Length)
                 additionalContainers.Add(args[++i]);
+            else if (args[i] == "--mod")
+            {
+                // Collect all following args until next option (starts with --)
+                while (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                {
+                    modPaths.Add(args[++i]);
+                }
+            }
             else if (args[i] == "--filter" || args[i] == "--package")
             {
                 // Collect all following args until next option (starts with --)
@@ -1118,6 +1137,52 @@ public class Program
                 }
             }
             
+            // Track mod container indices for extraction source filtering
+            HashSet<int> modContainerIndices = new();
+            
+            // Load mod containers with priority (they override game packages)
+            if (modPaths.Count > 0)
+            {
+                Console.WriteLine($"\nLoading mod containers...");
+                foreach (var modPath in modPaths)
+                {
+                    if (modPath.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase) && File.Exists(modPath))
+                    {
+                        // Single utoc file specified
+                        int containerIdx = context.ContainerCount;
+                        context.LoadContainerWithPriority(modPath);
+                        modContainerIndices.Add(containerIdx);
+                    }
+                    else if (Directory.Exists(modPath))
+                    {
+                        // Directory - load all utoc files in it
+                        var modUtocFiles = Directory.GetFiles(modPath, "*.utoc", SearchOption.TopDirectoryOnly);
+                        if (modUtocFiles.Length == 0)
+                        {
+                            Console.Error.WriteLine($"Warning: No .utoc files found in mod directory: {modPath}");
+                        }
+                        foreach (var modUtoc in modUtocFiles)
+                        {
+                            try
+                            {
+                                int containerIdx = context.ContainerCount;
+                                context.LoadContainerWithPriority(modUtoc);
+                                modContainerIndices.Add(containerIdx);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.Error.WriteLine($"  Warning: Failed to load mod {Path.GetFileName(modUtoc)}: {ex.Message}");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"Warning: Mod path not found: {modPath}");
+                    }
+                }
+                Console.WriteLine($"Loaded {modContainerIndices.Count} mod container(s)");
+            }
+            
             Console.WriteLine($"Total containers loaded: {context.ContainerCount}");
             Console.WriteLine($"Total packages indexed: {context.PackageCount}");
 
@@ -1134,7 +1199,24 @@ public class Program
             // Get package IDs to extract
             List<ulong> packageIds;
             bool skipFilterCheck = false; // Skip filter check in ExtractPackage if we already filtered
-            if (filterPatterns.Count > 0)
+            bool extractFromModOnly = modContainerIndices.Count > 0; // When mods are specified, extract from mods
+            
+            if (extractFromModOnly && filterPatterns.Count == 0)
+            {
+                // No filter specified but mods are loaded - extract all packages from mod containers
+                packageIds = new List<ulong>();
+                foreach (var containerIdx in modContainerIndices)
+                {
+                    foreach (var pkgId in context.GetPackageIdsFromContainer(containerIdx))
+                    {
+                        if (!packageIds.Contains(pkgId))
+                            packageIds.Add(pkgId);
+                    }
+                }
+                skipFilterCheck = true;
+                Console.WriteLine($"Extracting all {packageIds.Count} packages from mod container(s)");
+            }
+            else if (filterPatterns.Count > 0)
             {
                 packageIds = new List<ulong>();
                 
@@ -3908,6 +3990,351 @@ public class UAssetResponse
     
     [JsonPropertyName("data")]
     public object? Data { get; set; }
+}
+
+public partial class Program
+{
+    private static int CliSkeletalMeshInfo(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool skeletal_mesh_info <uasset_path> <usmap_path>");
+            return 1;
+        }
+
+        string uassetPath = args[1];
+        string usmapPath = args[2];
+
+        if (!File.Exists(uassetPath))
+        {
+            Console.Error.WriteLine($"File not found: {uassetPath}");
+            return 1;
+        }
+
+        var asset = LoadAsset(uassetPath, usmapPath);
+        
+        Console.WriteLine($"=== Skeletal Mesh Analysis: {Path.GetFileName(uassetPath)} ===\n");
+        
+        foreach (var export in asset.Exports)
+        {
+            if (export is SkeletalMeshExport skelMesh)
+            {
+                Console.WriteLine($"Export: {export.ObjectName?.Value?.Value ?? "Unknown"}");
+                Console.WriteLine($"  ExtraDataParsed: {skelMesh.ExtraDataParsed}");
+                Console.WriteLine($"  Extras Length: {skelMesh.Extras?.Length ?? 0} bytes");
+                
+                // Strip Flags
+                if (skelMesh.StripFlags != null)
+                {
+                    Console.WriteLine($"\n  === Strip Flags ===");
+                    Console.WriteLine($"    GlobalStripFlags: 0x{skelMesh.StripFlags.GlobalStripFlags:X2}");
+                    Console.WriteLine($"    ClassStripFlags: 0x{skelMesh.StripFlags.ClassStripFlags:X2}");
+                    Console.WriteLine($"    IsEditorDataStripped: {skelMesh.StripFlags.IsEditorDataStripped()}");
+                    Console.WriteLine($"    IsDataStrippedForServer: {skelMesh.StripFlags.IsDataStrippedForServer()}");
+                }
+                
+                // Bounds
+                if (skelMesh.ImportedBounds != null)
+                {
+                    Console.WriteLine($"\n  === Imported Bounds ===");
+                    Console.WriteLine($"    Origin: ({skelMesh.ImportedBounds.Origin.X:F2}, {skelMesh.ImportedBounds.Origin.Y:F2}, {skelMesh.ImportedBounds.Origin.Z:F2})");
+                    Console.WriteLine($"    BoxExtent: ({skelMesh.ImportedBounds.BoxExtent.X:F2}, {skelMesh.ImportedBounds.BoxExtent.Y:F2}, {skelMesh.ImportedBounds.BoxExtent.Z:F2})");
+                    Console.WriteLine($"    SphereRadius: {skelMesh.ImportedBounds.SphereRadius:F2}");
+                }
+                
+                // Materials
+                if (skelMesh.Materials != null && skelMesh.Materials.Count > 0)
+                {
+                    Console.WriteLine($"\n  === Materials ({skelMesh.Materials.Count}) ===");
+                    for (int i = 0; i < skelMesh.Materials.Count; i++)
+                    {
+                        var mat = skelMesh.Materials[i];
+                        Console.WriteLine($"    [{i}] MaterialInterface: {mat.MaterialInterface.Index}");
+                        Console.WriteLine($"        SlotName: {mat.MaterialSlotName?.Value?.Value ?? "None"}");
+                        Console.WriteLine($"        ImportedSlotName: {mat.ImportedMaterialSlotName?.Value?.Value ?? "None"}");
+                        Console.WriteLine($"        GameplayTags: {mat.GameplayTags?.Length ?? 0}");
+                    }
+                }
+                
+                // Reference Skeleton
+                if (skelMesh.ReferenceSkeleton != null)
+                {
+                    Console.WriteLine($"\n  === Reference Skeleton ===");
+                    Console.WriteLine($"    Bone Count: {skelMesh.ReferenceSkeleton.BoneCount}");
+                    Console.WriteLine($"    RefBonePose Count: {skelMesh.ReferenceSkeleton.RefBonePose.Count}");
+                    Console.WriteLine($"    NameToIndexMap Count: {skelMesh.ReferenceSkeleton.NameToIndexMap.Count}");
+                    
+                    // Show first few bones
+                    Console.WriteLine($"\n    First 10 Bones:");
+                    for (int i = 0; i < Math.Min(10, skelMesh.ReferenceSkeleton.BoneCount); i++)
+                    {
+                        var bone = skelMesh.ReferenceSkeleton.RefBoneInfo[i];
+                        Console.WriteLine($"      [{i}] {bone.Name?.Value?.Value ?? "Unknown"} (Parent: {bone.ParentIndex})");
+                    }
+                }
+                
+                // LOD Info
+                Console.WriteLine($"\n  === LOD Info ===");
+                Console.WriteLine($"    bCooked: {skelMesh.bCooked}");
+                Console.WriteLine($"    LODCount: {skelMesh.LODCount}");
+                
+                // Remaining Extra Data Analysis
+                if (skelMesh.RemainingExtraData != null && skelMesh.RemainingExtraData.Length > 0)
+                {
+                    Console.WriteLine($"\n  === Remaining Extra Data ({skelMesh.RemainingExtraData.Length} bytes) ===");
+                    Console.WriteLine($"    This contains LOD render data (sections, vertices, indices, etc.)");
+                    Console.WriteLine($"    First 64 bytes (hex): {BitConverter.ToString(skelMesh.RemainingExtraData.Take(Math.Min(64, skelMesh.RemainingExtraData.Length)).ToArray()).Replace("-", " ")}");
+                }
+                
+                // Since ExtraDataParsed failed, analyze raw Extras directly
+                if (!skelMesh.ExtraDataParsed && skelMesh.Extras != null && skelMesh.Extras.Length > 0)
+                {
+                    Console.WriteLine($"\n  === Raw Extras Analysis ({skelMesh.Extras.Length} bytes) ===");
+                    Console.WriteLine($"    First 128 bytes (hex):");
+                    for (int row = 0; row < 8 && row * 16 < skelMesh.Extras.Length; row++)
+                    {
+                        int offset = row * 16;
+                        string hex = BitConverter.ToString(skelMesh.Extras.Skip(offset).Take(16).ToArray()).Replace("-", " ");
+                        Console.WriteLine($"      0x{offset:X4}: {hex}");
+                    }
+                    
+                    // Try to find section data patterns in the raw extras
+                    // Look for FSkelMeshRenderSection patterns
+                    Console.WriteLine($"\n    Searching for section patterns...");
+                    AnalyzeSkeletalMeshSections(skelMesh.Extras, asset);
+                }
+                
+                // Also dump tagged properties that might control visibility
+                if (export is NormalExport normalExport && normalExport.Data != null)
+                {
+                    Console.WriteLine($"\n  === All Tagged Properties ({normalExport.Data.Count}) ===");
+                    foreach (var prop in normalExport.Data)
+                    {
+                        string propName = prop.Name?.Value?.Value ?? "Unknown";
+                        Console.WriteLine($"    {propName}: {prop.GetType().Name}");
+                        
+                        // Dump LODInfo array in detail
+                        if (propName == "LODInfo" && prop is ArrayPropertyData lodInfoArray)
+                        {
+                            Console.WriteLine($"\n  === LODInfo Details ({lodInfoArray.Value?.Length ?? 0} LODs) ===");
+                            if (lodInfoArray.Value != null)
+                            {
+                                for (int lodIdx = 0; lodIdx < lodInfoArray.Value.Length; lodIdx++)
+                                {
+                                    Console.WriteLine($"    LOD {lodIdx}:");
+                                    if (lodInfoArray.Value[lodIdx] is StructPropertyData lodStruct && lodStruct.Value != null)
+                                    {
+                                        foreach (var lodProp in lodStruct.Value)
+                                        {
+                                            string lodPropName = lodProp.Name?.Value?.Value ?? "?";
+                                            Console.WriteLine($"      {lodPropName}: {lodProp.GetType().Name} = {GetPropertyValueString(lodProp)}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Dump MeshClothingAssets
+                        if (propName == "MeshClothingAssets" && prop is ArrayPropertyData clothArray)
+                        {
+                            Console.WriteLine($"\n  === MeshClothingAssets ({clothArray.Value?.Length ?? 0}) ===");
+                            if (clothArray.Value != null)
+                            {
+                                for (int i = 0; i < clothArray.Value.Length; i++)
+                                {
+                                    Console.WriteLine($"    [{i}]: {clothArray.Value[i]?.GetType().Name}");
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Console.WriteLine();
+            }
+        }
+        
+        return 0;
+    }
+    
+    private static string GetPropertyValueString(PropertyData prop)
+    {
+        return prop switch
+        {
+            BoolPropertyData b => b.Value.ToString(),
+            IntPropertyData i => i.Value.ToString(),
+            FloatPropertyData f => f.Value.ToString("F4"),
+            DoublePropertyData d => d.Value.ToString("F4"),
+            StrPropertyData s => s.Value?.ToString() ?? "null",
+            NamePropertyData n => n.Value?.Value?.Value ?? "null",
+            ObjectPropertyData o => o.Value?.Index.ToString() ?? "null",
+            ArrayPropertyData a => $"[{a.Value?.Length ?? 0} items]",
+            StructPropertyData st => $"Struct({st.Value?.Count ?? 0} props)",
+            BytePropertyData bp => bp.ByteType == BytePropertyType.Byte ? bp.Value.ToString() : bp.EnumValue?.Value?.Value ?? "null",
+            EnumPropertyData e => e.Value?.Value?.Value ?? "null",
+            _ => prop.GetType().Name
+        };
+    }
+    
+    private static int CliAnalyzeSections(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool analyze_sections <uasset_path> <usmap_path>");
+            return 1;
+        }
+
+        string uassetPath = args[1];
+        string usmapPath = args[2];
+
+        if (!File.Exists(uassetPath))
+        {
+            Console.Error.WriteLine($"File not found: {uassetPath}");
+            return 1;
+        }
+
+        TestMeshModifier.AnalyzeSectionFlags(uassetPath, usmapPath);
+        return 0;
+    }
+    
+    private static int CliSetDisabled(string[] args)
+    {
+        if (args.Length < 5)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool set_disabled <uasset_path> <usmap_path> <true|false> <offset1> [offset2] ...");
+            Console.Error.WriteLine("Example: UAssetTool set_disabled mesh.uasset mappings.usmap true 0x8FB15");
+            return 1;
+        }
+
+        string uassetPath = args[1];
+        string usmapPath = args[2];
+        bool disabled = args[3].ToLower() == "true";
+        
+        var offsets = new List<int>();
+        for (int i = 4; i < args.Length; i++)
+        {
+            string offsetStr = args[i];
+            int offset;
+            if (offsetStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                offset = Convert.ToInt32(offsetStr, 16);
+            }
+            else
+            {
+                offset = int.Parse(offsetStr);
+            }
+            offsets.Add(offset);
+        }
+
+        if (!File.Exists(uassetPath))
+        {
+            Console.Error.WriteLine($"File not found: {uassetPath}");
+            return 1;
+        }
+
+        TestMeshModifier.SetDisabledFlags(uassetPath, usmapPath, offsets.ToArray(), disabled);
+        return 0;
+    }
+    
+    private static int CliTestMeshModify(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool test_mesh_modify <uasset_path> <usmap_path> <test_type>");
+            Console.Error.WriteLine("Test types:");
+            Console.Error.WriteLine("  clear_lodmaterialmap - Clear LODMaterialMap arrays");
+            Console.Error.WriteLine("  clear_clothingassets - Clear MeshClothingAssets");
+            Console.Error.WriteLine("  modify_lodinfo - Modify LODInfo settings");
+            Console.Error.WriteLine("  clear_morphtargets - Clear MorphTargets array");
+            Console.Error.WriteLine("  set_hasvertexcolors - Set bHasVertexColors to true");
+            Console.Error.WriteLine("  clear_postprocessbp - Clear PostProcessAnimBlueprint");
+            return 1;
+        }
+
+        string uassetPath = args[1];
+        string usmapPath = args[2];
+        string testType = args[3];
+
+        if (!File.Exists(uassetPath))
+        {
+            Console.Error.WriteLine($"File not found: {uassetPath}");
+            return 1;
+        }
+
+        TestMeshModifier.ModifyMeshForTesting(uassetPath, usmapPath, testType);
+        return 0;
+    }
+    
+    private static void AnalyzeSkeletalMeshSections(byte[] data, UAsset asset)
+    {
+        // Per CUE4Parse, FSkelMeshRenderSection structure contains:
+        // - MaterialIndex (uint16)
+        // - BaseIndex (uint32)  
+        // - NumTriangles (uint32)
+        // - bRecomputeTangent (bool)
+        // - RecomputeTangentsVertexMaskChannel (uint8)
+        // - bCastShadow (bool)
+        // - bVisibleInRayTracing (bool)
+        // - BaseVertexIndex (uint32)
+        // - ClothMappingDataLODs (array)
+        // - BoneMap (array of uint16)
+        // - NumVertices (int32)
+        // - MaxBoneInfluences (int32)
+        // - CorrespondClothAssetIndex (int16)
+        // - ClothingData (FClothingSectionData)
+        // - DuplicatedVerticesBuffer (FDuplicatedVerticesBuffer)
+        // - bDisabled (bool)
+        
+        Console.WriteLine($"    Looking for FSkelMeshRenderSection patterns...");
+        
+        // Search for patterns that look like section data
+        // MaterialIndex (0-50), followed by BaseIndex, NumTriangles
+        int sectionsFound = 0;
+        
+        for (int i = 0; i < data.Length - 20; i++)
+        {
+            // Check for potential section start
+            if (i + 14 >= data.Length) break;
+            
+            ushort matIdx = BitConverter.ToUInt16(data, i);
+            uint baseIdx = BitConverter.ToUInt32(data, i + 2);
+            uint numTris = BitConverter.ToUInt32(data, i + 6);
+            
+            // Heuristics: material index 0-20, reasonable base index and triangle count
+            if (matIdx <= 20 && baseIdx < 10000000 && numTris > 10 && numTris < 500000)
+            {
+                // Check if there might be bool flags after
+                byte possibleFlags = data[i + 10];
+                
+                // Look for bDisabled flag pattern - it's usually near the end of section
+                // For now, just report potential sections
+                if (sectionsFound < 20)
+                {
+                    Console.WriteLine($"      Potential section at 0x{i:X}: MatIdx={matIdx}, BaseIdx={baseIdx}, NumTris={numTris}");
+                    
+                    // Try to read more fields
+                    if (i + 20 < data.Length)
+                    {
+                        byte bRecomputeTangent = data[i + 10];
+                        byte recomputeChannel = data[i + 11];
+                        byte bCastShadow = data[i + 12];
+                        byte bVisibleInRayTracing = data[i + 13];
+                        uint baseVertexIdx = BitConverter.ToUInt32(data, i + 14);
+                        
+                        Console.WriteLine($"        bRecomputeTangent={bRecomputeTangent}, bCastShadow={bCastShadow}, bVisibleInRayTracing={bVisibleInRayTracing}, BaseVertexIdx={baseVertexIdx}");
+                    }
+                }
+                sectionsFound++;
+            }
+        }
+        
+        Console.WriteLine($"    Total potential sections found: {sectionsFound}");
+        
+        // Also look for bDisabled patterns (byte value 0 or 1 in specific contexts)
+        Console.WriteLine($"\n    Looking for bDisabled flag patterns...");
+        
+        // Search for the string "bDisabled" or patterns that might indicate disabled sections
+        // In cooked data, bools are typically single bytes
+    }
 }
 
 #endregion
