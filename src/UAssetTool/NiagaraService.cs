@@ -23,7 +23,26 @@ public static class NiagaraService
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
+
+    // Custom converter for full float precision output
+    private class FullPrecisionFloatConverter : JsonConverter<float>
+    {
+        public override float Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => reader.GetSingle();
+
+        public override void Write(Utf8JsonWriter writer, float value, JsonSerializerOptions options)
+            => writer.WriteRawValue(value.ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static readonly JsonSerializerOptions JsonOptionsFullPrecision = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new FullPrecisionFloatConverter() }
     };
 
     #region Data Models
@@ -60,10 +79,10 @@ public static class NiagaraService
     public class ColorValue
     {
         public int Index { get; set; }
-        public float R { get; set; }
-        public float G { get; set; }
-        public float B { get; set; }
-        public float A { get; set; }
+        public double R { get; set; }
+        public double G { get; set; }
+        public double B { get; set; }
+        public double A { get; set; }
     }
 
     /// <summary>
@@ -81,7 +100,7 @@ public static class NiagaraService
     public class FloatValue
     {
         public int Index { get; set; }
-        public float Value { get; set; }
+        public double Value { get; set; }
     }
 
     /// <summary>
@@ -99,8 +118,8 @@ public static class NiagaraService
     public class Vector2DValue
     {
         public int Index { get; set; }
-        public float X { get; set; }
-        public float Y { get; set; }
+        public double X { get; set; }
+        public double Y { get; set; }
     }
 
     /// <summary>
@@ -118,9 +137,9 @@ public static class NiagaraService
     public class Vector3Value
     {
         public int Index { get; set; }
-        public float X { get; set; }
-        public float Y { get; set; }
-        public float Z { get; set; }
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Z { get; set; }
     }
 
     public class NiagaraDetailsResult
@@ -707,7 +726,7 @@ public static class NiagaraService
             result.Error = ex.Message;
         }
 
-        return JsonSerializer.Serialize(result, JsonOptions);
+        return JsonSerializer.Serialize(result, JsonOptionsFullPrecision);
     }
 
     /// <summary>
