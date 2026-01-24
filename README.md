@@ -281,8 +281,11 @@ Edit particle effect colors in NiagaraSystem assets with frontend-friendly JSON 
 # List all NS files with metadata
 UAssetTool niagara_list <directory> [usmap_path]
 
-# Get detailed color curve info for a file
+# Get detailed color curve info for a file (samples only)
 UAssetTool niagara_details <asset_path> [usmap_path]
+
+# Get ALL values (not just samples) - useful for frontend editors
+UAssetTool niagara_details <asset_path> [usmap_path] --full
 
 # Edit colors (simple mode)
 UAssetTool niagara_edit <asset_path> <R> <G> <B> [A] [options...] [usmap_path]

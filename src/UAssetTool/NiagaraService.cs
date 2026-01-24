@@ -370,7 +370,10 @@ public static class NiagaraService
     /// <summary>
     /// Get detailed information about a specific NiagaraSystem file
     /// </summary>
-    public static string GetNiagaraDetails(string assetPath, string? usmapPath = null)
+    /// <param name="assetPath">Path to the .uasset file</param>
+    /// <param name="usmapPath">Optional path to .usmap mappings file</param>
+    /// <param name="fullData">If true, returns all values instead of just samples (first, middle, last)</param>
+    public static string GetNiagaraDetails(string assetPath, string? usmapPath = null, bool fullData = false)
     {
         var result = new NiagaraDetailsResult
         {
@@ -411,14 +414,22 @@ public static class NiagaraService
                     var colors = ExtractColorsFromStructuredExport(colorCurveExport);
                     curveInfo.ColorCount = colors.Count;
 
-                    // Sample first, middle, and last colors
-                    if (colors.Count > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleColors.Add(colors[0]);
-                        if (colors.Count > 2)
-                            curveInfo.SampleColors.Add(colors[colors.Count / 2]);
-                        if (colors.Count > 1)
-                            curveInfo.SampleColors.Add(colors[colors.Count - 1]);
+                        // Return all colors
+                        curveInfo.SampleColors.AddRange(colors);
+                    }
+                    else
+                    {
+                        // Sample first, middle, and last colors
+                        if (colors.Count > 0)
+                        {
+                            curveInfo.SampleColors.Add(colors[0]);
+                            if (colors.Count > 2)
+                                curveInfo.SampleColors.Add(colors[colors.Count / 2]);
+                            if (colors.Count > 1)
+                                curveInfo.SampleColors.Add(colors[colors.Count - 1]);
+                        }
                     }
 
                     result.ColorCurves.Add(curveInfo);
@@ -435,19 +446,30 @@ public static class NiagaraService
                         ValueCount = floatCurveExport.ValueCount
                     };
 
-                    // Sample first, middle, and last values
-                    if (floatCurveExport.ValueCount > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleValues.Add(new FloatValue { Index = 0, Value = floatCurveExport.GetValue(0) ?? 0 });
-                        if (floatCurveExport.ValueCount > 2)
+                        // Return all values
+                        for (int j = 0; j < floatCurveExport.ValueCount; j++)
                         {
-                            int mid = floatCurveExport.ValueCount / 2;
-                            curveInfo.SampleValues.Add(new FloatValue { Index = mid, Value = floatCurveExport.GetValue(mid) ?? 0 });
+                            curveInfo.SampleValues.Add(new FloatValue { Index = j, Value = floatCurveExport.GetValue(j) ?? 0 });
                         }
-                        if (floatCurveExport.ValueCount > 1)
+                    }
+                    else
+                    {
+                        // Sample first, middle, and last values
+                        if (floatCurveExport.ValueCount > 0)
                         {
-                            int last = floatCurveExport.ValueCount - 1;
-                            curveInfo.SampleValues.Add(new FloatValue { Index = last, Value = floatCurveExport.GetValue(last) ?? 0 });
+                            curveInfo.SampleValues.Add(new FloatValue { Index = 0, Value = floatCurveExport.GetValue(0) ?? 0 });
+                            if (floatCurveExport.ValueCount > 2)
+                            {
+                                int mid = floatCurveExport.ValueCount / 2;
+                                curveInfo.SampleValues.Add(new FloatValue { Index = mid, Value = floatCurveExport.GetValue(mid) ?? 0 });
+                            }
+                            if (floatCurveExport.ValueCount > 1)
+                            {
+                                int last = floatCurveExport.ValueCount - 1;
+                                curveInfo.SampleValues.Add(new FloatValue { Index = last, Value = floatCurveExport.GetValue(last) ?? 0 });
+                            }
                         }
                     }
 
@@ -465,26 +487,39 @@ public static class NiagaraService
                         ValueCount = vec2CurveExport.ValueCount
                     };
 
-                    // Sample first, middle, and last values
-                    if (vec2CurveExport.ValueCount > 0)
+                    if (fullData)
                     {
-                        var v0 = vec2CurveExport.GetValue(0);
-                        if (v0.HasValue)
-                            curveInfo.SampleValues.Add(new Vector2DValue { Index = 0, X = v0.Value.X, Y = v0.Value.Y });
-                        
-                        if (vec2CurveExport.ValueCount > 2)
+                        // Return all values
+                        for (int j = 0; j < vec2CurveExport.ValueCount; j++)
                         {
-                            int mid = vec2CurveExport.ValueCount / 2;
-                            var vm = vec2CurveExport.GetValue(mid);
-                            if (vm.HasValue)
-                                curveInfo.SampleValues.Add(new Vector2DValue { Index = mid, X = vm.Value.X, Y = vm.Value.Y });
+                            var v = vec2CurveExport.GetValue(j);
+                            if (v.HasValue)
+                                curveInfo.SampleValues.Add(new Vector2DValue { Index = j, X = v.Value.X, Y = v.Value.Y });
                         }
-                        if (vec2CurveExport.ValueCount > 1)
+                    }
+                    else
+                    {
+                        // Sample first, middle, and last values
+                        if (vec2CurveExport.ValueCount > 0)
                         {
-                            int last = vec2CurveExport.ValueCount - 1;
-                            var vl = vec2CurveExport.GetValue(last);
-                            if (vl.HasValue)
-                                curveInfo.SampleValues.Add(new Vector2DValue { Index = last, X = vl.Value.X, Y = vl.Value.Y });
+                            var v0 = vec2CurveExport.GetValue(0);
+                            if (v0.HasValue)
+                                curveInfo.SampleValues.Add(new Vector2DValue { Index = 0, X = v0.Value.X, Y = v0.Value.Y });
+                            
+                            if (vec2CurveExport.ValueCount > 2)
+                            {
+                                int mid = vec2CurveExport.ValueCount / 2;
+                                var vm = vec2CurveExport.GetValue(mid);
+                                if (vm.HasValue)
+                                    curveInfo.SampleValues.Add(new Vector2DValue { Index = mid, X = vm.Value.X, Y = vm.Value.Y });
+                            }
+                            if (vec2CurveExport.ValueCount > 1)
+                            {
+                                int last = vec2CurveExport.ValueCount - 1;
+                                var vl = vec2CurveExport.GetValue(last);
+                                if (vl.HasValue)
+                                    curveInfo.SampleValues.Add(new Vector2DValue { Index = last, X = vl.Value.X, Y = vl.Value.Y });
+                            }
                         }
                     }
 
@@ -504,13 +539,20 @@ public static class NiagaraService
                     var colors = ExtractColorsFromExport(normalExport);
                     curveInfo.ColorCount = colors.Count;
 
-                    if (colors.Count > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleColors.Add(colors[0]);
-                        if (colors.Count > 2)
-                            curveInfo.SampleColors.Add(colors[colors.Count / 2]);
-                        if (colors.Count > 1)
-                            curveInfo.SampleColors.Add(colors[colors.Count - 1]);
+                        curveInfo.SampleColors.AddRange(colors);
+                    }
+                    else
+                    {
+                        if (colors.Count > 0)
+                        {
+                            curveInfo.SampleColors.Add(colors[0]);
+                            if (colors.Count > 2)
+                                curveInfo.SampleColors.Add(colors[colors.Count / 2]);
+                            if (colors.Count > 1)
+                                curveInfo.SampleColors.Add(colors[colors.Count - 1]);
+                        }
                     }
 
                     result.ColorCurves.Add(curveInfo);
@@ -529,13 +571,20 @@ public static class NiagaraService
                     var values = ExtractFloatsFromExport(floatNormalExport);
                     curveInfo.ValueCount = values.Count;
 
-                    if (values.Count > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleValues.Add(values[0]);
-                        if (values.Count > 2)
-                            curveInfo.SampleValues.Add(values[values.Count / 2]);
-                        if (values.Count > 1)
-                            curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        curveInfo.SampleValues.AddRange(values);
+                    }
+                    else
+                    {
+                        if (values.Count > 0)
+                        {
+                            curveInfo.SampleValues.Add(values[0]);
+                            if (values.Count > 2)
+                                curveInfo.SampleValues.Add(values[values.Count / 2]);
+                            if (values.Count > 1)
+                                curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        }
                     }
 
                     result.FloatCurves.Add(curveInfo);
@@ -554,13 +603,20 @@ public static class NiagaraService
                     var values = ExtractVector2DsFromExport(vec2NormalExport);
                     curveInfo.ValueCount = values.Count;
 
-                    if (values.Count > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleValues.Add(values[0]);
-                        if (values.Count > 2)
-                            curveInfo.SampleValues.Add(values[values.Count / 2]);
-                        if (values.Count > 1)
-                            curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        curveInfo.SampleValues.AddRange(values);
+                    }
+                    else
+                    {
+                        if (values.Count > 0)
+                        {
+                            curveInfo.SampleValues.Add(values[0]);
+                            if (values.Count > 2)
+                                curveInfo.SampleValues.Add(values[values.Count / 2]);
+                            if (values.Count > 1)
+                                curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        }
                     }
 
                     result.Vector2DCurves.Add(curveInfo);
@@ -577,25 +633,37 @@ public static class NiagaraService
                         ValueCount = vec3CurveExport.ValueCount
                     };
 
-                    if (vec3CurveExport.ValueCount > 0)
+                    if (fullData)
                     {
-                        var v0 = vec3CurveExport.GetValue(0);
-                        if (v0.HasValue)
-                            curveInfo.SampleValues.Add(new Vector3Value { Index = 0, X = v0.Value.X, Y = v0.Value.Y, Z = v0.Value.Z });
-                        
-                        if (vec3CurveExport.ValueCount > 2)
+                        for (int j = 0; j < vec3CurveExport.ValueCount; j++)
                         {
-                            int mid = vec3CurveExport.ValueCount / 2;
-                            var vm = vec3CurveExport.GetValue(mid);
-                            if (vm.HasValue)
-                                curveInfo.SampleValues.Add(new Vector3Value { Index = mid, X = vm.Value.X, Y = vm.Value.Y, Z = vm.Value.Z });
+                            var v = vec3CurveExport.GetValue(j);
+                            if (v.HasValue)
+                                curveInfo.SampleValues.Add(new Vector3Value { Index = j, X = v.Value.X, Y = v.Value.Y, Z = v.Value.Z });
                         }
-                        if (vec3CurveExport.ValueCount > 1)
+                    }
+                    else
+                    {
+                        if (vec3CurveExport.ValueCount > 0)
                         {
-                            int last = vec3CurveExport.ValueCount - 1;
-                            var vl = vec3CurveExport.GetValue(last);
-                            if (vl.HasValue)
-                                curveInfo.SampleValues.Add(new Vector3Value { Index = last, X = vl.Value.X, Y = vl.Value.Y, Z = vl.Value.Z });
+                            var v0 = vec3CurveExport.GetValue(0);
+                            if (v0.HasValue)
+                                curveInfo.SampleValues.Add(new Vector3Value { Index = 0, X = v0.Value.X, Y = v0.Value.Y, Z = v0.Value.Z });
+                            
+                            if (vec3CurveExport.ValueCount > 2)
+                            {
+                                int mid = vec3CurveExport.ValueCount / 2;
+                                var vm = vec3CurveExport.GetValue(mid);
+                                if (vm.HasValue)
+                                    curveInfo.SampleValues.Add(new Vector3Value { Index = mid, X = vm.Value.X, Y = vm.Value.Y, Z = vm.Value.Z });
+                            }
+                            if (vec3CurveExport.ValueCount > 1)
+                            {
+                                int last = vec3CurveExport.ValueCount - 1;
+                                var vl = vec3CurveExport.GetValue(last);
+                                if (vl.HasValue)
+                                    curveInfo.SampleValues.Add(new Vector3Value { Index = last, X = vl.Value.X, Y = vl.Value.Y, Z = vl.Value.Z });
+                            }
                         }
                     }
 
@@ -615,13 +683,20 @@ public static class NiagaraService
                     var values = ExtractVector3sFromExport(vec3NormalExport);
                     curveInfo.ValueCount = values.Count;
 
-                    if (values.Count > 0)
+                    if (fullData)
                     {
-                        curveInfo.SampleValues.Add(values[0]);
-                        if (values.Count > 2)
-                            curveInfo.SampleValues.Add(values[values.Count / 2]);
-                        if (values.Count > 1)
-                            curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        curveInfo.SampleValues.AddRange(values);
+                    }
+                    else
+                    {
+                        if (values.Count > 0)
+                        {
+                            curveInfo.SampleValues.Add(values[0]);
+                            if (values.Count > 2)
+                                curveInfo.SampleValues.Add(values[values.Count / 2]);
+                            if (values.Count > 1)
+                                curveInfo.SampleValues.Add(values[values.Count - 1]);
+                        }
                     }
 
                     result.Vector3Curves.Add(curveInfo);
@@ -638,25 +713,37 @@ public static class NiagaraService
                         ColorCount = arrayColorExport.ColorCount
                     };
 
-                    if (arrayColorExport.ColorCount > 0)
+                    if (fullData)
                     {
-                        var c0 = arrayColorExport.GetColor(0);
-                        if (c0.HasValue)
-                            info.SampleColors.Add(new ColorValue { Index = 0, R = c0.Value.R, G = c0.Value.G, B = c0.Value.B, A = c0.Value.A });
-                        
-                        if (arrayColorExport.ColorCount > 2)
+                        for (int j = 0; j < arrayColorExport.ColorCount; j++)
                         {
-                            int mid = arrayColorExport.ColorCount / 2;
-                            var cm = arrayColorExport.GetColor(mid);
-                            if (cm.HasValue)
-                                info.SampleColors.Add(new ColorValue { Index = mid, R = cm.Value.R, G = cm.Value.G, B = cm.Value.B, A = cm.Value.A });
+                            var c = arrayColorExport.GetColor(j);
+                            if (c.HasValue)
+                                info.SampleColors.Add(new ColorValue { Index = j, R = c.Value.R, G = c.Value.G, B = c.Value.B, A = c.Value.A });
                         }
-                        if (arrayColorExport.ColorCount > 1)
+                    }
+                    else
+                    {
+                        if (arrayColorExport.ColorCount > 0)
                         {
-                            int last = arrayColorExport.ColorCount - 1;
-                            var cl = arrayColorExport.GetColor(last);
-                            if (cl.HasValue)
-                                info.SampleColors.Add(new ColorValue { Index = last, R = cl.Value.R, G = cl.Value.G, B = cl.Value.B, A = cl.Value.A });
+                            var c0 = arrayColorExport.GetColor(0);
+                            if (c0.HasValue)
+                                info.SampleColors.Add(new ColorValue { Index = 0, R = c0.Value.R, G = c0.Value.G, B = c0.Value.B, A = c0.Value.A });
+                            
+                            if (arrayColorExport.ColorCount > 2)
+                            {
+                                int mid = arrayColorExport.ColorCount / 2;
+                                var cm = arrayColorExport.GetColor(mid);
+                                if (cm.HasValue)
+                                    info.SampleColors.Add(new ColorValue { Index = mid, R = cm.Value.R, G = cm.Value.G, B = cm.Value.B, A = cm.Value.A });
+                            }
+                            if (arrayColorExport.ColorCount > 1)
+                            {
+                                int last = arrayColorExport.ColorCount - 1;
+                                var cl = arrayColorExport.GetColor(last);
+                                if (cl.HasValue)
+                                    info.SampleColors.Add(new ColorValue { Index = last, R = cl.Value.R, G = cl.Value.G, B = cl.Value.B, A = cl.Value.A });
+                            }
                         }
                     }
 
@@ -674,7 +761,14 @@ public static class NiagaraService
                         ValueCount = arrayFloatExport.ValueCount
                     };
 
-                    if (arrayFloatExport.ValueCount > 0)
+                    if (fullData)
+                    {
+                        for (int j = 0; j < arrayFloatExport.ValueCount; j++)
+                        {
+                            info.SampleValues.Add(new FloatValue { Index = j, Value = arrayFloatExport.GetValue(j) ?? 0 });
+                        }
+                    }
+                    else if (arrayFloatExport.ValueCount > 0)
                     {
                         info.SampleValues.Add(new FloatValue { Index = 0, Value = arrayFloatExport.GetValue(0) ?? 0 });
                         if (arrayFloatExport.ValueCount > 2)
@@ -703,7 +797,16 @@ public static class NiagaraService
                         ValueCount = arrayFloat3Export.ValueCount
                     };
 
-                    if (arrayFloat3Export.ValueCount > 0)
+                    if (fullData)
+                    {
+                        for (int j = 0; j < arrayFloat3Export.ValueCount; j++)
+                        {
+                            var v = arrayFloat3Export.GetValue(j);
+                            if (v.HasValue)
+                                info.SampleValues.Add(new Vector3Value { Index = j, X = v.Value.X, Y = v.Value.Y, Z = v.Value.Z });
+                        }
+                    }
+                    else if (arrayFloat3Export.ValueCount > 0)
                     {
                         var v0 = arrayFloat3Export.GetValue(0);
                         if (v0.HasValue)

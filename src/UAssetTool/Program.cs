@@ -1693,15 +1693,28 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path]");
+            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path] [--full]");
             Console.Error.WriteLine("Output: JSON with detailed color curve info for a specific NS file");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --full    Return all values instead of just samples (first, middle, last)");
             return 1;
         }
 
         string assetPath = args[1];
-        string? usmapPath = args.Length > 2 ? args[2] : null;
+        string? usmapPath = null;
+        bool fullData = false;
 
-        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath);
+        // Parse remaining args
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--full")
+                fullData = true;
+            else if (usmapPath == null && !args[i].StartsWith("--"))
+                usmapPath = args[i];
+        }
+
+        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath, fullData);
         Console.WriteLine(json);
         return 0;
     }
