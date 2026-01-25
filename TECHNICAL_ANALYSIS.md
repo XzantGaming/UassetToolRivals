@@ -722,6 +722,71 @@ When editing Niagara assets, you may see warnings like:
 
 **This is expected and safe.** Complex Niagara script exports (bytecode, compiled graphs) may fail to parse, but this doesn't affect ColorCurve editing. The edit will succeed as long as the ColorCurve exports themselves parse correctly.
 
+### IsEnemy Parameter Detection via ChildBP
+
+**Location:** `NiagaraService.cs` - `ScanChildBPsForIsEnemy()`
+
+Marvel Rivals uses `ChildBP` (Blueprint) assets to spawn Niagara systems and pass the `IsEnemy` parameter for ally/enemy color switching.
+
+#### Discovery
+
+The `IsEnemy` parameter is **not** defined in the NS file itself. Instead:
+
+1. **ChildBP assets** (e.g., `1048001_ChildBP.uasset`) contain `NiagaraComponent` references
+2. ChildBP has `UserParameterRedirects` that maps `IsEnemy` → `User.IsEnemy`
+3. The game's character system sets `IsEnemy` at runtime when spawning the effect
+
+#### ChildBP Structure
+
+```json
+{
+  "Type": "NiagaraComponent",
+  "Asset": {
+    "ObjectName": "NiagaraSystem'NS_104800_Butterfly3'",
+    "ObjectPath": "/Game/Marvel/VFX/Particles/.../NS_104800_Butterfly3.36"
+  },
+  "UserParameterRedirects": [
+    {
+      "Key": { "Name": "IsEnemy" },
+      "Value": { "Name": "User.IsEnemy" }
+    }
+  ]
+}
+```
+
+#### Scanning ChildBP Assets
+
+Use the `scan_childbp_isenemy` command to build a mapping:
+
+```bash
+# 1. Extract ChildBP assets from game
+UAssetTool extract_iostore_legacy "<paks>" "<output>" --filter ChildBP --aes "<key>"
+
+# 2. Scan for IsEnemy parameter redirects
+UAssetTool scan_childbp_isenemy "<output>"
+```
+
+**Output:**
+```json
+{
+  "success": true,
+  "totalChildBPsScanned": 523,
+  "childBPsWithIsEnemy": 31,
+  "nsToChildBP": {
+    "NS_104800_Butterfly3": "1048001_ChildBP.uasset",
+    "NS_104800_Butterfly4": "1048001_ChildBP.uasset",
+    "NS_102701_Fire": "1027500_ChildBP.uasset"
+  }
+}
+```
+
+#### Implications for Color Editing
+
+- NS files in `nsToChildBP` have **ally/enemy color switching**
+- These NS files likely have **two sets of ColorCurves** (one for each team)
+- When editing, you may want to edit **both** ally and enemy curves to maintain consistency
+- Or use the mapping to selectively edit only ally or enemy colors
+
 ---
 
 ## Complete Niagara Data Interface Support
