@@ -98,6 +98,23 @@ public static class NiagaraService
         public bool IsConstant { get; set; }              // All values roughly the same
         public double MaxValue { get; set; }              // Highest RGB value
         public double MinValue { get; set; }              // Lowest RGB value
+        
+        // Enemy/Ally detection (from ChildBP analysis)
+        public bool? IsEnemyRelated { get; set; }         // True if NS file receives IsEnemy from ChildBP
+        public string? EmitterName { get; set; }          // Detected emitter name from parent chain
+        public string? SourceChildBP { get; set; }        // ChildBP that passes IsEnemy to this NS
+    }
+    
+    /// <summary>
+    /// Result of scanning ChildBP assets for IsEnemy parameter redirects
+    /// </summary>
+    public class IsEnemyMappingResult
+    {
+        public bool Success { get; set; }
+        public string? Error { get; set; }
+        public int TotalChildBPsScanned { get; set; }
+        public int ChildBPsWithIsEnemy { get; set; }
+        public Dictionary<string, string> NsToChildBP { get; set; } = new(); // NS name -> ChildBP that passes IsEnemy
     }
 
     public class ColorValue
@@ -328,6 +345,164 @@ public static class NiagaraService
     #endregion
 
     #region Public API
+
+    /// <summary>
+    /// Scan ChildBP assets directly from IoStore to find which NS files receive IsEnemy parameter.
+    /// This reads from the game's pak files without extracting.
+    /// </summary>
+    /// <param name="context">Loaded ZenPackage context with game containers</param>
+    /// <returns>IsEnemyMappingResult with NS->ChildBP mapping</returns>
+    public static IsEnemyMappingResult ScanChildBPsFromIoStore(ZenPackage.FZenPackageContext context)
+    {
+        var result = new IsEnemyMappingResult();
+        
+        try
+        {
+            // Find all ChildBP packages
+            foreach (var packageId in context.GetAllPackageIds())
+            {
+                string? path = context.GetPackagePath(packageId);
+                if (string.IsNullOrEmpty(path)) continue;
+                
+                // Check if this is a ChildBP package
+                if (!path.Contains("ChildBP", StringComparison.OrdinalIgnoreCase)) continue;
+                
+                result.TotalChildBPsScanned++;
+                
+                try
+                {
+                    // Get the package header which contains the NameMap
+                    var header = context.GetPackage(packageId);
+                    if (header == null) continue;
+                    
+                    // Check if NameMap contains IsEnemy
+                    bool hasIsEnemy = false;
+                    var nsNames = new List<string>();
+                    
+                    foreach (var name in header.NameMap)
+                    {
+                        if (name.Contains("IsEnemy", StringComparison.OrdinalIgnoreCase))
+                        {
+                            hasIsEnemy = true;
+                        }
+                        // Look for NS_ names in the NameMap
+                        if (name.StartsWith("NS_") && name.Length > 4)
+                        {
+                            // Extract just the NS name (before any suffix like _GEN_VARIABLE)
+                            var nsName = name;
+                            int genIdx = nsName.IndexOf("_GEN_", StringComparison.OrdinalIgnoreCase);
+                            if (genIdx > 0)
+                                nsName = nsName.Substring(0, genIdx);
+                            
+                            if (!nsNames.Contains(nsName))
+                                nsNames.Add(nsName);
+                        }
+                    }
+                    
+                    if (hasIsEnemy)
+                    {
+                        result.ChildBPsWithIsEnemy++;
+                        var bpName = Path.GetFileName(path) + ".uasset";
+                        
+                        foreach (var nsName in nsNames)
+                        {
+                            if (!result.NsToChildBP.ContainsKey(nsName))
+                            {
+                                result.NsToChildBP[nsName] = bpName;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Skip packages that can't be read
+                }
+            }
+            
+            result.Success = true;
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.Error = ex.Message;
+        }
+        
+        return result;
+    }
+
+    /// <summary>
+    /// Scan ChildBP assets to find which NS files receive IsEnemy parameter.
+    /// ChildBP assets contain UserParameterRedirects that pass IsEnemy to Niagara systems.
+    /// </summary>
+    /// <param name="childBPDirectory">Directory containing extracted ChildBP assets</param>
+    /// <returns>JSON with mapping of NS names to their source ChildBP</returns>
+    public static string ScanChildBPsForIsEnemy(string childBPDirectory)
+    {
+        var result = new IsEnemyMappingResult();
+        
+        try
+        {
+            if (!Directory.Exists(childBPDirectory))
+            {
+                result.Success = false;
+                result.Error = $"Directory not found: {childBPDirectory}";
+                return JsonSerializer.Serialize(result, JsonOptions);
+            }
+            
+            // Find all ChildBP assets
+            var childBPFiles = Directory.GetFiles(childBPDirectory, "*_ChildBP.uasset", SearchOption.AllDirectories)
+                .Concat(Directory.GetFiles(childBPDirectory, "*ChildBP.uasset", SearchOption.AllDirectories))
+                .Distinct()
+                .ToList();
+            
+            result.TotalChildBPsScanned = childBPFiles.Count;
+            
+            // Regex to find NS_ references (excluding _GEN_VARIABLE suffix)
+            var nsRegex = new System.Text.RegularExpressions.Regex(@"NS_\d+_[A-Za-z0-9]+(?!_GEN)");
+            
+            foreach (var bpFile in childBPFiles)
+            {
+                try
+                {
+                    // Read raw bytes and convert to string for pattern matching
+                    var bytes = File.ReadAllBytes(bpFile);
+                    var text = System.Text.Encoding.UTF8.GetString(bytes);
+                    
+                    // Check if this ChildBP has IsEnemy parameter redirect
+                    if (text.Contains("IsEnemy"))
+                    {
+                        result.ChildBPsWithIsEnemy++;
+                        
+                        // Find all NS_ references in this ChildBP
+                        var matches = nsRegex.Matches(text);
+                        var bpName = Path.GetFileName(bpFile);
+                        
+                        foreach (System.Text.RegularExpressions.Match match in matches)
+                        {
+                            var nsName = match.Value;
+                            if (!result.NsToChildBP.ContainsKey(nsName))
+                            {
+                                result.NsToChildBP[nsName] = bpName;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Skip files that can't be read
+                }
+            }
+            
+            result.Success = true;
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.Error = ex.Message;
+        }
+        
+        return JsonSerializer.Serialize(result, JsonOptions);
+    }
 
     /// <summary>
     /// List all NiagaraSystem files in a directory with metadata

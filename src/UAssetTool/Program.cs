@@ -71,6 +71,7 @@ public partial class Program
                 "niagara_list" => CliNiagaraList(args),
                 "niagara_details" => CliNiagaraDetails(args),
                 "niagara_edit" => CliNiagaraEdit(args),
+                "scan_childbp_isenemy" => CliScanChildBPIsEnemy(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
                 "test_mesh_modify" => CliTestMeshModify(args),
                 "analyze_sections" => CliAnalyzeSections(args),
@@ -1341,17 +1342,28 @@ public partial class Program
                     }
 
                     // Write output files - use the package name (from TOC or fallback)
-                    // Normalize path (handle /../ patterns)
+                    // Normalize path (handle /../ patterns like /Game/Marvel/../../../Marvel/Content/...)
                     string relPath = packageName;
-                    // Remove leading /Game/Marvel/../../../ patterns to get clean path
-                    int contentIdx = relPath.IndexOf("/Content/", StringComparison.OrdinalIgnoreCase);
-                    if (contentIdx > 0)
-                        relPath = relPath.Substring(contentIdx + 1); // Keep "Content/..."
-                    else if (relPath.StartsWith("/Game/"))
+                    
+                    // First resolve any /../ patterns by using Path.GetFullPath with a fake root
+                    if (relPath.Contains("/../"))
+                    {
+                        // Use a temp root to resolve relative segments, then extract the result
+                        string tempRoot = Path.GetTempPath();
+                        string tempPath = Path.Combine(tempRoot, relPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+                        string resolved = Path.GetFullPath(tempPath);
+                        relPath = resolved.Substring(tempRoot.Length).Replace(Path.DirectorySeparatorChar, '/');
+                        if (!relPath.StartsWith("/"))
+                            relPath = "/" + relPath;
+                    }
+                    
+                    // Remove leading slash and /Game/ prefix, keep the rest (e.g., Marvel/Content/Marvel/...)
+                    if (relPath.StartsWith("/Game/"))
                         relPath = relPath.Substring(6); // Remove "/Game/"
+                    else if (relPath.StartsWith("/"))
+                        relPath = relPath.Substring(1); // Remove leading slash
+                    
                     relPath = relPath.Replace('/', Path.DirectorySeparatorChar);
-                    if (relPath.StartsWith(Path.DirectorySeparatorChar))
-                        relPath = relPath.Substring(1);
                     if (!relPath.EndsWith(".uasset"))
                         relPath += ".uasset";
 
@@ -1838,6 +1850,117 @@ public partial class Program
             string json = NiagaraService.EditNiagaraColors(request, usmapPath);
             Console.WriteLine(json);
             return 0;
+        }
+    }
+
+    private static int CliScanChildBPIsEnemy(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool scan_childbp_isenemy <paks_directory> [--aes <key>]");
+            Console.Error.WriteLine("       UAssetTool scan_childbp_isenemy <extracted_directory> --extracted");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Scans ChildBP assets to find which NS files receive IsEnemy parameter.");
+            Console.Error.WriteLine("ChildBP assets contain UserParameterRedirects that pass IsEnemy to Niagara systems.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --aes <key>     AES decryption key for encrypted paks (hex string)");
+            Console.Error.WriteLine("  --extracted     Scan from extracted directory instead of IoStore");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Examples:");
+            Console.Error.WriteLine("  scan_childbp_isenemy \"C:/Game/Paks\" --aes 0x0C263D8C...");
+            Console.Error.WriteLine("  scan_childbp_isenemy \"C:/extracted_childbp\" --extracted");
+            return 1;
+        }
+
+        string path = args[1];
+        string? aesKey = null;
+        bool useExtracted = false;
+
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--aes" && i + 1 < args.Length)
+                aesKey = args[++i];
+            else if (args[i] == "--extracted")
+                useExtracted = true;
+        }
+
+        if (useExtracted)
+        {
+            // Use extracted directory mode
+            string json = NiagaraService.ScanChildBPsForIsEnemy(path);
+            Console.WriteLine(json);
+            return 0;
+        }
+
+        // Direct IoStore reading mode
+        if (!Directory.Exists(path))
+        {
+            Console.Error.WriteLine($"Directory not found: {path}");
+            return 1;
+        }
+
+        try
+        {
+            using var context = new ZenPackage.FZenPackageContext();
+            
+            // Set AES key if provided
+            if (!string.IsNullOrEmpty(aesKey))
+            {
+                string cleanKey = aesKey.StartsWith("0x") ? aesKey[2..] : aesKey;
+                context.SetAesKey(cleanKey);
+            }
+            else
+            {
+                // Default Marvel Rivals key
+                context.SetAesKey("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74");
+            }
+
+            Console.Error.WriteLine($"Loading game containers from: {path}");
+
+            // Load global.utoc first
+            string globalPath = Path.Combine(path, "global.utoc");
+            if (File.Exists(globalPath))
+            {
+                context.LoadContainer(globalPath);
+            }
+
+            // Load other containers
+            var utocFiles = Directory.GetFiles(path, "*.utoc", SearchOption.TopDirectoryOnly)
+                .Where(f => !f.EndsWith("global.utoc", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !f.Contains("optional", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(f => f)
+                .ToList();
+
+            Console.Error.WriteLine($"Loading {utocFiles.Count} containers...");
+            foreach (var utocFile in utocFiles)
+            {
+                try
+                {
+                    context.LoadContainer(utocFile);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  Warning: Failed to load {Path.GetFileName(utocFile)}: {ex.Message}");
+                }
+            }
+
+            Console.Error.WriteLine($"Total packages indexed: {context.PackageCount}");
+            Console.Error.WriteLine("Scanning ChildBP packages for IsEnemy...");
+
+            var result = NiagaraService.ScanChildBPsFromIoStore(context);
+            string json = System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions 
+            { 
+                WriteIndented = true,
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            });
+            Console.WriteLine(json);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
         }
     }
     
