@@ -2071,6 +2071,22 @@ public partial class Program
                 // Debug
                 "debug_asset_info" => DebugAssetInfo(request.FilePath),
                 
+                // PAK operations
+                "list_pak_files" => ListPakFiles(request.FilePath, request.AesKey),
+                "extract_pak_file" => ExtractPakFile(request.FilePath, request.InternalPath, request.OutputPath, request.AesKey),
+                "extract_pak_all" => ExtractPakAll(request.FilePath, request.OutputPath, request.AesKey),
+                "create_pak" => CreatePakJson(request.OutputPath, request.FilePaths, request.MountPoint, request.PathHashSeed, request.AesKey),
+                "create_companion_pak" => CreateCompanionPakJson(request.OutputPath, request.FilePaths, request.MountPoint, request.PathHashSeed, request.AesKey),
+                
+                // IoStore operations
+                "list_iostore_files" => ListIoStoreFiles(request.FilePath, request.AesKey),
+                "create_iostore" => CreateIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.Compress, request.AesKey),
+                "is_iostore_compressed" => IsIoStoreCompressed(request.FilePath),
+                "recompress_iostore" => RecompressIoStore(request.FilePath),
+                "extract_iostore" => ExtractIoStoreJson(request.FilePath, request.OutputPath, request.AesKey),
+                "extract_script_objects" => ExtractScriptObjectsJson(request.FilePath, request.OutputPath),
+                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey),
+                
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
         }
@@ -4078,6 +4094,801 @@ public partial class Program
             return 1;
         }
     }
+    
+    #region PAK/IoStore JSON API Methods
+    
+    /// <summary>
+    /// List all files in a PAK file
+    /// </summary>
+    private static UAssetResponse ListPakFiles(string? pakPath, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(pakPath))
+            return new UAssetResponse { Success = false, Message = "PAK path is required" };
+        
+        if (!File.Exists(pakPath))
+            return new UAssetResponse { Success = false, Message = $"PAK file not found: {pakPath}" };
+        
+        try
+        {
+            using var pakReader = new IoStore.PakReader(pakPath, aesKey);
+            
+            var files = pakReader.Files.Select(f => new Dictionary<string, object?>
+            {
+                ["path"] = f,
+                ["size"] = pakReader.GetEntry(f)?.UncompressedSize ?? 0,
+                ["compressed_size"] = pakReader.GetEntry(f)?.CompressedSize ?? 0
+            }).ToList();
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Found {files.Count} files in PAK",
+                Data = new Dictionary<string, object?>
+                {
+                    ["file_count"] = files.Count,
+                    ["mount_point"] = pakReader.MountPoint,
+                    ["version"] = pakReader.Version,
+                    ["encrypted_index"] = pakReader.EncryptedIndex,
+                    ["files"] = files
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to read PAK: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Extract a single file from a PAK
+    /// </summary>
+    private static UAssetResponse ExtractPakFile(string? pakPath, string? internalPath, string? outputPath, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(pakPath))
+            return new UAssetResponse { Success = false, Message = "PAK path is required" };
+        if (string.IsNullOrEmpty(internalPath))
+            return new UAssetResponse { Success = false, Message = "Internal path is required" };
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        
+        if (!File.Exists(pakPath))
+            return new UAssetResponse { Success = false, Message = $"PAK file not found: {pakPath}" };
+        
+        try
+        {
+            using var pakReader = new IoStore.PakReader(pakPath, aesKey);
+            byte[] data = pakReader.Get(internalPath);
+            
+            string? dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            
+            File.WriteAllBytes(outputPath, data);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Extracted {internalPath} ({data.Length} bytes)",
+                Data = new Dictionary<string, object?>
+                {
+                    ["output_path"] = outputPath,
+                    ["size"] = data.Length
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to extract file: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Extract all files from a PAK to a directory
+    /// </summary>
+    private static UAssetResponse ExtractPakAll(string? pakPath, string? outputDir, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(pakPath))
+            return new UAssetResponse { Success = false, Message = "PAK path is required" };
+        if (string.IsNullOrEmpty(outputDir))
+            return new UAssetResponse { Success = false, Message = "Output directory is required" };
+        
+        if (!File.Exists(pakPath))
+            return new UAssetResponse { Success = false, Message = $"PAK file not found: {pakPath}" };
+        
+        try
+        {
+            using var pakReader = new IoStore.PakReader(pakPath, aesKey);
+            Directory.CreateDirectory(outputDir);
+            
+            int extracted = 0;
+            int failed = 0;
+            var extractedFiles = new List<string>();
+            
+            foreach (var file in pakReader.Files)
+            {
+                try
+                {
+                    byte[] data = pakReader.Get(file);
+                    string outPath = Path.Combine(outputDir, file.Replace('/', Path.DirectorySeparatorChar));
+                    
+                    string? dir = Path.GetDirectoryName(outPath);
+                    if (!string.IsNullOrEmpty(dir))
+                        Directory.CreateDirectory(dir);
+                    
+                    File.WriteAllBytes(outPath, data);
+                    extractedFiles.Add(file);
+                    extracted++;
+                }
+                catch
+                {
+                    failed++;
+                }
+            }
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Extracted {extracted} files, {failed} failed",
+                Data = new Dictionary<string, object?>
+                {
+                    ["extracted_count"] = extracted,
+                    ["failed_count"] = failed,
+                    ["output_dir"] = outputDir,
+                    ["files"] = extractedFiles
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to extract PAK: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Create a PAK file from a list of files
+    /// </summary>
+    private static UAssetResponse CreatePakJson(string? outputPath, List<string>? filePaths, string? mountPoint, ulong pathHashSeed, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        if (filePaths == null || filePaths.Count == 0)
+            return new UAssetResponse { Success = false, Message = "File paths are required" };
+        
+        try
+        {
+            mountPoint ??= "../../../";
+            
+            using var pakWriter = new IoStore.PakWriter(mountPoint, pathHashSeed, aesKey);
+            
+            foreach (var filePath in filePaths)
+            {
+                if (!File.Exists(filePath))
+                    return new UAssetResponse { Success = false, Message = $"File not found: {filePath}" };
+                
+                string relativePath = Path.GetFileName(filePath);
+                byte[] data = File.ReadAllBytes(filePath);
+                pakWriter.AddEntry(relativePath, data);
+            }
+            
+            pakWriter.Write(outputPath);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Created PAK with {filePaths.Count} files",
+                Data = new Dictionary<string, object?>
+                {
+                    ["output_path"] = outputPath,
+                    ["file_count"] = filePaths.Count
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to create PAK: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Create a companion PAK file for IoStore bundles (contains chunknames)
+    /// </summary>
+    private static UAssetResponse CreateCompanionPakJson(string? outputPath, List<string>? filePaths, string? mountPoint, ulong pathHashSeed, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        if (filePaths == null || filePaths.Count == 0)
+            return new UAssetResponse { Success = false, Message = "File paths are required" };
+        
+        try
+        {
+            mountPoint ??= "../../../";
+            
+            IoStore.ChunkNamesPakWriter.Create(outputPath, filePaths, mountPoint, pathHashSeed, aesKey);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Created companion PAK listing {filePaths.Count} files",
+                Data = new Dictionary<string, object?>
+                {
+                    ["output_path"] = outputPath,
+                    ["file_count"] = filePaths.Count
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to create companion PAK: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// List all packages in an IoStore container
+    /// </summary>
+    private static UAssetResponse ListIoStoreFiles(string? utocPath, string? aesKeyHex)
+    {
+        if (string.IsNullOrEmpty(utocPath))
+            return new UAssetResponse { Success = false, Message = "UTOC path is required" };
+        
+        if (!File.Exists(utocPath))
+            return new UAssetResponse { Success = false, Message = $"UTOC file not found: {utocPath}" };
+        
+        try
+        {
+            byte[]? aesKey = ParseAesKeyOrDefault(aesKeyHex);
+            using var reader = new IoStore.IoStoreReader(utocPath, aesKey);
+            
+            // Get all chunks and their paths
+            var chunks = reader.GetChunks()
+                .Select((chunkId, idx) => new Dictionary<string, object?>
+                {
+                    ["index"] = idx,
+                    ["chunk_type"] = chunkId.ChunkType.ToString(),
+                    ["path"] = reader.GetChunkPath(chunkId)
+                })
+                .Where(c => c["path"] != null) // Only include chunks with paths
+                .ToList();
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Found {chunks.Count} packages in IoStore",
+                Data = new Dictionary<string, object?>
+                {
+                    ["package_count"] = chunks.Count,
+                    ["container_name"] = reader.ContainerName,
+                    ["files"] = chunks.Select(c => c["path"]).ToList()
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to read IoStore: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Parse AES key from hex string, or return null for default
+    /// </summary>
+    private static byte[]? ParseAesKeyOrDefault(string? aesKeyHex)
+    {
+        if (string.IsNullOrEmpty(aesKeyHex))
+            return null; // Use default in IoStoreReader
+        
+        string hex = aesKeyHex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? aesKeyHex[2..] : aesKeyHex;
+        byte[] bytes = new byte[hex.Length / 2];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        }
+        return bytes;
+    }
+    
+    /// <summary>
+    /// Check if an IoStore container is compressed
+    /// </summary>
+    private static UAssetResponse IsIoStoreCompressed(string? utocPath)
+    {
+        if (string.IsNullOrEmpty(utocPath))
+            return new UAssetResponse { Success = false, Message = "UTOC path is required" };
+        
+        if (!File.Exists(utocPath))
+            return new UAssetResponse { Success = false, Message = $"UTOC file not found: {utocPath}" };
+        
+        try
+        {
+            bool isCompressed = IoStore.IoStoreReader.IsCompressed(utocPath);
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = isCompressed ? "IoStore is compressed" : "IoStore is not compressed",
+                Data = new Dictionary<string, object?> { ["compressed"] = isCompressed }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to check compression: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Recompress an IoStore container with Oodle
+    /// </summary>
+    private static UAssetResponse RecompressIoStore(string? utocPath)
+    {
+        if (string.IsNullOrEmpty(utocPath))
+            return new UAssetResponse { Success = false, Message = "UTOC path is required" };
+        
+        if (!File.Exists(utocPath))
+            return new UAssetResponse { Success = false, Message = $"UTOC file not found: {utocPath}" };
+        
+        try
+        {
+            // Check if already compressed
+            if (IoStore.IoStoreReader.IsCompressed(utocPath))
+            {
+                return new UAssetResponse
+                {
+                    Success = true,
+                    Message = "IoStore is already compressed",
+                    Data = new Dictionary<string, object?> { ["already_compressed"] = true }
+                };
+            }
+            
+            string result = IoStore.IoStoreRecompressor.Recompress(utocPath);
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Recompressed IoStore: {result}",
+                Data = new Dictionary<string, object?> { ["output_path"] = result }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to recompress: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Extract IoStore to legacy format
+    /// </summary>
+    private static UAssetResponse ExtractIoStoreJson(string? utocPath, string? outputDir, string? aesKeyHex)
+    {
+        if (string.IsNullOrEmpty(utocPath))
+            return new UAssetResponse { Success = false, Message = "UTOC path is required" };
+        if (string.IsNullOrEmpty(outputDir))
+            return new UAssetResponse { Success = false, Message = "Output directory is required" };
+        
+        if (!File.Exists(utocPath))
+            return new UAssetResponse { Success = false, Message = $"UTOC file not found: {utocPath}" };
+        
+        try
+        {
+            Directory.CreateDirectory(outputDir);
+            
+            // Create package context for proper Zen-to-Legacy conversion
+            using var context = new ZenPackage.FZenPackageContext();
+            
+            // Set AES key
+            string aesKey = string.IsNullOrEmpty(aesKeyHex) 
+                ? "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74" 
+                : aesKeyHex;
+            context.SetAesKey(aesKey);
+            
+            // Check if this is a mod in ~mods folder - need to load game containers for import resolution
+            string? paksDir = null;
+            string utocDir = Path.GetDirectoryName(utocPath) ?? "";
+            
+            // Walk up to find ~mods folder and get base paks directory
+            string? current = utocDir;
+            while (!string.IsNullOrEmpty(current))
+            {
+                string dirName = Path.GetFileName(current) ?? "";
+                if (dirName.Equals("~mods", StringComparison.OrdinalIgnoreCase))
+                {
+                    paksDir = Path.GetDirectoryName(current);
+                    break;
+                }
+                current = Path.GetDirectoryName(current);
+            }
+            
+            // If we found a paks directory, load game containers first for import resolution
+            if (!string.IsNullOrEmpty(paksDir) && Directory.Exists(paksDir))
+            {
+                // Load global.utoc first for script objects
+                string globalPath = Path.Combine(paksDir, "global.utoc");
+                if (File.Exists(globalPath))
+                {
+                    context.LoadContainer(globalPath);
+                    context.LoadScriptObjectsFromContainer(0);
+                }
+                
+                // Load other game containers
+                var gameUtocs = Directory.GetFiles(paksDir, "*.utoc", SearchOption.TopDirectoryOnly)
+                    .Where(f => !f.EndsWith("global.utoc", StringComparison.OrdinalIgnoreCase))
+                    .Where(f => !f.Contains("optional", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(f => f)
+                    .ToList();
+                
+                foreach (var gameUtoc in gameUtocs)
+                {
+                    try { context.LoadContainer(gameUtoc); }
+                    catch { /* Skip failed containers */ }
+                }
+            }
+            
+            // Load the target mod container
+            int modContainerIndex = context.ContainerCount;
+            context.LoadContainer(utocPath);
+            
+            int converted = 0;
+            int failed = 0;
+            var extractedFiles = new List<string>();
+            
+            // Get all packages from the mod container only
+            var packageIds = context.GetPackageIdsFromContainer(modContainerIndex);
+            
+            foreach (var packageId in packageIds)
+            {
+                string? fullPath = context.GetPackagePath(packageId);
+                var cached = context.GetCachedPackage(packageId);
+                if (cached == null) continue;
+                
+                string packageName = !string.IsNullOrEmpty(fullPath) ? fullPath : cached.Header.PackageName();
+                
+                try
+                {
+                    // Convert to legacy format using ZenToLegacyConverter
+                    var converter = new ZenPackage.ZenToLegacyConverter(context, packageId);
+                    var legacyBundle = converter.Convert();
+                    
+                    // Normalize path for output
+                    string relPath = packageName;
+                    
+                    // Resolve /../ patterns
+                    if (relPath.Contains("/../"))
+                    {
+                        string tempRoot = Path.GetTempPath();
+                        string tempPath = Path.Combine(tempRoot, relPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+                        string resolved = Path.GetFullPath(tempPath);
+                        relPath = resolved.Substring(tempRoot.Length).Replace(Path.DirectorySeparatorChar, '/');
+                        if (!relPath.StartsWith("/"))
+                            relPath = "/" + relPath;
+                        int contentIdx = relPath.IndexOf("/Content/", StringComparison.OrdinalIgnoreCase);
+                        if (contentIdx >= 0)
+                            relPath = "/Game" + relPath.Substring(contentIdx + "/Content".Length);
+                    }
+                    
+                    // Remove /Game/ prefix
+                    if (relPath.StartsWith("/Game/"))
+                        relPath = relPath.Substring(6);
+                    else if (relPath.StartsWith("/"))
+                        relPath = relPath.Substring(1);
+                    
+                    relPath = relPath.Replace('/', Path.DirectorySeparatorChar);
+                    if (!relPath.EndsWith(".uasset"))
+                        relPath += ".uasset";
+                    
+                    string outputAssetPath = Path.Combine(outputDir, relPath);
+                    string? outputAssetDir = Path.GetDirectoryName(outputAssetPath);
+                    if (!string.IsNullOrEmpty(outputAssetDir))
+                        Directory.CreateDirectory(outputAssetDir);
+                    
+                    // Write .uasset
+                    File.WriteAllBytes(outputAssetPath, legacyBundle.AssetData);
+                    extractedFiles.Add(relPath);
+                    
+                    // Write .uexp
+                    string outputUexpPath = Path.ChangeExtension(outputAssetPath, ".uexp");
+                    File.WriteAllBytes(outputUexpPath, legacyBundle.ExportsData);
+                    extractedFiles.Add(Path.ChangeExtension(relPath, ".uexp"));
+                    
+                    // Write .ubulk if present
+                    if (legacyBundle.BulkData != null && legacyBundle.BulkData.Length > 0)
+                    {
+                        string outputBulkPath = Path.ChangeExtension(outputAssetPath, ".ubulk");
+                        File.WriteAllBytes(outputBulkPath, legacyBundle.BulkData);
+                        extractedFiles.Add(Path.ChangeExtension(relPath, ".ubulk"));
+                    }
+                    
+                    converted++;
+                }
+                catch
+                {
+                    failed++;
+                }
+            }
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Extracted {converted} packages from IoStore ({failed} failed)",
+                Data = new Dictionary<string, object?>
+                {
+                    ["extracted_count"] = converted,
+                    ["failed_count"] = failed,
+                    ["output_dir"] = outputDir,
+                    ["files"] = extractedFiles
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to extract IoStore: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Extract ScriptObjects.bin from game paks
+    /// </summary>
+    private static UAssetResponse ExtractScriptObjectsJson(string? paksPath, string? outputPath)
+    {
+        if (string.IsNullOrEmpty(paksPath))
+            return new UAssetResponse { Success = false, Message = "Paks path is required" };
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        
+        if (!Directory.Exists(paksPath))
+            return new UAssetResponse { Success = false, Message = $"Paks directory not found: {paksPath}" };
+        
+        try
+        {
+            byte[]? data = IoStore.IoStoreReader.ExtractScriptObjects(paksPath);
+            if (data == null)
+            {
+                return new UAssetResponse { Success = false, Message = "ScriptObjects not found in any IoStore container" };
+            }
+            
+            string? dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            
+            File.WriteAllBytes(outputPath, data);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Extracted ScriptObjects.bin ({data.Length} bytes)",
+                Data = new Dictionary<string, object?>
+                {
+                    ["output_path"] = outputPath,
+                    ["size"] = data.Length
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to extract ScriptObjects: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Create a mod IoStore bundle from a directory of legacy assets.
+    /// This is the JSON API equivalent of retoc's action_to_zen.
+    /// Converts .uasset/.uexp files to Zen format and creates .utoc/.ucas/.pak bundle.
+    /// </summary>
+    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        if (string.IsNullOrEmpty(inputDir))
+            return new UAssetResponse { Success = false, Message = "Input directory is required" };
+        
+        if (!Directory.Exists(inputDir))
+            return new UAssetResponse { Success = false, Message = $"Input directory not found: {inputDir}" };
+        
+        try
+        {
+            // Collect all uasset files
+            var uassetFiles = Directory.GetFiles(inputDir, "*.uasset", SearchOption.AllDirectories).ToList();
+            
+            if (uassetFiles.Count == 0)
+                return new UAssetResponse { Success = false, Message = "No .uasset files found in input directory" };
+            
+            // Determine output paths
+            string outputBase = outputPath.EndsWith(".utoc") ? outputPath.Substring(0, outputPath.Length - 5) : outputPath;
+            string utocPath = outputBase + ".utoc";
+            string pakPath = outputBase + ".pak";
+            string mount = string.IsNullOrEmpty(mountPoint) ? "../../../" : mountPoint;
+            
+            // Create IoStore container
+            using var ioStoreWriter = new IoStore.IoStoreWriter(
+                utocPath,
+                IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
+                IoStore.EIoContainerHeaderVersion.NoExportInfo,
+                mount,
+                compress,
+                !string.IsNullOrEmpty(aesKey),
+                aesKey);
+            
+            var filePaths = new List<string>();
+            int converted = 0;
+            var errors = new List<string>();
+            
+            foreach (var uassetPath in uassetFiles)
+            {
+                string assetName = Path.GetFileNameWithoutExtension(uassetPath);
+                
+                try
+                {
+                    // Convert legacy asset to Zen format
+                    var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
+                        uassetPath,
+                        usmapPath,
+                        ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    
+                    // Create package ID using the /Game/... format
+                    string gamePackagePath;
+                    if (packagePath.StartsWith("Marvel/Content/"))
+                    {
+                        gamePackagePath = "/Game/" + packagePath.Substring("Marvel/Content/".Length);
+                    }
+                    else
+                    {
+                        gamePackagePath = "/" + packagePath;
+                    }
+                    
+                    var packageId = IoStore.FPackageId.FromName(gamePackagePath);
+                    var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
+                    
+                    // Create store entry with imported packages
+                    var storeEntry = new IoStore.StoreEntry
+                    {
+                        ExportCount = zenPackage.ExportMap.Count,
+                        ExportBundleCount = 1,
+                        LoadOrder = 0
+                    };
+                    
+                    foreach (ulong importedPkgId in zenPackage.ImportedPackages)
+                    {
+                        storeEntry.ImportedPackages.Add(new IoStore.FPackageId(importedPkgId));
+                    }
+                    
+                    // Write to IoStore
+                    string fullPath = mount + packagePath + ".uasset";
+                    ioStoreWriter.WritePackageChunk(chunkId, fullPath, zenData, storeEntry);
+                    
+                    // Add to chunknames
+                    filePaths.Add(packagePath + ".uasset");
+                    filePaths.Add(packagePath + ".uexp");
+                    
+                    // Handle .ubulk if exists
+                    string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
+                    if (File.Exists(ubulkPath))
+                    {
+                        byte[] ubulkData = File.ReadAllBytes(ubulkPath);
+                        var bulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.BulkData);
+                        string bulkFullPath = mount + packagePath + ".ubulk";
+                        ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
+                        filePaths.Add(packagePath + ".ubulk");
+                    }
+                    
+                    converted++;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{assetName}: {ex.Message}");
+                }
+            }
+            
+            if (converted == 0)
+            {
+                return new UAssetResponse { Success = false, Message = $"No assets were converted. Errors: {string.Join("; ", errors)}" };
+            }
+            
+            ioStoreWriter.Complete();
+            
+            // Create companion PAK with chunknames
+            IoStore.ChunkNamesPakWriter.Create(pakPath, filePaths, mount, 0, aesKey);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Created IoStore mod bundle with {converted} assets",
+                Data = new Dictionary<string, object?>
+                {
+                    ["utoc_path"] = utocPath,
+                    ["ucas_path"] = Path.ChangeExtension(utocPath, ".ucas"),
+                    ["pak_path"] = pakPath,
+                    ["converted_count"] = converted,
+                    ["file_count"] = filePaths.Count,
+                    ["errors"] = errors.Count > 0 ? errors : null
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to create mod IoStore: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Create an IoStore bundle from a directory of legacy assets
+    /// </summary>
+    private static UAssetResponse CreateIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, bool compress, string? aesKey)
+    {
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "Output path is required" };
+        if (string.IsNullOrEmpty(inputDir))
+            return new UAssetResponse { Success = false, Message = "Input directory is required" };
+        
+        if (!Directory.Exists(inputDir))
+            return new UAssetResponse { Success = false, Message = $"Input directory not found: {inputDir}" };
+        
+        try
+        {
+            // Collect all uasset files
+            var uassetFiles = Directory.GetFiles(inputDir, "*.uasset", SearchOption.AllDirectories).ToList();
+            
+            if (uassetFiles.Count == 0)
+                return new UAssetResponse { Success = false, Message = "No .uasset files found in input directory" };
+            
+            string utocPath = outputPath.EndsWith(".utoc") ? outputPath : outputPath + ".utoc";
+            string pakPath = Path.ChangeExtension(utocPath, ".pak");
+            
+            // Convert each asset to Zen format and write to IoStore
+            using var ioStoreWriter = new IoStore.IoStoreWriter(
+                utocPath,
+                IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
+                IoStore.EIoContainerHeaderVersion.NoExportInfo,
+                "../../../",
+                compress,
+                false,
+                aesKey);
+            
+            var filePaths = new List<string>();
+            int converted = 0;
+            
+            foreach (var uassetPath in uassetFiles)
+            {
+                try
+                {
+                    byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath, usmapPath);
+                    
+                    // Get relative path for the package
+                    string relativePath = Path.GetRelativePath(inputDir, uassetPath);
+                    string packagePath = "/" + Path.ChangeExtension(relativePath, null).Replace('\\', '/');
+                    
+                    // Create chunk ID from package path and write
+                    var packageId = IoStore.FPackageId.FromName(packagePath);
+                    var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
+                    ioStoreWriter.WriteChunk(chunkId, packagePath, zenData);
+                    
+                    filePaths.Add(relativePath.Replace('\\', '/'));
+                    converted++;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[CreateIoStore] Failed to convert {uassetPath}: {ex.Message}");
+                }
+            }
+            
+            ioStoreWriter.Complete();
+            
+            // Create companion PAK
+            IoStore.ChunkNamesPakWriter.Create(pakPath, filePaths, "../../../", 0, aesKey);
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Created IoStore bundle with {converted} assets",
+                Data = new Dictionary<string, object?>
+                {
+                    ["utoc_path"] = utocPath,
+                    ["ucas_path"] = Path.ChangeExtension(utocPath, ".ucas"),
+                    ["pak_path"] = pakPath,
+                    ["asset_count"] = converted,
+                    ["files"] = filePaths
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to create IoStore: {ex.Message}" };
+        }
+    }
+    
+    #endregion
 }
 
 #region Request/Response Models
@@ -4123,6 +4934,28 @@ public class UAssetRequest
     
     [JsonPropertyName("json_data")]
     public string? JsonData { get; set; }
+    
+    // PAK/IoStore operations
+    [JsonPropertyName("aes_key")]
+    public string? AesKey { get; set; }
+    
+    [JsonPropertyName("internal_path")]
+    public string? InternalPath { get; set; }
+    
+    [JsonPropertyName("mount_point")]
+    public string? MountPoint { get; set; }
+    
+    [JsonPropertyName("path_hash_seed")]
+    public ulong PathHashSeed { get; set; } = 0;
+    
+    [JsonPropertyName("input_dir")]
+    public string? InputDir { get; set; }
+    
+    [JsonPropertyName("compress")]
+    public bool Compress { get; set; } = true;
+    
+    [JsonPropertyName("filter_patterns")]
+    public List<string>? FilterPatterns { get; set; }
 }
 
 public class UAssetResponse

@@ -91,7 +91,7 @@ public class ZenToLegacyConverter
             if (bulkData != null && bulkData.Length > 0)
             {
                 bundle.BulkData = bulkData;
-                Console.WriteLine($"[ZenToLegacy] Extracted {bulkData.Length} bytes of bulk data");
+                Console.Error.WriteLine($"[ZenToLegacy] Extracted {bulkData.Length} bytes of bulk data");
             }
         }
         
@@ -232,7 +232,7 @@ public class ZenToLegacyConverter
     {
         if (_debugMode)
         {
-            Console.WriteLine($"[DEBUG] BuildImportMap: {_zenPackage.ImportMap.Count} imports to resolve");
+            Console.Error.WriteLine($"[DEBUG] BuildImportMap: {_zenPackage.ImportMap.Count} imports to resolve");
         }
         
         for (int importIndex = 0; importIndex < _zenPackage.ImportMap.Count; importIndex++)
@@ -247,7 +247,7 @@ public class ZenToLegacyConverter
             {
                 string importType = importObjectIndex.IsScriptImport() ? "Script" : 
                                    importObjectIndex.IsPackageImport() ? "Package" : "Other";
-                Console.WriteLine($"[DEBUG] Import[{importIndex}]: Type={importType}, Value={importObjectIndex.Value:X16}");
+                Console.Error.WriteLine($"[DEBUG] Import[{importIndex}]: Type={importType}, Value={importObjectIndex.Value:X16}");
             }
             
             try
@@ -299,7 +299,7 @@ public class ZenToLegacyConverter
             // Debug: Print export names to trace shifting
             if (debugMode && exportIndex < 20)
             {
-                Console.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Name=\"{exportNameString}\"");
+                Console.Error.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Name=\"{exportNameString}\"");
             }
             var (objectName, objectNameNumber) = StoreOrFindNameWithNumber(exportNameString);
             uint objectFlags = zenExport.ObjectFlags;
@@ -414,7 +414,7 @@ public class ZenToLegacyConverter
             // Zen import index not in our mapping - log for debugging
             if (_debugMode)
             {
-                Console.WriteLine($"[DEBUG] Unmapped zen import index: {zenImportIndex}, ImportMap size: {_zenPackage.ImportMap.Count}, OriginalImportOrder keys: {string.Join(",", _originalImportOrder.Keys.Take(20))}");
+                Console.Error.WriteLine($"[DEBUG] Unmapped zen import index: {zenImportIndex}, ImportMap size: {_zenPackage.ImportMap.Count}, OriginalImportOrder keys: {string.Join(",", _originalImportOrder.Keys.Take(20))}");
             }
             return index;
         }
@@ -990,9 +990,9 @@ public class ZenToLegacyConverter
         
         if (_debugMode)
         {
-            Console.WriteLine($"[DEBUG] ResolveScriptImport: Index={import.Value:X16}");
-            Console.WriteLine($"  ObjectName.Index={scriptObject.ObjectName.Index}, Type={scriptObject.ObjectName.Type}");
-            Console.WriteLine($"  Resolved name='{objectName}'");
+            Console.Error.WriteLine($"[DEBUG] ResolveScriptImport: Index={import.Value:X16}");
+            Console.Error.WriteLine($"  ObjectName.Index={scriptObject.ObjectName.Index}, Type={scriptObject.ObjectName.Type}");
+            Console.Error.WriteLine($"  Resolved name='{objectName}'");
         }
         
         if (scriptObject.OuterIndex.IsNull())
@@ -1078,7 +1078,7 @@ public class ZenToLegacyConverter
             var targetPackage = _context.GetPackage(importedPackageId);
             if (targetPackage == null && _debugMode)
             {
-                Console.WriteLine($"[DEBUG] Package not found: {importedPackageId:X16} ({packageName})");
+                Console.Error.WriteLine($"[DEBUG] Package not found: {importedPackageId:X16} ({packageName})");
             }
             if (targetPackage != null)
             {
@@ -1097,11 +1097,11 @@ public class ZenToLegacyConverter
                             // Debug: Check what name we're getting
                             if (_debugMode)
                             {
-                                Console.WriteLine($"[DEBUG] Resolving export from {packageName}:");
-                                Console.WriteLine($"  ObjectName.Index={export.ObjectName.Index}, Type={export.ObjectName.Type}");
-                                Console.WriteLine($"  TargetPackage.NameMap.Count={targetPackage.NameMap.Count}");
+                                Console.Error.WriteLine($"[DEBUG] Resolving export from {packageName}:");
+                                Console.Error.WriteLine($"  ObjectName.Index={export.ObjectName.Index}, Type={export.ObjectName.Type}");
+                                Console.Error.WriteLine($"  TargetPackage.NameMap.Count={targetPackage.NameMap.Count}");
                                 if (export.ObjectName.Index < targetPackage.NameMap.Count)
-                                    Console.WriteLine($"  Name at index={targetPackage.NameMap[(int)export.ObjectName.Index]}");
+                                    Console.Error.WriteLine($"  Name at index={targetPackage.NameMap[(int)export.ObjectName.Index]}");
                             }
                             
                             // Use GetName with scriptObjects for Global name type support
@@ -1144,10 +1144,10 @@ public class ZenToLegacyConverter
                     {
                         if (_debugMode)
                         {
-                            Console.WriteLine($"[DEBUG] Export hash not found: {exportHash:X16} in {packageName} (has {targetPackage.ExportMap.Count} exports)");
+                            Console.Error.WriteLine($"[DEBUG] Export hash not found: {exportHash:X16} in {packageName} (has {targetPackage.ExportMap.Count} exports)");
                             foreach (var exp in targetPackage.ExportMap)
                             {
-                                Console.WriteLine($"  Export: hash={exp.PublicExportHash:X16}");
+                                Console.Error.WriteLine($"  Export: hash={exp.PublicExportHash:X16}");
                             }
                         }
                         
@@ -1225,7 +1225,7 @@ public class ZenToLegacyConverter
         string fallbackName = $"Export_{packageImport.ImportedPublicExportHashIndex}";
         if (_debugMode)
         {
-            Console.WriteLine($"[DEBUG] Fallback import: pkg={packageName}, hashIdx={packageImport.ImportedPublicExportHashIndex}");
+            Console.Error.WriteLine($"[DEBUG] Fallback import: pkg={packageName}, hashIdx={packageImport.ImportedPublicExportHashIndex}");
         }
         return new ResolvedZenImport
         {
