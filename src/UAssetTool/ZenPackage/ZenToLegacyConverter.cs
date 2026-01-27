@@ -35,8 +35,6 @@ public class ZenToLegacyConverter
     private readonly Dictionary<ulong, int> _zenImportLookup = new(); // FPackageObjectIndex.Value -> import index
     private readonly Dictionary<int, int> _originalImportOrder = new(); // zen import index -> legacy import index
     
-    private bool _hasFailedImportMapEntries;
-    private bool _needsToRebuildExportsData;
     private bool _debugMode = false; // Enable debug output for dependency tracing
     
     public void SetDebugMode(bool enabled) => _debugMode = enabled;
@@ -151,6 +149,31 @@ public class ZenToLegacyConverter
             if (!string.IsNullOrEmpty(fullPath))
                 packageName = fullPath;
         }
+        
+        // Normalize package name - resolve /../ patterns
+        // e.g., /Game/Marvel/../../../Marvel/Content/Marvel/Characters/... -> /Game/Marvel/Characters/...
+        if (packageName.Contains("/../"))
+        {
+            // Resolve the path segments
+            var segments = packageName.Split('/').ToList();
+            var resolved = new List<string>();
+            foreach (var seg in segments)
+            {
+                if (seg == ".." && resolved.Count > 0 && resolved[resolved.Count - 1] != "..")
+                    resolved.RemoveAt(resolved.Count - 1);
+                else if (seg != ".")
+                    resolved.Add(seg);
+            }
+            string resolvedPath = string.Join("/", resolved);
+            
+            // Find /Content/ and rebuild as /Game/...
+            int contentIdx = resolvedPath.IndexOf("/Content/", StringComparison.OrdinalIgnoreCase);
+            if (contentIdx >= 0)
+                packageName = "/Game" + resolvedPath.Substring(contentIdx + "/Content".Length);
+            else
+                packageName = resolvedPath;
+        }
+        
         _builder.PackageName = packageName;
         _builder.PackageFlags = _zenPackage.Summary.PackageFlags;
         
@@ -245,7 +268,6 @@ public class ZenToLegacyConverter
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Failed to resolve import {importIndex}: {ex.Message}");
-                _hasFailedImportMapEntries = true;
                 
                 // Create placeholder import
                 int nullPackageImport = CreateAndAddUnknownPackageImport();
@@ -260,10 +282,6 @@ public class ZenToLegacyConverter
 
     private void BuildExportMap()
     {
-        // For now, don't rebuild exports - just strip header and use raw data
-        // The complex rebuild logic has bugs that cause data duplication
-        _needsToRebuildExportsData = false; // TODO: Fix RebuildExportData logic
-        
         bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
         
         for (int exportIndex = 0; exportIndex < _zenPackage.ExportMap.Count; exportIndex++)
@@ -287,7 +305,7 @@ public class ZenToLegacyConverter
             uint objectFlags = zenExport.ObjectFlags;
             
             long serialSize = (long)zenExport.CookedSerialSize;
-            long serialOffset = _needsToRebuildExportsData ? -1 : (long)zenExport.CookedSerialOffset;
+            long serialOffset = (long)zenExport.CookedSerialOffset;
             
             bool isNotForClient = zenExport.FilterFlags == EExportFilterFlags.NotForClient;
             bool isNotForServer = zenExport.FilterFlags == EExportFilterFlags.NotForServer;
@@ -320,16 +338,6 @@ public class ZenToLegacyConverter
             _builder.Exports.Add(newExport);
         }
         
-        // Assign serial offsets if we need to rebuild
-        if (_needsToRebuildExportsData)
-        {
-            long currentOffset = 0;
-            for (int i = 0; i < _builder.Exports.Count; i++)
-            {
-                _builder.Exports[i].SerialOffset = currentOffset;
-                currentOffset += _builder.Exports[i].SerialSize;
-            }
-        }
     }
 
     private void ResolveExportDependencies()
@@ -825,15 +833,17 @@ public class ZenToLegacyConverter
 
     private byte[] RebuildExportData()
     {
-        if (!_needsToRebuildExportsData)
-        {
-            // Just strip the header - zen data already includes footer
-            int headerSize = (int)_zenPackage.Summary.HeaderSize;
-            byte[] result = new byte[_rawPackageData.Length - headerSize];
-            Array.Copy(_rawPackageData, headerSize, result, 0, _rawPackageData.Length - headerSize);
-            return result;
-        }
-        
+        // Just strip the header - zen data already includes footer
+        int headerSize = (int)_zenPackage.Summary.HeaderSize;
+        byte[] result = new byte[_rawPackageData.Length - headerSize];
+        Array.Copy(_rawPackageData, headerSize, result, 0, _rawPackageData.Length - headerSize);
+        return result;
+    }
+    
+    // Dead code - kept for reference if rebuild logic is ever needed
+    #pragma warning disable CS0162 // Unreachable code detected
+    private byte[] RebuildExportDataFull()
+    {
         // Calculate total size
         long totalSize = 0;
         foreach (var export in _builder.Exports)
@@ -917,7 +927,6 @@ public class ZenToLegacyConverter
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Failed to resolve {context}: {ex.Message}");
-            _hasFailedImportMapEntries = true;
             
             int nullPackage = CreateAndAddUnknownPackageImport();
             var nullImport = CreateUnknownObjectImportEntry(nullPackage);

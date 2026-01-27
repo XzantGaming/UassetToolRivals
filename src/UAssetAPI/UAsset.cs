@@ -1462,6 +1462,13 @@ namespace UAssetAPI
 
         /// <summary>This is called "TotalHeaderSize" in UE4 where header refers to the whole summary, whereas in UAssetAPI "header" refers to just the data before the start of the name map</summary>
         internal int SectionSixOffset = 0;
+        
+        /// <summary>
+        /// Offset of the cooked header prefix (bytes before the magic number).
+        /// UE5 cooked assets may have a 4-5 byte prefix before the magic.
+        /// This value is added to all offset fields when seeking.
+        /// </summary>
+        internal int CookedHeaderPrefixOffset = 0;
 
         /// <summary>Number of names used in this package</summary>
         internal int NameCount = 0;
@@ -1646,7 +1653,10 @@ namespace UAssetAPI
 
             FileVersionLicenseeUE = reader.ReadInt32();
 
-            if (ObjectVersionUE5 >= ObjectVersionUE5.PACKAGE_SAVED_HASH)
+            // SavedHash only exists in versioned files that have FileVersionUE5 >= PACKAGE_SAVED_HASH
+            // For unversioned files (IsUnversioned=true), the file itself has FileVersionUE5=0,
+            // so we should NOT read SavedHash even if usmap sets a higher version
+            if (!IsUnversioned && ObjectVersionUE5 >= ObjectVersionUE5.PACKAGE_SAVED_HASH)
             {
                 SavedHash = reader.ReadBytes(20);
                 SectionSixOffset = reader.ReadInt32();
@@ -1660,7 +1670,7 @@ namespace UAssetAPI
 
             if (ObjectVersionUE5 < ObjectVersionUE5.PACKAGE_SAVED_HASH)
             { 
-                SectionSixOffset = reader.ReadInt32(); // 24
+                SectionSixOffset = reader.ReadInt32();
             }
 
             FolderName = reader.ReadFString();

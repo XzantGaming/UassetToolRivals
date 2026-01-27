@@ -77,7 +77,7 @@ public class ZenConverter
         var zenData = ConvertLegacyToZenInternal(uassetPath, usmapPath, containerVersion, out string packagePath, out FZenPackage zenPackage);
         return (zenData, packagePath, zenPackage);
     }
-
+    
     /// <summary>
     /// Convert Legacy package to Zen format with recalculated SerialSize from actual export data
     /// </summary>
@@ -202,9 +202,17 @@ public class ZenConverter
         {
             // For SkeletalMesh, try to use UAssetAPI's proper serialization via SkeletalMeshExport
             // which automatically includes FGameplayTagContainer padding
-            var skeletalExport = asset.Exports.FirstOrDefault(e => 
-                e is UAssetAPI.ExportTypes.SkeletalMeshExport skelExp && skelExp.Materials != null && skelExp.Materials.Count > 0)
+            var skeletalExport = asset.Exports.FirstOrDefault(e => e is UAssetAPI.ExportTypes.SkeletalMeshExport)
                 as UAssetAPI.ExportTypes.SkeletalMeshExport;
+            
+            // Ensure extra data is parsed (lazy parsing since Extras is populated after Read)
+            skeletalExport?.EnsureExtraDataParsed();
+            
+            // Check if materials were successfully parsed
+            if (skeletalExport?.Materials == null || skeletalExport.Materials.Count == 0)
+            {
+                skeletalExport = null; // Reset to trigger fallback message
+            }
             
             if (skeletalExport != null)
             {
@@ -221,12 +229,12 @@ public class ZenConverter
             }
             else
             {
-                // Fallback to byte patching if materials weren't parsed
-                materialPaddingToAdd = CalculateSkeletalMeshMaterialPadding(uexpData);
-                if (materialPaddingToAdd > 0)
-                {
-                    Console.Error.WriteLine($"[ZenConverter] SkeletalMesh will need {materialPaddingToAdd} bytes of material padding (byte patching fallback)");
-                }
+                // Materials weren't parsed by SkeletalMeshExport
+                // This could mean:
+                // 1. The file already has FGameplayTagContainer (extracted from game) - no padding needed
+                // 2. Parsing failed for some other reason
+                // For files extracted from the game, they already have the correct format
+                Console.Error.WriteLine($"[ZenConverter] SkeletalMesh materials not parsed via SkeletalMeshExport. File may already have FGameplayTagContainer.");
             }
         }
         else if (isStaticMesh)
@@ -253,11 +261,12 @@ public class ZenConverter
             }
         }
         
-        // Total padding to add
+        // The padding is included in the re-serialized uexpData, but the export size calculation
+        // uses original SerialOffset values which don't account for the padding.
+        // Pass the padding amount so it can be added to the last export's size.
         int totalPaddingToAdd = materialPaddingToAdd + stringTablePaddingToAdd;
 
         // Build export map with RECALCULATED SerialSize from actual data
-        // Pass the padding amount so the last export's size is correct
         BuildExportMapWithRecalculatedSizes(asset, zenPackage, uexpData, headerSize, totalPaddingToAdd);
 
         // Build export bundles (required for UE5 to load assets)
@@ -290,19 +299,43 @@ public class ZenConverter
         long headerSize,
         int materialPaddingToAdd = 0)
     {
-        // Calculate sizes based on sorted offsets
+        // Calculate the actual data length (excluding PACKAGE_FILE_TAG if present)
+        // This must match what WriteZenPackage writes
+        int actualDataLength = uexpData.Length;
+        if (actualDataLength >= 4)
+        {
+            uint lastDword = BitConverter.ToUInt32(uexpData, actualDataLength - 4);
+            if (lastDword == 0x9E2A83C1) // PACKAGE_FILE_TAG
+            {
+                actualDataLength -= 4;
+            }
+        }
+        
+        // Calculate export sizes from the actual data
+        // For non-last exports, use the gap between SerialOffsets (these are relative positions)
+        // For the last export, use the remaining data length
+        var exportSizes = new Dictionary<Export, long>();
         var sortedByOffset = asset.Exports.OrderBy(e => e.SerialOffset).ToList();
         
-        // Build a mapping from export to its size (calculated from offset gaps)
-        var exportSizes = new Dictionary<Export, long>();
-        for (int i = 0; i < sortedByOffset.Count; i++)
+        // For non-last exports, use the gap between SerialOffsets (these don't change during re-serialization)
+        // For the last export, give it all remaining data (which includes any padding added)
+        long sizeOfOtherExports = 0;
+        for (int i = 0; i < sortedByOffset.Count - 1; i++)
         {
             var export = sortedByOffset[i];
-            long startInUexp = export.SerialOffset - headerSize;
-            long endInUexp = (i < sortedByOffset.Count - 1)
-                ? sortedByOffset[i + 1].SerialOffset - headerSize
-                : uexpData.Length - 4; // Exclude PACKAGE_FILE_TAG
-            exportSizes[export] = endInUexp - startInUexp;
+            var nextExport = sortedByOffset[i + 1];
+            // Use offset gap for non-last exports (more reliable than SerialSize)
+            long size = nextExport.SerialOffset - export.SerialOffset;
+            exportSizes[export] = size;
+            sizeOfOtherExports += size;
+        }
+        
+        // Last export: use SerialSize directly - it's updated by WriteData() after re-serialization
+        // The padding is already included in SerialSize
+        if (sortedByOffset.Count > 0)
+        {
+            var lastExport = sortedByOffset[sortedByOffset.Count - 1];
+            exportSizes[lastExport] = lastExport.SerialSize;
         }
         
         // Keep original export order - reordering corrupts the data
@@ -326,20 +359,9 @@ public class ZenConverter
         {
             var export = exportsToProcess[i];
             
-            // Get pre-calculated size from offset gaps
+            // Get pre-calculated size (padding already included for last export)
             long actualSize = exportSizes[export];
-            
-            // Add material padding to the SkeletalMesh or StaticMesh export
-            string exportClassName = export.GetExportClassType()?.Value?.Value ?? "";
-            if (materialPaddingToAdd > 0 && (exportClassName == "SkeletalMesh" || exportClassName.Contains("SkeletalMesh") || exportClassName == "StaticMesh"))
-            {
-                actualSize += materialPaddingToAdd;
-                Console.Error.WriteLine($"[ZenConverter] Export {i} ({export.ObjectName?.Value?.Value}): size={actualSize} (includes {materialPaddingToAdd} bytes material padding)");
-            }
-            else
-            {
-                Console.Error.WriteLine($"[ZenConverter] Export {i} ({export.ObjectName?.Value?.Value}): size={actualSize}");
-            }
+            Console.Error.WriteLine($"[ZenConverter] Export {i} ({export.ObjectName?.Value?.Value}): size={actualSize}");
 
             // Remap indices from legacy FPackageIndex to Zen FPackageObjectIndex
             // Look up the import map which was already built with correct script import hashes
@@ -1408,18 +1430,8 @@ public class ZenConverter
         byte[] exportDataToWrite = uexpData;
         
         // SkeletalMesh and StringTable padding is now handled via UAssetAPI re-serialization in ConvertToZen()
-        // Only use byte patching as fallback if systematic approach failed
-        if (isSkeletalMesh && exportDataToWrite.Length == uexpData.Length)
-        {
-            // Fallback: Apply material slot padding via byte patching if re-serialization didn't work
-            var patchResult = PatchSkeletalMeshMaterialSlots(uexpData, exportDataLength);
-            if (patchResult.patchedData != null)
-            {
-                exportDataToWrite = patchResult.patchedData;
-                exportDataLength = patchResult.patchedData.Length;
-                Console.Error.WriteLine($"[ZenConverter] Applied SkeletalMesh material padding (fallback): {patchResult.materialCount} materials, added {patchResult.materialCount * 4} bytes");
-            }
-        }
+        // The structured SkeletalMeshExport approach handles legacy files that need FGameplayTagContainer added.
+        // Files extracted from the game already have FGameplayTagContainer and don't need modification.
         
         // Write export data (possibly patched)
         Console.Error.WriteLine($"[ZenConverter] Writing export data: {exportDataLength} bytes (original uexp was {uexpData.Length} bytes)");
@@ -1467,166 +1479,10 @@ public class ZenConverter
         return asset;
     }
     
-    /// <summary>
-    /// Calculate how much material padding will be needed for a SkeletalMesh.
-    /// Returns the total padding in bytes (materialCount * 4).
-    /// </summary>
-    private static int CalculateSkeletalMeshMaterialPadding(byte[] uexpData)
-    {
-        const int MAX_MATERIAL_COUNT = 50;
-        const int MATERIAL_STRUCT_SIZE = 40;
-        const int PADDING_SIZE = 4;
-        int dataLength = uexpData.Length;
-        
-        // Find material array by looking for consecutive FPackageIndex imports spaced 40 bytes apart
-        for (int i = 4; i < dataLength - (MATERIAL_STRUCT_SIZE * 2); i++)
-        {
-            int potentialCount = BitConverter.ToInt32(uexpData, i);
-            if (potentialCount < 1 || potentialCount > MAX_MATERIAL_COUNT)
-                continue;
-            
-            int firstPkgIdx = BitConverter.ToInt32(uexpData, i + 4);
-            if (firstPkgIdx >= 0 || firstPkgIdx < -100)
-                continue;
-            
-            bool validPattern = true;
-            int validCount = 0;
-            for (int m = 0; m < potentialCount && m < 10; m++)
-            {
-                int matOffset = i + 4 + (m * MATERIAL_STRUCT_SIZE);
-                if (matOffset + 4 > dataLength)
-                {
-                    validPattern = false;
-                    break;
-                }
-                
-                int pkgIdx = BitConverter.ToInt32(uexpData, matOffset);
-                if (pkgIdx >= 0 || pkgIdx < -100)
-                {
-                    validPattern = false;
-                    break;
-                }
-                validCount++;
-            }
-            
-            if (validPattern && validCount >= 2)
-            {
-                return potentialCount * PADDING_SIZE;
-            }
-        }
-        
-        return 0;
-    }
-    
-    /// <summary>
-    /// Patch SkeletalMesh .uexp data by adding 4-byte FGameplayTagContainer padding after each material slot.
-    /// Marvel Rivals expects an FGameplayTagContainer (empty = 4 bytes of zeros) after each FSkeletalMaterial.
-    /// 
-    /// The algorithm finds the material array by looking for a sequence of FPackageIndex values (negative int32s)
-    /// that are spaced exactly 40 bytes apart. The material count is the int32 immediately before the first material.
-    /// </summary>
-    private static (byte[]? patchedData, int materialCount) PatchSkeletalMeshMaterialSlots(byte[] uexpData, int dataLength)
-    {
-        const int MAX_MATERIAL_COUNT = 50;
-        const int MATERIAL_STRUCT_SIZE = 40;
-        const int PADDING_SIZE = 4; // Empty FGameplayTagContainer = int32 count of 0
-        
-        // Find material array by looking for consecutive FPackageIndex imports spaced 40 bytes apart
-        // FPackageIndex for imports are negative values (e.g., -1, -2, -3, etc.)
-        int materialCountOffset = -1;
-        int materialCount = 0;
-        int firstMaterialOffset = -1;
-        
-        // Search for pattern: int32 count followed by materials with FPackageIndex at start
-        for (int i = 4; i < dataLength - (MATERIAL_STRUCT_SIZE * 2); i++)
-        {
-            int potentialCount = BitConverter.ToInt32(uexpData, i);
-            if (potentialCount < 1 || potentialCount > MAX_MATERIAL_COUNT)
-                continue;
-            
-            // Check if next bytes look like an FPackageIndex (negative value for import)
-            int firstPkgIdx = BitConverter.ToInt32(uexpData, i + 4);
-            if (firstPkgIdx >= 0 || firstPkgIdx < -100)
-                continue;
-            
-            // Verify by checking if subsequent materials are spaced 40 bytes apart
-            bool validPattern = true;
-            int validCount = 0;
-            for (int m = 0; m < potentialCount && m < 10; m++)
-            {
-                int matOffset = i + 4 + (m * MATERIAL_STRUCT_SIZE);
-                if (matOffset + 4 > dataLength)
-                {
-                    validPattern = false;
-                    break;
-                }
-                
-                int pkgIdx = BitConverter.ToInt32(uexpData, matOffset);
-                // FPackageIndex for material imports should be negative
-                if (pkgIdx >= 0 || pkgIdx < -100)
-                {
-                    validPattern = false;
-                    break;
-                }
-                validCount++;
-            }
-            
-            if (validPattern && validCount >= 2)
-            {
-                materialCountOffset = i;
-                materialCount = potentialCount;
-                firstMaterialOffset = i + 4;
-                Console.Error.WriteLine($"[ZenConverter] Found material array: count={materialCount} at offset 0x{materialCountOffset:X}, first material at 0x{firstMaterialOffset:X}");
-                break;
-            }
-        }
-        
-        if (materialCount == 0 || firstMaterialOffset < 0)
-        {
-            Console.Error.WriteLine($"[ZenConverter] No material array found to patch");
-            return (null, 0);
-        }
-        
-        // Calculate new size with padding (4 bytes per material for empty FGameplayTagContainer)
-        int paddingTotal = materialCount * PADDING_SIZE;
-        int newLength = dataLength + paddingTotal;
-        byte[] patchedData = new byte[newLength];
-        
-        // Copy data up to first material
-        Array.Copy(uexpData, 0, patchedData, 0, firstMaterialOffset);
-        
-        int srcOffset = firstMaterialOffset;
-        int dstOffset = firstMaterialOffset;
-        
-        // For each material, copy 40 bytes then add 4 bytes of zero padding (empty FGameplayTagContainer)
-        for (int m = 0; m < materialCount; m++)
-        {
-            if (srcOffset + MATERIAL_STRUCT_SIZE > dataLength)
-                break;
-                
-            // Copy material struct (40 bytes)
-            Array.Copy(uexpData, srcOffset, patchedData, dstOffset, MATERIAL_STRUCT_SIZE);
-            srcOffset += MATERIAL_STRUCT_SIZE;
-            dstOffset += MATERIAL_STRUCT_SIZE;
-            
-            // Add 4 bytes of zero padding (empty FGameplayTagContainer: count = 0)
-            patchedData[dstOffset] = 0x00;
-            patchedData[dstOffset + 1] = 0x00;
-            patchedData[dstOffset + 2] = 0x00;
-            patchedData[dstOffset + 3] = 0x00;
-            dstOffset += PADDING_SIZE;
-        }
-        
-        // Copy remaining data after materials
-        int remainingBytes = dataLength - srcOffset;
-        if (remainingBytes > 0)
-        {
-            Array.Copy(uexpData, srcOffset, patchedData, dstOffset, remainingBytes);
-        }
-        
-        Console.Error.WriteLine($"[ZenConverter] Patched {materialCount} materials with FGameplayTagContainer padding (+{paddingTotal} bytes)");
-        return (patchedData, materialCount);
-    }
+    // NOTE: Raw byte patching functions for SkeletalMesh have been removed.
+    // FGameplayTagContainer padding is now handled entirely through the structured
+    // SkeletalMeshExport class which properly parses and writes FSkeletalMaterial
+    // with GameplayTags support. This eliminates error-prone raw binary manipulation.
     
     /// <summary>
     /// Calculate how much material padding will be needed for a StaticMesh.
@@ -1849,33 +1705,38 @@ public class ZenConverter
     /// <summary>
     /// Re-serialize the asset's export data using UAssetAPI's proper serialization.
     /// This ensures types like StringTable get proper FGameplayTagContainer padding automatically.
-    /// Returns just the export data portion (equivalent to .uexp content).
+    /// Returns just the export data portion (equivalent to .uexp content) and updates asset's SerialSize values.
     /// </summary>
     private static byte[]? ReserializeExportData(UAsset asset)
     {
         try
         {
+            // Store original offsets before re-serialization
+            long originalExportStart = asset.Exports.Min(e => e.SerialOffset);
+            
             // Use UAssetAPI's WriteData to get properly serialized data
+            // This also updates the asset's SerialOffset and SerialSize values
             using var fullStream = asset.WriteData();
             
             if (fullStream == null || fullStream.Length == 0)
                 return null;
             
-            // Find where export data starts (minimum SerialOffset of all exports)
-            long exportStart = asset.Exports.Min(e => e.SerialOffset);
+            // After WriteData, the asset's SerialOffset values are updated
+            // Find where export data starts in the new serialization
+            long newExportStart = asset.Exports.Min(e => e.SerialOffset);
             
             // Export data goes from exportStart to end of stream
-            long exportDataLength = fullStream.Length - exportStart;
+            long exportDataLength = fullStream.Length - newExportStart;
             
             if (exportDataLength <= 0)
                 return null;
             
             // Extract just the export data portion
             byte[] exportData = new byte[exportDataLength];
-            fullStream.Seek(exportStart, SeekOrigin.Begin);
+            fullStream.Seek(newExportStart, SeekOrigin.Begin);
             fullStream.Read(exportData, 0, (int)exportDataLength);
             
-            Console.Error.WriteLine($"[ZenConverter] Re-serialized export data: {exportDataLength} bytes (from offset {exportStart})");
+            Console.Error.WriteLine($"[ZenConverter] Re-serialized export data: {exportDataLength} bytes (from offset {newExportStart})");
             return exportData;
         }
         catch (Exception ex)

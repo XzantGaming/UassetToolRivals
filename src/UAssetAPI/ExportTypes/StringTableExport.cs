@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using System.Collections.Generic;
 using System.Linq;
 using UAssetAPI.UnrealTypes;
 using UAssetAPI.ExportTypes;
@@ -6,21 +7,62 @@ using UAssetAPI.ExportTypes;
 namespace UAssetAPI.ExportTypes
 {
     /// <summary>
-    /// A string table. Holds Key->SourceString pairs of text.
+    /// A string table entry with Key, Value, and FGameplayTagContainer.
     /// </summary>
-    public class FStringTable : TMap<FString, FString>
+    public class FStringTableEntry
+    {
+        public FString Key;
+        public FString Value;
+        public FGameplayTagContainer GameplayTagContainer;
+
+        public FStringTableEntry()
+        {
+            GameplayTagContainer = new FGameplayTagContainer();
+        }
+
+        public FStringTableEntry(FString key, FString value)
+        {
+            Key = key;
+            Value = value;
+            GameplayTagContainer = new FGameplayTagContainer();
+        }
+    }
+
+    /// <summary>
+    /// A string table. Holds Key->SourceString pairs of text with FGameplayTagContainer per entry.
+    /// </summary>
+    public class FStringTable
     {
         [JsonProperty]
         public FString TableNamespace;
 
-        public FStringTable(FString tableNamespace) : base()
+        [JsonProperty]
+        public List<FStringTableEntry> Entries;
+
+        /// <summary>
+        /// Trailing FGameplayTagContainer after all entries.
+        /// </summary>
+        [JsonProperty]
+        public FGameplayTagContainer TrailingTagContainer;
+
+        public FStringTable(FString tableNamespace)
         {
             TableNamespace = tableNamespace;
+            Entries = new List<FStringTableEntry>();
+            TrailingTagContainer = new FGameplayTagContainer();
         }
 
-        public FStringTable() : base()
+        public FStringTable()
         {
+            Entries = new List<FStringTableEntry>();
+            TrailingTagContainer = new FGameplayTagContainer();
+        }
 
+        public int Count => Entries?.Count ?? 0;
+
+        public void Add(FString key, FString value)
+        {
+            Entries.Add(new FStringTableEntry(key, value));
         }
     }
 
@@ -56,26 +98,39 @@ namespace UAssetAPI.ExportTypes
             int numEntries = reader.ReadInt32();
             for (int i = 0; i < numEntries; i++)
             {
-                Table.Add(reader.ReadFString(), reader.ReadFString());
-                reader.ReadInt32(); // forward 4 bytes (padding)
+                var entry = new FStringTableEntry();
+                entry.Key = reader.ReadFString();
+                entry.Value = reader.ReadFString();
+                entry.GameplayTagContainer = new FGameplayTagContainer(reader);
+                Table.Entries.Add(entry);
             }
-            reader.ReadInt32(); // forward 4 bytes (trailing padding)
+            // Read trailing FGameplayTagContainer
+            Table.TrailingTagContainer = new FGameplayTagContainer(reader);
         }
 
         public override void Write(AssetBinaryWriter writer)
         {
             base.Write(writer);
-            byte[] nullbytes = { 0, 0, 0, 0 };
 
             writer.Write(Table.TableNamespace);
             writer.Write(Table.Count);
-            for (int i = 0; i < Table.Count; i++)
+            foreach (var entry in Table.Entries)
             {
-                writer.Write(Table.Keys.ElementAt(i));
-                writer.Write(Table[i]);
-                writer.Write(nullbytes);
+                writer.Write(entry.Key);
+                writer.Write(entry.Value);
+                // Write FGameplayTagContainer (empty = 4 bytes)
+                if (entry.GameplayTagContainer == null)
+                {
+                    entry.GameplayTagContainer = new FGameplayTagContainer();
+                }
+                entry.GameplayTagContainer.Write(writer);
             }
-            writer.Write(nullbytes);
+            // Write trailing FGameplayTagContainer
+            if (Table.TrailingTagContainer == null)
+            {
+                Table.TrailingTagContainer = new FGameplayTagContainer();
+            }
+            Table.TrailingTagContainer.Write(writer);
         }
     }
 }

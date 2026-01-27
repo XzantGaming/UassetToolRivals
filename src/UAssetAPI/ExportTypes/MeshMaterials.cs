@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using UAssetAPI.PropertyTypes.Structs;
 using UAssetAPI.UnrealTypes;
 
 namespace UAssetAPI.ExportTypes
@@ -60,14 +59,15 @@ namespace UAssetAPI.ExportTypes
         
         /// <summary>
         /// FGameplayTagContainer - Marvel Rivals requires this field.
-        /// Empty container = just int32 count of 0.
+        /// Empty container = just int32 count of 0 = 4 bytes.
+        /// NOTE: ParentTags is runtime-only and NOT serialized (per CUE4Parse).
         /// </summary>
-        public FName[] GameplayTags;
+        public FGameplayTagContainer GameplayTagContainer;
 
         public FSkeletalMaterial()
         {
             UVChannelData = new FMeshUVChannelInfo();
-            GameplayTags = Array.Empty<FName>();
+            GameplayTagContainer = new FGameplayTagContainer();
         }
 
         public void Read(AssetBinaryReader reader, bool includeGameplayTags = true)
@@ -80,13 +80,12 @@ namespace UAssetAPI.ExportTypes
             
             if (includeGameplayTags)
             {
-                // Read FGameplayTagContainer
-                int tagCount = reader.ReadInt32();
-                GameplayTags = new FName[tagCount];
-                for (int i = 0; i < tagCount; i++)
-                {
-                    GameplayTags[i] = reader.ReadFName();
-                }
+                // Read FGameplayTagContainer (just one array, ParentTags is NOT serialized)
+                GameplayTagContainer = new FGameplayTagContainer(reader);
+            }
+            else
+            {
+                GameplayTagContainer = new FGameplayTagContainer();
             }
         }
 
@@ -99,15 +98,13 @@ namespace UAssetAPI.ExportTypes
             
             if (includeGameplayTags)
             {
-                // Write FGameplayTagContainer
-                writer.Write(GameplayTags?.Length ?? 0);
-                if (GameplayTags != null)
+                // Write FGameplayTagContainer (just one array - ParentTags is NOT serialized)
+                // Per CUE4Parse: only GameplayTags array is serialized
+                if (GameplayTagContainer == null)
                 {
-                    foreach (var tag in GameplayTags)
-                    {
-                        writer.Write(tag);
-                    }
+                    GameplayTagContainer = new FGameplayTagContainer();
                 }
+                GameplayTagContainer.Write(writer);
             }
         }
 
@@ -116,6 +113,11 @@ namespace UAssetAPI.ExportTypes
         /// With empty FGameplayTagContainer: 40 + 4 = 44 bytes
         /// </summary>
         public static int LegacySerializedSize => 4 + 8 + 8 + 20; // 40 bytes without tags
+        
+        /// <summary>
+        /// Size with empty FGameplayTagContainer: 40 + 4 = 44 bytes
+        /// </summary>
+        public static int SerializedSizeWithEmptyTags => LegacySerializedSize + FGameplayTagContainer.EmptySerializedSize;
     }
 
     /// <summary>
