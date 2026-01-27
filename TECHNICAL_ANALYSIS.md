@@ -1,41 +1,24 @@
 # Technical Analysis: UAssetTool Internals
 
-This document provides a detailed technical analysis of the processes and algorithms used in UAssetTool for Marvel Rivals asset conversion.
+Technical documentation for UAssetTool's file format handling and data structures.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [PAK File Extraction](#pak-file-extraction)
-3. [Mipmap Stripping](#mipmap-stripping)
-4. [SkeletalMesh Processing](#skeletalmesh-processing)
-5. [StaticMesh Processing](#staticmesh-processing)
-6. [NiagaraSystem Color Editing](#niagarasystem-color-editing)
-7. [Zen Package Conversion](#zen-package-conversion)
-8. [IoStore Container Format](#iostore-container-format)
-9. [Export Map Building](#export-map-building)
-10. [Import Resolution](#import-resolution)
-11. [Script Objects Database](#script-objects-database)
+1. [PAK File Format](#pak-file-format)
+2. [IoStore Container Format](#iostore-container-format)
+3. [Zen Package Format](#zen-package-format)
+4. [SkeletalMesh Structure](#skeletalmesh-structure)
+5. [StaticMesh Structure](#staticmesh-structure)
+6. [NiagaraSystem Data Interfaces](#niagarasystem-data-interfaces)
+7. [Script Objects Database](#script-objects-database)
 
 ---
 
-## Overview
+## PAK File Format
 
-UAssetTool converts legacy Unreal Engine assets (`.uasset`/`.uexp`/`.ubulk`) to the Zen package format used by UE5.3+ games like Marvel Rivals. The conversion process involves:
+**Implementation:** `IoStore/PakReader.cs`, `IoStore/PakWriter.cs`
 
-1. Parsing the legacy asset structure
-2. Applying game-specific patches (material padding, mipmap stripping)
-3. Building the Zen package header with correct offsets
-4. Creating IoStore containers (`.utoc`/`.ucas`) for game injection
-
----
-
-## PAK File Extraction
-
-### Overview
-
-**Location:** `PakReader.cs`
-
-PAK files are Unreal Engine's legacy archive format for packaging game assets. UAssetTool supports extracting assets from PAK v11 (UE5) files with various compression methods.
+PAK files are Unreal Engine's archive format for packaging game assets. UAssetTool supports PAK v11 (UE5) with encryption and compression.
 
 ### PAK File Structure
 
@@ -128,23 +111,6 @@ long absoluteBlockStart = entryOffset + block.CompressedStart;
 long absoluteBlockEnd = entryOffset + block.CompressedEnd;
 ```
 
-### Decompression Process
-
-```
-For each entry:
-1. Read FPakEntry header at entry.Offset
-2. If compressed:
-   a. Read block count and block info
-   b. For each block:
-      - Seek to entryOffset + blockStart
-      - Read compressed block data
-      - Decompress using appropriate method
-      - Append to output buffer
-3. If encrypted:
-   - Decrypt data using AES-256-ECB
-   - Apply UE4's 4-byte chunk reversal pattern
-```
-
 ### Supported Compression Methods
 
 | Method | Description |
@@ -156,91 +122,17 @@ For each entry:
 | LZ4 | LZ4 fast compression |
 | Zstd | Zstandard compression |
 
-### AES Decryption
+### AES Encryption
 
-PAK files use AES-256-ECB with a custom byte-swapping pattern:
-
-```csharp
-// For each 16-byte block:
-// 1. Reverse each 4-byte chunk BEFORE decryption
-// 2. Decrypt with AES-ECB
-// 3. Reverse each 4-byte chunk AFTER decryption
-
-private static void ReverseChunks(byte[] block)
-{
-    for (int i = 0; i < 16; i += 4)
-    {
-        (block[i], block[i + 3]) = (block[i + 3], block[i]);
-        (block[i + 1], block[i + 2]) = (block[i + 2], block[i + 1]);
-    }
-}
-```
+PAK files use AES-256-ECB with partial encryption. Only a portion of each file is encrypted based on a path hash calculation. The encryption uses a 4-byte chunk reversal pattern before and after decryption.
 
 ---
 
-## Mipmap Stripping
+## SkeletalMesh Structure
 
-### Purpose
-Texture mods often only include the highest resolution mipmap. The game expects texture data to match the `NumMips` property, so we strip lower mipmaps and update metadata accordingly.
+**Implementation:** `UAssetAPI/ExportTypes/SkeletalMeshExport.cs`, `SkeletalMeshStructs.cs`
 
-### Process
-
-**Location:** `ZenConverter.cs` - `StripMipmapsFromTextureData()`
-
-```
-Original Texture Structure:
-┌─────────────────────────────────┐
-│ FTexturePlatformData Header     │
-│ - SizeX, SizeY                  │
-│ - NumSlices                     │
-│ - PixelFormat                   │
-│ - NumMips (e.g., 12)            │
-├─────────────────────────────────┤
-│ Mip 0 (4096x4096) - KEEP        │
-├─────────────────────────────────┤
-│ Mip 1 (2048x2048) - STRIP       │
-├─────────────────────────────────┤
-│ Mip 2 (1024x1024) - STRIP       │
-├─────────────────────────────────┤
-│ ... more mips - STRIP           │
-└─────────────────────────────────┘
-```
-
-### Algorithm
-
-1. **Detect texture data** by searching for pixel format signatures
-2. **Read mip count** from FTexturePlatformData header
-3. **Calculate mip 0 size** based on dimensions and pixel format
-4. **Truncate data** to only include mip 0
-5. **Update NumMips** property to 1
-6. **Recalculate SerialSize** for the export
-
-### Pixel Format Sizes
-
-| Format | Bits Per Pixel | Block Size |
-|--------|---------------|------------|
-| DXT1/BC1 | 4 | 4x4 |
-| DXT5/BC3 | 8 | 4x4 |
-| BC7 | 8 | 4x4 |
-| RGBA8 | 32 | 1x1 |
-
-### Size Calculation
-```csharp
-int blockSize = 4; // For BC formats
-int blocksX = (width + blockSize - 1) / blockSize;
-int blocksY = (height + blockSize - 1) / blockSize;
-int mipSize = blocksX * blocksY * bytesPerBlock;
-```
-
----
-
-## SkeletalMesh Processing
-
-### Overview
-
-**Location:** `SkeletalMeshExport.cs`, `SkeletalMeshStructs.cs`
-
-SkeletalMesh assets contain complex binary data in the "Extra Data" section after the tagged properties. This data includes mesh bounds, materials, bone hierarchy, and LOD render data.
+SkeletalMesh assets contain binary data in the "Extra Data" section after tagged properties.
 
 ### Extra Data Structure
 
@@ -366,49 +258,19 @@ Offset  Size  Field
 Total:  12 bytes
 ```
 
-### FGameplayTagContainer Padding
+### FGameplayTagContainer Structure
 
-**Location:** `ZenConverter.cs` - `PatchSkeletalMeshMaterialSlots()`
+**Implementation:** `UAssetAPI/UnrealTypes/FGameplayTagContainer.cs`
 
-Marvel Rivals expects an `FGameplayTagContainer` after each `FSkeletalMaterial` in the materials array. Legacy assets don't have this field, so we inject it during conversion.
+Marvel Rivals expects an `FGameplayTagContainer` after each `FSkeletalMaterial` in the materials array.
 
-### Patching Algorithm
-
-1. **Find material array** by searching for pattern:
-   - `int32` count (1-50)
-   - Followed by negative `FPackageIndex` values spaced 40 bytes apart
-
-2. **Validate pattern** by checking multiple consecutive materials
-
-3. **Create patched buffer** with size = original + (materialCount × 4)
-
-4. **For each material:**
-   - Copy 40 bytes of material data
-   - Insert 4 bytes of zeros (empty FGameplayTagContainer)
-
-5. **Copy remaining data** after material array
-
-### SkeletalMeshExport API
-
-The `SkeletalMeshExport` class provides structured access to skeletal mesh data:
-
-```csharp
-// Parsed fields
-public FStripDataFlags StripFlags;
-public FBoxSphereBounds ImportedBounds;
-public List<FSkeletalMaterial> Materials;
-public FReferenceSkeleton ReferenceSkeleton;
-public bool bCooked;
-public int LODCount;
-public byte[] RemainingExtraData;  // Unparsed LOD render data
-
-// Helper methods
-int GetBoneCount();
-FMeshBoneInfo GetBone(int index);
-FTransform? GetBoneTransform(int index);
-int FindBoneIndex(FName boneName);
-FSkeletalMaterial GetMaterial(int index);
-int GetMaterialCount();
+```
+FGameplayTagContainer Binary Format:
+──────────────────────────────────────────────────────
+int32           GameplayTags count
+FGameplayTag[]  GameplayTags array (each tag = FName = 8 bytes)
+──────────────────────────────────────────────────────
+Empty container = 4 bytes (count = 0)
 ```
 
 ### Implementation Files
@@ -421,11 +283,11 @@ int GetMaterialCount();
 
 ---
 
-## StaticMesh Processing
+## StaticMesh Structure
 
-### FStaticMaterial Structure
+**Implementation:** `UAssetAPI/ExportTypes/StaticMeshExport.cs`
 
-StaticMesh uses a different material structure than SkeletalMesh. For Marvel Rivals, the struct is 36 bytes without padding.
+StaticMesh uses a different material structure than SkeletalMesh. For Marvel Rivals, the struct is 36 bytes without FGameplayTagContainer padding.
 
 ```
 Offset  Size  Field
@@ -438,23 +300,17 @@ Offset  Size  Field
 Total:  36 bytes
 ```
 
-### Note on StaticMesh Padding
-
-Unlike SkeletalMesh, StaticMesh in Marvel Rivals does **not** require FGameplayTagContainer padding. The materials are serialized at 36-byte intervals without additional fields.
-
 ---
 
-## NiagaraSystem Color Editing
+## NiagaraSystem Data Interfaces
 
-### Overview
+**Implementation:** `UAssetAPI/ExportTypes/Niagara/`, `NiagaraService.cs`
 
-**Location:** `ColorModifier.cs`, `NiagaraService.cs`
-
-NiagaraSystem assets (`NS_*.uasset`) contain UE5 particle system definitions. Colors are stored in `NiagaraDataInterfaceColorCurve` exports within the `ShaderLUT` property.
+NiagaraSystem assets (`NS_*.uasset`) contain particle system definitions. Colors are stored in specialized data interface exports.
 
 ### ShaderLUT Structure
 
-**Critical Discovery:** ShaderLUT is stored as a **flat float array**, NOT as an array of LinearColor structs:
+ShaderLUT is stored as a **flat float array**, not as an array of LinearColor structs:
 
 ```
 ShaderLUT: ArrayPropertyData<FloatProperty>
@@ -495,303 +351,9 @@ Colors use **HDR (High Dynamic Range)** values:
 | 2.0-5.0 | Bright/glowing |
 | 10.0+ | Very bright bloom |
 
-### Systematic Parsing Approach
+### Supported Data Interface Types
 
-```csharp
-// Process ShaderLUT as groups of 4 floats (RGBA)
-if (prop.Name?.Value?.Value == "ShaderLUT" && prop is ArrayPropertyData lutArray)
-{
-    for (int i = 0; i + 3 < lutArray.Value.Length; i += 4)
-    {
-        var rProp = lutArray.Value[i] as FloatPropertyData;
-        var gProp = lutArray.Value[i + 1] as FloatPropertyData;
-        var bProp = lutArray.Value[i + 2] as FloatPropertyData;
-        var aProp = lutArray.Value[i + 3] as FloatPropertyData;
-        
-        rProp.Value = targetColor.R;
-        gProp.Value = targetColor.G;
-        bProp.Value = targetColor.B;
-        aProp.Value = targetColor.A;
-    }
-}
-```
-
-### Why Not LinearColorPropertyData?
-
-The USMAP mappings define ShaderLUT as `Array<FloatProperty>` for GPU efficiency. The baked LUT is a raw float buffer that shaders sample directly, not structured LinearColor objects.
-
-### Structured Export Type
-
-Like `SkeletalMeshExport` and `StaticMeshExport`, we implement a dedicated export class for consistent handling:
-
-**`NiagaraDataInterfaceColorCurveExport`** - Dedicated export type for color curve data interfaces.
-
-```csharp
-public class NiagaraDataInterfaceColorCurveExport : NormalExport
-{
-    public FShaderLUT ShaderLUT { get; set; }
-    
-    public override void Read(AssetBinaryReader reader, int nextStarting)
-    {
-        base.Read(reader, nextStarting);
-        ParseShaderLUT(); // Extract structured colors from properties
-    }
-    
-    public override void Write(AssetBinaryWriter writer)
-    {
-        SyncShaderLUTToProperties(); // Sync back before writing
-        base.Write(writer);
-    }
-    
-    public void SetAllColors(float r, float g, float b, float a);
-    public void SetColor(int index, float r, float g, float b, float a);
-    public FShaderLUTColor? GetColor(int index);
-    public int ColorCount { get; }
-}
-```
-
-### FShaderLUT Struct
-
-```csharp
-public struct FShaderLUTColor
-{
-    public float R, G, B, A;
-    public static int SerializedSize => 16; // 4 floats × 4 bytes
-}
-
-public class FShaderLUT
-{
-    public List<FShaderLUTColor> Colors;
-    public int FloatCount => Colors.Count * 4;
-    
-    public void SetAllColors(float r, float g, float b, float a);
-    public void SetColor(int index, float r, float g, float b, float a);
-}
-```
-
-### Export Type Resolution
-
-Added to `UAsset.cs` alongside other structured exports:
-
-```csharp
-// ShaderLUT-based curve types
-else if (exportClassType == "NiagaraDataInterfaceColorCurve")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceColorCurveExport>();
-else if (exportClassType == "NiagaraDataInterfaceCurve")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceCurveExport>();
-else if (exportClassType == "NiagaraDataInterfaceVector2DCurve")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceVector2DCurveExport>();
-else if (exportClassType == "NiagaraDataInterfaceVectorCurve")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceVectorCurveExport>();
-
-// Array-based data interface types
-else if (exportClassType == "NiagaraDataInterfaceArrayColor")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayColorExport>();
-else if (exportClassType == "NiagaraDataInterfaceArrayFloat")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayFloatExport>();
-else if (exportClassType == "NiagaraDataInterfaceArrayFloat3")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayFloat3Export>();
-else if (exportClassType == "NiagaraDataInterfaceArrayInt32")
-    Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayInt32Export>();
-```
-
-### ColorCurve Classification System
-
-**Location:** `NiagaraService.cs`
-
-To help frontends determine which ColorCurves should be edited for color changes, a classification system analyzes each curve based on context and values.
-
-#### Classification Output
-
-```json
-{
-  "exportIndex": 3,
-  "exportName": "NiagaraDataInterfaceColorCurve_0",
-  "parentName": "NE_Basic",
-  "parentChain": "NS_104821_Hit_01_CB > NE_Basic",
-  "classification": {
-    "type": "color",
-    "confidence": 0.9,
-    "reason": "name contains 'ColorFromCurve'; HDR values (max=10.50)",
-    "suggestEdit": true,
-    "isGrayscale": false,
-    "isHDR": true,
-    "hasAlphaVariation": false,
-    "isConstant": false,
-    "maxValue": 10.5,
-    "minValue": 0.0
-  }
-}
-```
-
-#### Classification Types
-
-| Type | Description | Edit Recommended |
-|------|-------------|------------------|
-| `color` | Actual particle color | ✅ Yes |
-| `emission` | HDR glow/emission color | ✅ Yes |
-| `opacity` | Alpha/fade curves | ❌ No (grayscale) |
-| `unknown` | Cannot determine | ⚠️ Manual review |
-
-#### Classification Algorithm
-
-**1. Parent Chain Analysis**
-
-Each export has an `OuterIndex` pointing to its parent. The parent chain is traced to build context:
-
-```
-NiagaraDataInterfaceColorCurve_0
-  └─ OuterIndex → NE_Basic (emitter)
-       └─ OuterIndex → NS_104821_Hit_01_CB (system)
-```
-
-**2. Name-Based Classification**
-
-| Pattern in Context | Classification | Confidence |
-|-------------------|----------------|------------|
-| `ColorFromCurve` | `color` | 90% |
-| `Glow`, `Emission` | `emission` | 85% |
-| `Alpha`, `Opacity`, `Fade` | `opacity` | 85% |
-
-**3. Value-Based Analysis**
-
-| Indicator | Effect |
-|-----------|--------|
-| HDR values (max > 1.0) | Boost confidence, suggest `emission` |
-| Grayscale (R ≈ G ≈ B) | Reduce confidence, suggest `opacity` |
-| Color variation (R ≠ G ≠ B) | Suggest `color` |
-| Constant values (no gradient) | Reduce confidence |
-
-**4. SuggestEdit Flag**
-
-The `suggestEdit` boolean is `true` when:
-- Type is `color` or `emission`
-- Confidence ≥ 60%
-- Not grayscale
-
-#### Implementation
-
-```csharp
-private static CurveClassification ClassifyColorCurve(
-    List<ColorValue> colors, 
-    string exportName, 
-    string? parentName, 
-    string? parentChain)
-{
-    // Analyze min/max/range for each channel
-    // Check grayscale: R ≈ G ≈ B within 5% tolerance
-    // Check HDR: max value > 1.0
-    // Check constant: RGB range < 5%
-    
-    // Name-based classification from context string
-    string context = $"{exportName} {parentName} {parentChain}".ToLowerInvariant();
-    
-    // Combine indicators for final classification
-    return classification;
-}
-```
-
-### Batch Color Write Mode
-
-For gradient-preserving edits, the `Colors` array allows writing specific values per index:
-
-```json
-{
-  "assetPath": "path/to/NS_Effect.uasset",
-  "exportIndex": 3,
-  "colors": [
-    {"index": 0, "r": 0.0, "g": 0.5, "b": 0.0, "a": 1.0},
-    {"index": 1, "r": 0.0, "g": 0.6, "b": 0.0, "a": 1.0},
-    {"index": 31, "r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}
-  ]
-}
-```
-
-**Workflow:**
-1. Use `niagara_details --full` to get all color values
-2. Modify colors in frontend (apply hue shift, scale, etc.)
-3. Send back via batch mode - only specified indices are written
-
-### Known Warnings
-
-When editing Niagara assets, you may see warnings like:
-
-```
-[UAssetAPI] Failed to parse export 126: Index was out of range
-```
-
-**This is expected and safe.** Complex Niagara script exports (bytecode, compiled graphs) may fail to parse, but this doesn't affect ColorCurve editing. The edit will succeed as long as the ColorCurve exports themselves parse correctly.
-
-### IsEnemy Parameter Detection via ChildBP
-
-**Location:** `NiagaraService.cs` - `ScanChildBPsForIsEnemy()`
-
-Marvel Rivals uses `ChildBP` (Blueprint) assets to spawn Niagara systems and pass the `IsEnemy` parameter for ally/enemy color switching.
-
-#### Discovery
-
-The `IsEnemy` parameter is **not** defined in the NS file itself. Instead:
-
-1. **ChildBP assets** (e.g., `1048001_ChildBP.uasset`) contain `NiagaraComponent` references
-2. ChildBP has `UserParameterRedirects` that maps `IsEnemy` → `User.IsEnemy`
-3. The game's character system sets `IsEnemy` at runtime when spawning the effect
-
-#### ChildBP Structure
-
-```json
-{
-  "Type": "NiagaraComponent",
-  "Asset": {
-    "ObjectName": "NiagaraSystem'NS_104800_Butterfly3'",
-    "ObjectPath": "/Game/Marvel/VFX/Particles/.../NS_104800_Butterfly3.36"
-  },
-  "UserParameterRedirects": [
-    {
-      "Key": { "Name": "IsEnemy" },
-      "Value": { "Name": "User.IsEnemy" }
-    }
-  ]
-}
-```
-
-#### Scanning ChildBP Assets
-
-Use the `scan_childbp_isenemy` command to build a mapping:
-
-```bash
-# 1. Extract ChildBP assets from game
-UAssetTool extract_iostore_legacy "<paks>" "<output>" --filter ChildBP --aes "<key>"
-
-# 2. Scan for IsEnemy parameter redirects
-UAssetTool scan_childbp_isenemy "<output>"
-```
-
-**Output:**
-```json
-{
-  "success": true,
-  "totalChildBPsScanned": 523,
-  "childBPsWithIsEnemy": 31,
-  "nsToChildBP": {
-    "NS_104800_Butterfly3": "1048001_ChildBP.uasset",
-    "NS_104800_Butterfly4": "1048001_ChildBP.uasset",
-    "NS_102701_Fire": "1027500_ChildBP.uasset"
-  }
-}
-```
-
-#### Implications for Color Editing
-
-- NS files in `nsToChildBP` have **ally/enemy color switching**
-- These NS files likely have **two sets of ColorCurves** (one for each team)
-- When editing, you may want to edit **both** ally and enemy curves to maintain consistency
-- Or use the mapping to selectively edit only ally or enemy colors
-
----
-
-## Complete Niagara Data Interface Support
-
-### ShaderLUT-Based Curve Types
+#### ShaderLUT-Based Curve Types
 
 These types store pre-baked gradient data in a `ShaderLUT` float array for GPU sampling:
 

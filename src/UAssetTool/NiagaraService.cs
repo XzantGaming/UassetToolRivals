@@ -588,7 +588,8 @@ public static class NiagaraService
     /// <param name="assetPath">Path to the .uasset file</param>
     /// <param name="usmapPath">Optional path to .usmap mappings file</param>
     /// <param name="fullData">If true, returns all values instead of just samples (first, middle, last)</param>
-    public static string GetNiagaraDetails(string assetPath, string? usmapPath = null, bool fullData = false)
+    /// <param name="includeClassification">If true, includes classification analysis for color curves (experimental)</param>
+    public static string GetNiagaraDetails(string assetPath, string? usmapPath = null, bool fullData = false, bool includeClassification = false)
     {
         var result = new NiagaraDetailsResult
         {
@@ -626,16 +627,17 @@ public static class NiagaraService
                         ClassName = className
                     };
 
-                    // Get parent context for classification
-                    var (parentName, parentChain) = GetParentChain(asset, export);
-                    curveInfo.ParentName = parentName;
-                    curveInfo.ParentChain = parentChain;
-
                     var colors = ExtractColorsFromStructuredExport(colorCurveExport);
                     curveInfo.ColorCount = colors.Count;
 
-                    // Classify the curve
-                    curveInfo.Classification = ClassifyColorCurve(colors, exportName, parentName, parentChain);
+                    // Optionally include classification analysis
+                    if (includeClassification)
+                    {
+                        var (parentName, parentChain) = GetParentChain(asset, export);
+                        curveInfo.ParentName = parentName;
+                        curveInfo.ParentChain = parentChain;
+                        curveInfo.Classification = ClassifyColorCurve(colors, exportName, parentName, parentChain);
+                    }
 
                     if (fullData)
                     {

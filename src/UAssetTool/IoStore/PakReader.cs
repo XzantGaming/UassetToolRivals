@@ -364,18 +364,31 @@ public class PakReader : IDisposable
         _stream.Seek((long)entry.Offset, SeekOrigin.Begin);
         using var reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
         
-        // Read FPakEntry header (Unreal Packaging format - no flags byte):
-        // offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20) = 48 bytes
+        // Read FPakEntry header (V11 format):
+        // offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20) + flags(1) + blocksize(4) = 53 bytes
         // Then if compressed: blockCount(4) + blocks(16 each)
-        reader.ReadBytes(48); // Skip to block count
+        reader.ReadBytes(53); // Skip entry header
 
         if (!isCompressed)
         {
             // Uncompressed: data follows directly after header
-            byte[] data = reader.ReadBytes((int)uncompressedSize);
+            // For encrypted files, data is padded to 16-byte alignment
+            int dataSize = (int)uncompressedSize;
+            if (isEncrypted)
+            {
+                // Calculate padded size (16-byte alignment)
+                dataSize = ((int)uncompressedSize + 15) & ~15;
+            }
+            
+            byte[] data = reader.ReadBytes(dataSize);
             if (isEncrypted)
             {
                 data = PartialDecrypt(data, path);
+            }
+            // Truncate to actual uncompressed size (remove padding)
+            if (data.Length > (int)uncompressedSize)
+            {
+                Array.Resize(ref data, (int)uncompressedSize);
             }
             return data;
         }
@@ -454,7 +467,7 @@ public class PakReader : IDisposable
                 byte[] decompressedBlock = Decompress(blockData, blockUncompressedSize, compressionMethod);
                 outputStream.Write(decompressedBlock, 0, decompressedBlock.Length);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 Console.Error.WriteLine($"[PakReader] Block {blockIdx} decompression failed: compressed={blockCompressedSize}, uncompressed={blockUncompressedSize}, method={compressionMethod}");
                 throw;

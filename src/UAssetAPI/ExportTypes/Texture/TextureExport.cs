@@ -100,11 +100,6 @@ namespace UAssetAPI.ExportTypes.Texture
         /// </summary>
         public byte[] ExtraBytes;
 
-        /// <summary>
-        /// Raw bytes before FTexturePlatformData (for round-trip serialization).
-        /// </summary>
-        private byte[] _preDataBytes;
-
         public TextureExport(Export super) : base(super)
         {
         }

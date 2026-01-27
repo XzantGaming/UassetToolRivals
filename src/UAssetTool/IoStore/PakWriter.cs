@@ -76,8 +76,16 @@ public class PakWriter : IDisposable
         // Pad data to 16-byte alignment for encryption
         byte[] paddedData = PadToAlignment(data, 16);
 
+        // Normalize path to match how it will be stored in the index
+        // TrySplitPathChild adds "/" prefix for paths without directory
+        string normalizedPath = path;
+        if (!path.StartsWith("/"))
+        {
+            normalizedPath = "/" + path;
+        }
+
         // Calculate encryption limit based on path hash (repak's get_limit function from data.rs)
-        int limit = GetEncryptionLimit(path);
+        int limit = GetEncryptionLimit(normalizedPath);
         if (limit > paddedData.Length)
         {
             limit = paddedData.Length;

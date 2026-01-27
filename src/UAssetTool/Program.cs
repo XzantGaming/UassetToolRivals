@@ -73,9 +73,6 @@ public partial class Program
                 "niagara_edit" => CliNiagaraEdit(args),
                 "scan_childbp_isenemy" => CliScanChildBPIsEnemy(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
-                "test_mesh_modify" => CliTestMeshModify(args),
-                "analyze_sections" => CliAnalyzeSections(args),
-                "set_disabled" => CliSetDisabled(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -1711,28 +1708,32 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path] [--full]");
+            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path] [--full] [--classify]");
             Console.Error.WriteLine("Output: JSON with detailed color curve info for a specific NS file");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --full    Return all values instead of just samples (first, middle, last)");
+            Console.Error.WriteLine("  --full      Return all values instead of just samples (first, middle, last)");
+            Console.Error.WriteLine("  --classify  Include classification analysis for color curves (experimental)");
             return 1;
         }
 
         string assetPath = args[1];
         string? usmapPath = null;
         bool fullData = false;
+        bool includeClassification = false;
 
         // Parse remaining args
         for (int i = 2; i < args.Length; i++)
         {
             if (args[i] == "--full")
                 fullData = true;
+            else if (args[i] == "--classify")
+                includeClassification = true;
             else if (usmapPath == null && !args[i].StartsWith("--"))
                 usmapPath = args[i];
         }
 
-        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath, fullData);
+        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath, fullData, includeClassification);
         Console.WriteLine(json);
         return 0;
     }
@@ -4040,6 +4041,8 @@ public partial class Program
                         while (relativePath.StartsWith("../"))
                             relativePath = relativePath.Substring(3);
                     }
+                    // Remove leading / or \
+                    relativePath = relativePath.TrimStart('/', '\\');
                     
                     string outputPath = Path.Combine(outputDir, relativePath);
                     string? outputDirPath = Path.GetDirectoryName(outputPath);
@@ -4161,6 +4164,9 @@ public partial class Program
         {
             if (export is SkeletalMeshExport skelMesh)
             {
+                // Ensure extra data is parsed (lazy parsing since Extras is populated after Read)
+                skelMesh.EnsureExtraDataParsed();
+                
                 Console.WriteLine($"Export: {export.ObjectName?.Value?.Value ?? "Unknown"}");
                 Console.WriteLine($"  ExtraDataParsed: {skelMesh.ExtraDataParsed}");
                 Console.WriteLine($"  Extras Length: {skelMesh.Extras?.Length ?? 0} bytes");
@@ -4194,7 +4200,7 @@ public partial class Program
                         Console.WriteLine($"    [{i}] MaterialInterface: {mat.MaterialInterface.Index}");
                         Console.WriteLine($"        SlotName: {mat.MaterialSlotName?.Value?.Value ?? "None"}");
                         Console.WriteLine($"        ImportedSlotName: {mat.ImportedMaterialSlotName?.Value?.Value ?? "None"}");
-                        Console.WriteLine($"        GameplayTags: {mat.GameplayTags?.Length ?? 0}");
+                        Console.WriteLine($"        GameplayTags: {mat.GameplayTagContainer?.GameplayTags?.Count ?? 0}");
                     }
                 }
                 
@@ -4317,94 +4323,6 @@ public partial class Program
         };
     }
     
-    private static int CliAnalyzeSections(string[] args)
-    {
-        if (args.Length < 3)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool analyze_sections <uasset_path> <usmap_path>");
-            return 1;
-        }
-
-        string uassetPath = args[1];
-        string usmapPath = args[2];
-
-        if (!File.Exists(uassetPath))
-        {
-            Console.Error.WriteLine($"File not found: {uassetPath}");
-            return 1;
-        }
-
-        TestMeshModifier.AnalyzeSectionFlags(uassetPath, usmapPath);
-        return 0;
-    }
-    
-    private static int CliSetDisabled(string[] args)
-    {
-        if (args.Length < 5)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool set_disabled <uasset_path> <usmap_path> <true|false> <offset1> [offset2] ...");
-            Console.Error.WriteLine("Example: UAssetTool set_disabled mesh.uasset mappings.usmap true 0x8FB15");
-            return 1;
-        }
-
-        string uassetPath = args[1];
-        string usmapPath = args[2];
-        bool disabled = args[3].ToLower() == "true";
-        
-        var offsets = new List<int>();
-        for (int i = 4; i < args.Length; i++)
-        {
-            string offsetStr = args[i];
-            int offset;
-            if (offsetStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                offset = Convert.ToInt32(offsetStr, 16);
-            }
-            else
-            {
-                offset = int.Parse(offsetStr);
-            }
-            offsets.Add(offset);
-        }
-
-        if (!File.Exists(uassetPath))
-        {
-            Console.Error.WriteLine($"File not found: {uassetPath}");
-            return 1;
-        }
-
-        TestMeshModifier.SetDisabledFlags(uassetPath, usmapPath, offsets.ToArray(), disabled);
-        return 0;
-    }
-    
-    private static int CliTestMeshModify(string[] args)
-    {
-        if (args.Length < 4)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool test_mesh_modify <uasset_path> <usmap_path> <test_type>");
-            Console.Error.WriteLine("Test types:");
-            Console.Error.WriteLine("  clear_lodmaterialmap - Clear LODMaterialMap arrays");
-            Console.Error.WriteLine("  clear_clothingassets - Clear MeshClothingAssets");
-            Console.Error.WriteLine("  modify_lodinfo - Modify LODInfo settings");
-            Console.Error.WriteLine("  clear_morphtargets - Clear MorphTargets array");
-            Console.Error.WriteLine("  set_hasvertexcolors - Set bHasVertexColors to true");
-            Console.Error.WriteLine("  clear_postprocessbp - Clear PostProcessAnimBlueprint");
-            return 1;
-        }
-
-        string uassetPath = args[1];
-        string usmapPath = args[2];
-        string testType = args[3];
-
-        if (!File.Exists(uassetPath))
-        {
-            Console.Error.WriteLine($"File not found: {uassetPath}");
-            return 1;
-        }
-
-        TestMeshModifier.ModifyMeshForTesting(uassetPath, usmapPath, testType);
-        return 0;
-    }
     
     private static void AnalyzeSkeletalMeshSections(byte[] data, UAsset asset)
     {
