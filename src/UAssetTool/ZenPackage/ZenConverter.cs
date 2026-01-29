@@ -21,6 +21,10 @@ public class ZenConverter
     private static ScriptObjectsDatabase? _scriptObjectsDb;
     private static readonly object _scriptObjectsLock = new();
     
+    // Static usmap cache - loaded once per path and reused (HUGE performance win)
+    private static readonly Dictionary<string, UAssetAPI.Unversioned.Usmap> _usmapCache = new();
+    private static readonly object _usmapLock = new();
+    
     /// <summary>
     /// Set the script objects database to use for resolving class hashes
     /// </summary>
@@ -111,7 +115,7 @@ public class ZenConverter
 
         // Log whether asset uses versioned or unversioned properties
         // The Zen package flags will be set to match the source asset's format
-        Console.Error.WriteLine($"[ZenConverter] Asset HasUnversionedProperties: {asset.HasUnversionedProperties}");
+        // Verbose logging disabled for parallel performance
 
         // Extract package path from asset's FolderName
         // FolderName contains the directory path like "/Game/Marvel/Characters/1033/1033001/Weapons/Meshes/Stick_L"
@@ -149,7 +153,7 @@ public class ZenConverter
             packagePath = packagePath.TrimEnd('/') + "/" + assetName;
         }
         
-        Console.Error.WriteLine($"[ZenConverter] Package path from asset: {packagePath}");
+        // Verbose logging disabled for parallel performance
 
         string uexpPath = uassetPath.Replace(".uasset", ".uexp");
         if (!File.Exists(uexpPath))
@@ -222,7 +226,7 @@ public class ZenConverter
                 if (reserializedData != null && reserializedData.Length > 0)
                 {
                     int sizeDiff = reserializedData.Length - uexpData.Length;
-                    Console.Error.WriteLine($"[ZenConverter] SkeletalMesh re-serialized: {uexpData.Length} -> {reserializedData.Length} bytes (diff={sizeDiff}, {skeletalExport.Materials.Count} materials)");
+                    // Verbose logging disabled for parallel performance
                     uexpData = reserializedData;
                     materialPaddingToAdd = sizeDiff;
                 }
@@ -234,13 +238,13 @@ public class ZenConverter
                 // 1. The file already has FGameplayTagContainer (extracted from game) - no padding needed
                 // 2. Parsing failed for some other reason
                 // For files extracted from the game, they already have the correct format
-                Console.Error.WriteLine($"[ZenConverter] SkeletalMesh materials not parsed via SkeletalMeshExport. File may already have FGameplayTagContainer.");
+                // Verbose logging disabled for parallel performance
             }
         }
         else if (isStaticMesh)
         {
             // StaticMesh doesn't need FGameplayTagContainer padding for Marvel Rivals
-            Console.Error.WriteLine($"[ZenConverter] StaticMesh detected - no padding needed");
+            // Verbose logging disabled for parallel performance
         }
         
         if (isStringTable)
@@ -254,7 +258,7 @@ public class ZenConverter
                 int sizeDiff = reserializedData.Length - uexpData.Length;
                 if (sizeDiff != 0)
                 {
-                    Console.Error.WriteLine($"[ZenConverter] StringTable re-serialized: {uexpData.Length} -> {reserializedData.Length} bytes (diff={sizeDiff})");
+                    // Verbose logging disabled for parallel performance
                     uexpData = reserializedData;
                     stringTablePaddingToAdd = sizeDiff;
                 }
@@ -348,7 +352,7 @@ public class ZenConverter
         if (File.Exists(ubulkPath))
         {
             long ubulkSize = new FileInfo(ubulkPath).Length;
-            Console.Error.WriteLine($"[ZenConverter] Found .ubulk ({ubulkSize} bytes) - will be written as separate BulkData chunk");
+            // Verbose logging disabled for parallel performance
         }
 
         // Get package name for public export hash calculation
@@ -361,7 +365,7 @@ public class ZenConverter
             
             // Get pre-calculated size (padding already included for last export)
             long actualSize = exportSizes[export];
-            Console.Error.WriteLine($"[ZenConverter] Export {i} ({export.ObjectName?.Value?.Value}): size={actualSize}");
+            // Verbose logging disabled for parallel performance
 
             // Remap indices from legacy FPackageIndex to Zen FPackageObjectIndex
             // Look up the import map which was already built with correct script import hashes
@@ -371,10 +375,7 @@ public class ZenConverter
             var templateIndex = RemapLegacyPackageIndex(export.TemplateIndex, zenPackage);
             
             // Debug: show remapped indices for first few exports
-            if (i < 3)
-            {
-                Console.Error.WriteLine($"[ZenConverter] Export {i} indices: Outer={export.OuterIndex.Index}->0x{outerIndex.Value:X16}, Class={export.ClassIndex.Index}->0x{classIndex.Value:X16}, Super={export.SuperIndex.Index}->0x{superIndex.Value:X16}, Template={export.TemplateIndex.Index}->0x{templateIndex.Value:X16}");
-            }
+            // Verbose logging disabled for parallel performance
 
             // Calculate public export hash for public exports
             // RF_Public = 0x00000001
@@ -384,7 +385,7 @@ public class ZenConverter
             {
                 string exportName = export.ObjectName?.Value?.Value ?? "None";
                 publicExportHash = CalculatePublicExportHash(exportName);
-                Console.Error.WriteLine($"[ZenConverter] Export {i} ({exportName}): PublicExportHash=0x{publicExportHash:X16}, IsPublic={isPublic}");
+                // Verbose logging disabled for parallel performance
             }
 
             // Determine filter flags (these properties may not exist on all exports)
@@ -410,12 +411,7 @@ public class ZenConverter
             
 
             // Log if size differs from header
-            if (actualSize != export.SerialSize)
-            {
-                Console.Error.WriteLine(
-                    $"[ZenConverter] Export {i} ({export.ObjectName?.Value?.Value}): " +
-                    $"Header={export.SerialSize}, Actual={actualSize}, Diff={actualSize - export.SerialSize}");
-            }
+            // Verbose logging disabled for parallel performance
 
             zenPackage.ExportMap.Add(zenExport);
         }
@@ -444,7 +440,7 @@ public class ZenConverter
                 return zenPackage.ImportMap[importIndex];
             }
             // Fallback - should not happen if import map is built correctly
-            Console.Error.WriteLine($"[RemapLegacyPackageIndex] Warning: Import index {importIndex} out of range (map has {zenPackage.ImportMap.Count} entries)");
+            // Warning logging disabled for parallel performance
             return FPackageObjectIndex.CreateNull();
         }
         
@@ -603,7 +599,7 @@ public class ZenConverter
         zenPackage.PackageName = packageName;
         zenPackage.PackageNameIndex = packageNameIndex;
         
-        Console.Error.WriteLine($"[ZenConverter] Package name: {packageName} (index {packageNameIndex})");
+        // Verbose logging disabled for parallel performance
     }
 
     private static void SetPackageSummary(UAsset asset, FZenPackage zenPackage)
@@ -629,13 +625,12 @@ public class ZenConverter
         
         zenPackage.Summary.PackageFlags = packageFlags;
         
-        Console.Error.WriteLine($"[ZenConverter] Source asset HasUnversionedProperties: {asset.HasUnversionedProperties}");
+        // Verbose logging disabled for parallel performance
         
         // Set cooked header size from legacy asset
         zenPackage.Summary.CookedHeaderSize = (uint)asset.Exports.Min(e => e.SerialOffset);
         
-        Console.Error.WriteLine($"[ZenConverter] Package name: {zenPackage.PackageName} (index {zenPackage.PackageNameIndex})");
-        Console.Error.WriteLine($"[ZenConverter] Package flags: 0x{packageFlags:X8}");
+        // Verbose logging disabled for parallel performance
     }
 
     private static void BuildImportMap(UAsset asset, FZenPackage zenPackage)
@@ -666,13 +661,13 @@ public class ZenConverter
                 {
                     // Fallback to simple name lookup
                     scriptImport = FPackageObjectIndex.CreateFromRaw(globalIndex);
-                    Console.Error.WriteLine($"[BuildImportMap] Warning: Script object '{objectPath}' not found by path, using simple name '{objectName}' -> 0x{globalIndex:X16}");
+                    // Warning logging disabled for parallel performance
                 }
                 else
                 {
                     // Fallback to generating hash from path
                     scriptImport = FPackageObjectIndex.CreateScriptImport(objectPath);
-                    Console.Error.WriteLine($"[BuildImportMap] Warning: Script object '{objectPath}' not found in database, using generated hash");
+                    // Warning logging disabled for parallel performance
                 }
                 zenPackage.ImportMap.Add(scriptImport);
             }
@@ -721,13 +716,13 @@ public class ZenConverter
                         zenPackage.ImportMap.Add(importRef);
                         
                         string lowerExportPath = exportPath.ToLowerInvariant();
-                        Console.Error.WriteLine($"[BuildImportMap] Import {i} ({objectName}): Package={packagePath}, Export={lowerExportPath}, Hash=0x{exportHash:X16}, PkgIdx={packageIndex}, HashIdx={hashIndex}");
+                        // Verbose logging disabled for parallel performance
                     }
                     else
                     {
                         // Fallback to Null if we can't resolve the package
                         zenPackage.ImportMap.Add(FPackageObjectIndex.CreateNull());
-                        Console.Error.WriteLine($"[BuildImportMap] Warning: Could not resolve package for import {i} ({objectName})");
+                        // Warning logging disabled for parallel performance
                     }
                 }
             }
@@ -742,7 +737,7 @@ public class ZenConverter
         {
             index = zenPackage.NameMap.Count;
             zenPackage.NameMap.Add(nameStr);
-            Console.Error.WriteLine($"[ZenConverter] Added new name to NameMap: '{nameStr}' at index {index}");
+            // Verbose logging disabled for parallel performance
         }
         return new FMappedName((uint)index, (uint)number);
     }
@@ -1023,7 +1018,7 @@ public class ZenConverter
             zenPackage.ExportBundleEntries.Add(new FExportBundleEntry((uint)i, EExportCommandType.Serialize));
         }
         
-        Console.Error.WriteLine($"[ZenConverter] Created {zenPackage.ExportBundleHeaders.Count} export bundle(s) with {zenPackage.ExportBundleEntries.Count} entries (sorted by dependencies)");
+        // Verbose logging disabled for parallel performance
     }
     
     /// <summary>
@@ -1109,7 +1104,7 @@ public class ZenConverter
             zenPackage.DependencyBundleHeaders.Add(depHeader);
         }
         
-        Console.Error.WriteLine($"[ZenConverter] Created {zenPackage.DependencyBundleHeaders.Count} dependency bundle header(s) with {zenPackage.DependencyBundleEntries.Count} entries");
+        // Verbose logging disabled for parallel performance
     }
 
     private static void WriteZenPackage(
@@ -1213,11 +1208,10 @@ public class ZenConverter
                 long bulkDataMapSize = asset.DataResources.Count * 32;
                 writer.Write(bulkDataMapSize);
                 
-                Console.Error.WriteLine($"[ZenConverter] Writing {asset.DataResources.Count} bulk data map entries ({bulkDataMapSize} bytes):");
+                // Verbose logging disabled for parallel performance
                 int idx = 0;
                 foreach (var resource in asset.DataResources)
                 {
-                    Console.Error.WriteLine($"  [{idx}] SerialOffset={resource.SerialOffset}, DupOffset={resource.DuplicateSerialOffset}, Size={resource.SerialSize}, RawSize={resource.RawSize}, Flags=0x{resource.LegacyBulkDataFlags:X8}, OuterIndex={resource.OuterIndex}");
                     writer.Write(resource.SerialOffset);
                     writer.Write(resource.DuplicateSerialOffset);
                     writer.Write(resource.SerialSize);
@@ -1229,14 +1223,14 @@ public class ZenConverter
             else
             {
                 // Entries don't match .ubulk size - create single entry for entire file
-                Console.Error.WriteLine($"[ZenConverter] Bulk data map entries invalid for .ubulk size {ubulkSize}, creating single entry");
+                // Verbose logging disabled for parallel performance
                 writer.Write((long)32); // 1 entry * 32 bytes
                 writer.Write((long)0); // SerialOffset = 0
                 writer.Write((long)-1); // DuplicateSerialOffset = -1 (none)
                 writer.Write(ubulkSize); // SerialSize = entire file
                 writer.Write((uint)0x00010501); // Flags: PayloadAtEndOfFile | PayloadInSeperateFile | SingleUse
                 writer.Write((uint)0); // padding
-                Console.Error.WriteLine($"  [0] SerialOffset=0, DupOffset=-1, Size={ubulkSize}, Flags=0x00010501");
+                // Verbose logging disabled for parallel performance
             }
         }
         else if (asset.DataResources != null && asset.DataResources.Count > 0)
@@ -1245,11 +1239,10 @@ public class ZenConverter
             long bulkDataMapSize = asset.DataResources.Count * 32;
             writer.Write(bulkDataMapSize);
             
-            Console.Error.WriteLine($"[ZenConverter] Writing {asset.DataResources.Count} bulk data map entries ({bulkDataMapSize} bytes):");
+            // Verbose logging disabled for parallel performance
             int idx = 0;
             foreach (var resource in asset.DataResources)
             {
-                Console.Error.WriteLine($"  [{idx}] SerialOffset={resource.SerialOffset}, DupOffset={resource.DuplicateSerialOffset}, Size={resource.SerialSize}, RawSize={resource.RawSize}, Flags=0x{resource.LegacyBulkDataFlags:X8}, OuterIndex={resource.OuterIndex}");
                 writer.Write(resource.SerialOffset);
                 writer.Write(resource.DuplicateSerialOffset);
                 writer.Write(resource.SerialSize);
@@ -1270,10 +1263,7 @@ public class ZenConverter
         {
             writer.Write(hash);
         }
-        if (zenPackage.ImportedPublicExportHashes.Count > 0)
-        {
-            Console.Error.WriteLine($"[ZenConverter] Wrote {zenPackage.ImportedPublicExportHashes.Count} imported public export hashes");
-        }
+        // Verbose logging disabled for parallel performance
 
         // Write import map
         int importMapOffset = (int)writer.BaseStream.Position;
@@ -1413,7 +1403,7 @@ public class ZenConverter
             }
         }
         
-        Console.Error.WriteLine($"[ZenConverter] Preload calculation: preloadSize={preloadSize}, preloadDependencyCount={preloadDependencyCount}");
+        // Verbose logging disabled for parallel performance
         
         // Check if this is a SkeletalMesh, StaticMesh, or StringTable that needs padding
         bool isSkeletalMesh = asset.Exports.Any(e => 
@@ -1434,7 +1424,7 @@ public class ZenConverter
         // Files extracted from the game already have FGameplayTagContainer and don't need modification.
         
         // Write export data (possibly patched)
-        Console.Error.WriteLine($"[ZenConverter] Writing export data: {exportDataLength} bytes (original uexp was {uexpData.Length} bytes)");
+        // Verbose logging disabled for parallel performance
         writer.Write(exportDataToWrite, 0, exportDataLength);
         
         // CookedHeaderSize points to where actual export data starts (after preload)
@@ -1462,7 +1452,7 @@ public class ZenConverter
         zenPackage.Summary.Write(writer, containerVersion);
         writer.BaseStream.Seek(endPosition, SeekOrigin.Begin);
         
-        Console.Error.WriteLine($"[ZenConverter] Wrote Zen package: HeaderSize={zenHeaderSize}, ExportData={exportDataLength} bytes");
+        // Verbose logging disabled for parallel performance
     }
 
     private static UAsset LoadAsset(string filePath, string? usmapPath)
@@ -1471,7 +1461,15 @@ public class ZenConverter
         
         if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
         {
-            mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
+            // Use cached usmap to avoid parsing the same file 863+ times
+            lock (_usmapLock)
+            {
+                if (!_usmapCache.TryGetValue(usmapPath, out mappings))
+                {
+                    mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
+                    _usmapCache[usmapPath] = mappings;
+                }
+            }
         }
 
         var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings);
@@ -1523,7 +1521,7 @@ public class ZenConverter
                 int fnameIdx = BitConverter.ToInt32(uexpData, i + 8);
                 if (fnameIdx >= 0 && fnameIdx < 1000)
                 {
-                    Console.Error.WriteLine($"[ZenConverter] Found StaticMaterials: count={potentialCount} at offset 0x{i:X}, expectedEnd={expectedEnd}, dataLength={dataLength}");
+                    // Verbose logging disabled for parallel performance
                     return potentialCount * PADDING_SIZE;
                 }
             }
@@ -1556,7 +1554,7 @@ public class ZenConverter
             
             if (validPattern && validCount >= 1)
             {
-                Console.Error.WriteLine($"[ZenConverter] Found StaticMaterials: count={potentialCount} at offset 0x{i:X}");
+                // Verbose logging disabled for parallel performance
                 return potentialCount * PADDING_SIZE;
             }
         }
@@ -1609,7 +1607,7 @@ public class ZenConverter
                     materialCountOffset = i;
                     materialCount = potentialCount;
                     firstMaterialOffset = i + 4;
-                    Console.Error.WriteLine($"[ZenConverter] Found StaticMaterial array: count={materialCount} at offset 0x{materialCountOffset:X}, first material at 0x{firstMaterialOffset:X}, expectedEnd={expectedEnd}, dataLength={dataLength}");
+                    // Verbose logging disabled for parallel performance
                     break;
                 }
             }
@@ -1642,7 +1640,7 @@ public class ZenConverter
                     materialCountOffset = i;
                     materialCount = potentialCount;
                     firstMaterialOffset = i + 4;
-                    Console.Error.WriteLine($"[ZenConverter] Found StaticMaterial array: count={materialCount} at offset 0x{materialCountOffset:X}, first material at 0x{firstMaterialOffset:X}");
+                    // Verbose logging disabled for parallel performance
                     break;
                 }
             }
@@ -1650,7 +1648,7 @@ public class ZenConverter
         
         if (materialCount == 0 || firstMaterialOffset < 0)
         {
-            Console.Error.WriteLine($"[ZenConverter] No StaticMaterial array found to patch");
+            // Verbose logging disabled for parallel performance
             return (null, 0);
         }
         

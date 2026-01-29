@@ -2000,10 +2000,12 @@ public partial class Program
                     var response = ProcessRequest(request);
                     var responseJson = JsonSerializer.Serialize(response);
                     Console.WriteLine(responseJson.Replace("\r", "").Replace("\n", ""));
+                    Console.Out.Flush(); // Ensure response is sent immediately
                 }
                 catch (JsonException)
                 {
                     WriteJsonResponse(false, "Invalid JSON format");
+                    Console.Out.Flush();
                 }
             }
         }
@@ -2037,7 +2039,7 @@ public partial class Program
                 // Texture operations
                 "get_texture_info" => GetTextureInfo(request.FilePath, request.UsmapPath),
                 "strip_mipmaps_native" => StripMipmapsNative(request.FilePath, request.UsmapPath),
-                "batch_strip_mipmaps_native" => BatchStripMipmapsNative(request.FilePaths, request.UsmapPath),
+                "batch_strip_mipmaps_native" => BatchStripMipmapsNative(request.FilePaths, request.UsmapPath, request.Parallel),
                 "has_inline_texture_data" => HasInlineTextureData(request.FilePath, request.UsmapPath),
                 "batch_has_inline_texture_data" => BatchHasInlineTextureData(request.FilePaths, request.UsmapPath),
                 
@@ -2085,7 +2087,7 @@ public partial class Program
                 "recompress_iostore" => RecompressIoStore(request.FilePath),
                 "extract_iostore" => ExtractIoStoreJson(request.FilePath, request.OutputPath, request.AesKey),
                 "extract_script_objects" => ExtractScriptObjectsJson(request.FilePath, request.OutputPath),
-                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey),
+                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey, request.Parallel),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -3067,33 +3069,35 @@ public partial class Program
     /// <summary>
     /// Batch strip mipmaps from multiple textures using native UAssetAPI TextureExport.
     /// This processes all files in a single call for better performance.
+    /// When parallel=true, uses Parallel.ForEach for concurrent processing.
     /// </summary>
-    private static UAssetResponse BatchStripMipmapsNative(List<string>? filePaths, string? usmapPath)
+    private static UAssetResponse BatchStripMipmapsNative(List<string>? filePaths, string? usmapPath, bool parallel = false)
     {
         if (filePaths == null || filePaths.Count == 0)
             return new UAssetResponse { Success = false, Message = "file_paths required" };
 
         try
         {
-            Console.Error.WriteLine($"[UAssetTool] Batch stripping mipmaps for {filePaths.Count} files");
+            Console.Error.WriteLine($"[UAssetTool] Batch stripping mipmaps for {filePaths.Count} files (parallel={parallel})");
             
             // Use provided usmap_path, fall back to environment variable
             string? effectiveUsmapPath = usmapPath ?? Environment.GetEnvironmentVariable("USMAP_PATH");
             Console.Error.WriteLine($"[UAssetTool] Using USMAP: {effectiveUsmapPath ?? "null"}");
             Usmap? mappings = LoadMappings(effectiveUsmapPath);
             
-            var results = new List<object>();
+            // Use thread-safe collections for parallel processing
+            var results = new System.Collections.Concurrent.ConcurrentBag<object>();
             int successCount = 0;
             int skipCount = 0;
             int errorCount = 0;
             
-            foreach (var filePath in filePaths)
+            // Process single file - returns (success, skip, error) counts
+            (int success, int skip, int error) ProcessSingleTexture(string filePath)
             {
                 if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 {
                     results.Add(new { path = filePath, success = false, message = "File not found" });
-                    errorCount++;
-                    continue;
+                    return (0, 0, 1);
                 }
                 
                 try
@@ -3114,15 +3118,13 @@ public partial class Program
                     if (textureExport == null)
                     {
                         results.Add(new { path = filePath, success = false, message = "No TextureExport found" });
-                        errorCount++;
-                        continue;
+                        return (0, 0, 1);
                     }
                     
                     if (textureExport.PlatformData == null)
                     {
                         results.Add(new { path = filePath, success = false, message = "No PlatformData (texture not parsed)" });
-                        errorCount++;
-                        continue;
+                        return (0, 0, 1);
                     }
                     
                     int originalMipCount = textureExport.MipCount;
@@ -3130,8 +3132,7 @@ public partial class Program
                     if (originalMipCount <= 1)
                     {
                         results.Add(new { path = filePath, success = true, message = "Already has 1 mipmap", skipped = true });
-                        skipCount++;
-                        continue;
+                        return (0, 1, 0);
                     }
                     
                     // Target data_resource_id = 5 for Marvel Rivals textures
@@ -3142,8 +3143,7 @@ public partial class Program
                     if (!stripped)
                     {
                         results.Add(new { path = filePath, success = false, message = "Failed to strip mipmaps" });
-                        errorCount++;
-                        continue;
+                        return (0, 0, 1);
                     }
                     
                     // Update DataResources
@@ -3266,15 +3266,41 @@ public partial class Program
                         original_mips = originalMipCount,
                         new_mips = textureExport.MipCount
                     });
-                    successCount++;
                     
                     Console.Error.WriteLine($"[UAssetTool] Stripped: {Path.GetFileName(filePath)} ({originalMipCount} -> {textureExport.MipCount})");
+                    return (1, 0, 0);
                 }
                 catch (Exception ex)
                 {
                     results.Add(new { path = filePath, success = false, message = ex.Message });
-                    errorCount++;
                     Console.Error.WriteLine($"[UAssetTool] Error processing {Path.GetFileName(filePath)}: {ex.Message}");
+                    return (0, 0, 1);
+                }
+            }
+            
+            // Process files either in parallel or sequentially
+            if (parallel && filePaths.Count > 1)
+            {
+                Console.Error.WriteLine($"[UAssetTool] Using parallel processing with {Environment.ProcessorCount} cores");
+                var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
+                
+                Parallel.ForEach(filePaths, parallelOptions, filePath =>
+                {
+                    var (s, sk, e) = ProcessSingleTexture(filePath);
+                    Interlocked.Add(ref successCount, s);
+                    Interlocked.Add(ref skipCount, sk);
+                    Interlocked.Add(ref errorCount, e);
+                });
+            }
+            else
+            {
+                // Sequential processing
+                foreach (var filePath in filePaths)
+                {
+                    var (s, sk, e) = ProcessSingleTexture(filePath);
+                    successCount += s;
+                    skipCount += sk;
+                    errorCount += e;
                 }
             }
             
@@ -3289,7 +3315,7 @@ public partial class Program
                     success_count = successCount,
                     skip_count = skipCount,
                     error_count = errorCount,
-                    results = results
+                    results = results.ToList()
                 }
             };
         }
@@ -3761,6 +3787,7 @@ public partial class Program
     {
         var response = new UAssetResponse { Success = success, Message = message, Data = data };
         Console.WriteLine(JsonSerializer.Serialize(response));
+        Console.Out.Flush(); // Ensure response is sent immediately
     }
     
     #endregion
@@ -4667,7 +4694,7 @@ public partial class Program
     /// This is the JSON API equivalent of retoc's action_to_zen.
     /// Converts .uasset/.uexp files to Zen format and creates .utoc/.ucas/.pak bundle.
     /// </summary>
-    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey)
+    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey, bool parallel)
     {
         if (string.IsNullOrEmpty(outputPath))
             return new UAssetResponse { Success = false, Message = "Output path is required" };
@@ -4691,7 +4718,49 @@ public partial class Program
             string pakPath = outputBase + ".pak";
             string mount = string.IsNullOrEmpty(mountPoint) ? "../../../" : mountPoint;
             
-            // Create IoStore container
+            // Thread count based on parallel flag: 75% when enabled, 50% otherwise
+            int threadCount = parallel 
+                ? Math.Max(1, (Environment.ProcessorCount * 3) / 4)  // 75% of cores
+                : Math.Max(1, Environment.ProcessorCount / 2);       // 50% of cores
+            Console.Error.WriteLine($"[CreateModIoStore] Processing {uassetFiles.Count} files using {threadCount} threads (parallel={parallel})...");
+            Console.Error.Flush();
+            
+            // Phase 1: Parallel conversion to Zen format (CPU-intensive)
+            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, string? error)>();
+            int processedCount = 0;
+            
+            Parallel.ForEach(uassetFiles, new ParallelOptions { MaxDegreeOfParallelism = threadCount }, uassetPath =>
+            {
+                string assetName = Path.GetFileNameWithoutExtension(uassetPath);
+                try
+                {
+                    var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
+                        uassetPath, usmapPath, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    
+                    byte[]? ubulkData = null;
+                    string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
+                    if (File.Exists(ubulkPath)) ubulkData = File.ReadAllBytes(ubulkPath);
+                    
+                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, null));
+                    
+                    int count = Interlocked.Increment(ref processedCount);
+                    if (count % 50 == 0 || count == uassetFiles.Count)
+                    {
+                        Console.Error.WriteLine($"[CreateModIoStore] Converted {count}/{uassetFiles.Count}...");
+                        Console.Error.Flush();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    conversionResults.Add((assetName, uassetPath, null, "", null, null, ex.Message));
+                    Interlocked.Increment(ref processedCount);
+                }
+            });
+            
+            Console.Error.WriteLine($"[CreateModIoStore] Parallel conversion done. Writing IoStore...");
+            Console.Error.Flush();
+            
+            // Phase 2: Sequential write to IoStore
             using var ioStoreWriter = new IoStore.IoStoreWriter(
                 utocPath,
                 IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
@@ -4705,17 +4774,17 @@ public partial class Program
             int converted = 0;
             var errors = new List<string>();
             
-            foreach (var uassetPath in uassetFiles)
+            foreach (var result in conversionResults)
             {
-                string assetName = Path.GetFileNameWithoutExtension(uassetPath);
+                if (result.error != null || result.zenData == null)
+                {
+                    if (result.error != null) errors.Add($"{result.assetName}: {result.error}");
+                    continue;
+                }
                 
                 try
                 {
-                    // Convert legacy asset to Zen format
-                    var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath,
-                        usmapPath,
-                        ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, _) = result;
                     
                     // Create package ID using the /Game/... format
                     string gamePackagePath;
@@ -4752,11 +4821,9 @@ public partial class Program
                     filePaths.Add(packagePath + ".uasset");
                     filePaths.Add(packagePath + ".uexp");
                     
-                    // Handle .ubulk if exists
-                    string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
-                    if (File.Exists(ubulkPath))
+                    // Handle .ubulk if exists (already loaded during parallel phase)
+                    if (ubulkData != null)
                     {
-                        byte[] ubulkData = File.ReadAllBytes(ubulkPath);
                         var bulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.BulkData);
                         string bulkFullPath = mount + packagePath + ".ubulk";
                         ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
@@ -4767,7 +4834,7 @@ public partial class Program
                 }
                 catch (Exception ex)
                 {
-                    errors.Add($"{assetName}: {ex.Message}");
+                    errors.Add($"{result.assetName}: {ex.Message}");
                 }
             }
             
@@ -4956,6 +5023,12 @@ public class UAssetRequest
     
     [JsonPropertyName("filter_patterns")]
     public List<string>? FilterPatterns { get; set; }
+    
+    /// <summary>
+    /// Enable parallel processing for batch operations
+    /// </summary>
+    [JsonPropertyName("parallel")]
+    public bool Parallel { get; set; } = false;
 }
 
 public class UAssetResponse
