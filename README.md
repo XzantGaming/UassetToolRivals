@@ -6,13 +6,16 @@ A unified command-line tool for parsing, editing, and converting Unreal Engine a
 
 - **Asset Detection** - Detect asset types (StaticMesh, SkeletalMesh, Texture2D, Blueprint, MaterialInstance)
 - **Property Editing** - Read and modify asset properties via JSON API
+- **JSON Conversion** - Export uasset to JSON and import JSON back to uasset for easy editing
 - **Texture Operations** - Strip mipmaps, get texture info, detect inline data
 - **Mesh Operations** - Fix SerializeSize mismatches, SkeletalMesh/StaticMesh material padding
 - **Zen/IoStore Support** - Convert between legacy (.uasset/.uexp) and Zen formats
 - **IoStore Creation** - Create IoStore mod bundles (.utoc/.ucas/.pak) for game injection
 - **IoStore Extraction** - Extract assets from game IoStore containers with dependency resolution
+- **PAK Extraction** - Extract assets from legacy PAK files with encryption and compression support
 - **Marvel Rivals Support** - Game-specific fixes for FGameplayTagContainer, material slots, and asset serialization
 - **NiagaraSystem Editing** - Modify particle effect colors with structured parsing
+- **Blueprint Analysis** - Scan ChildBP assets for parameter redirects (IsEnemy detection)
 - **GUI Backend** - JSON stdin/stdout API for frontend integration
 
 ## Installation
@@ -58,7 +61,34 @@ UAssetTool batch_detect <directory> [usmap_path]
 
 # Convert legacy to Zen format
 UAssetTool to_zen <uasset_path> [usmap_path]
+
+# Get SkeletalMesh detailed info
+UAssetTool skeletal_mesh_info <uasset_path> <usmap_path>
 ```
+
+### JSON Conversion
+
+```bash
+# Convert uasset to JSON (single file)
+UAssetTool to_json <uasset_path> [usmap_path] [output_dir]
+
+# Convert uasset to JSON (batch - all .uasset files in directory)
+UAssetTool to_json <directory> [usmap_path] [output_dir]
+
+# Convert JSON back to uasset
+UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]
+```
+
+**`to_json` Arguments:**
+- `<path>` - Path to a `.uasset` file or directory containing `.uasset` files
+- `[usmap_path]` - Optional path to `.usmap` mappings file for better property parsing
+- `[output_dir]` - Optional output directory (default: same location as input, with `.json` extension)
+
+**Batch Mode Features:**
+- Recursively finds all `.uasset` files in the directory
+- Preserves relative directory structure when using custom output directory
+- Reports success/failure counts after completion
+- Continues processing even if individual files fail
 
 ### PAK Extraction
 
@@ -102,7 +132,26 @@ UAssetTool inspect_zen <ucas_path>
 
 # Extract script objects database
 UAssetTool extract_script_objects <paks_path> <output_file>
+
+# Recompress IoStore with Oodle
+UAssetTool recompress_iostore <utoc_path>
+
+# Check if IoStore is compressed
+UAssetTool is_iostore_compressed <utoc_path>
+
+# Calculate CityHash for a path
+UAssetTool cityhash <path_string>
 ```
+
+### Blueprint Analysis
+
+```bash
+# Scan ChildBP assets for IsEnemy parameter usage (for Niagara color modding)
+UAssetTool scan_childbp_isenemy <paks_directory> [--aes <key>]
+UAssetTool scan_childbp_isenemy <extracted_directory> --extracted
+```
+
+This command helps identify which Niagara systems receive the `IsEnemy` parameter through ChildBP `UserParameterRedirects`, useful for creating enemy-aware color mods.
 
 ### Interactive JSON Mode
 

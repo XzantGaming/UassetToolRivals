@@ -11,6 +11,7 @@ Technical documentation for UAssetTool's file format handling and data structure
 5. [StaticMesh Structure](#staticmesh-structure)
 6. [NiagaraSystem Data Interfaces](#niagarasystem-data-interfaces)
 7. [Script Objects Database](#script-objects-database)
+8. [JSON Serialization](#json-serialization)
 
 ---
 
@@ -1183,3 +1184,105 @@ public FName? GetName(FPackageObjectIndex index)
 ### Impact on NiagaraSystem
 
 This fix was essential for NiagaraSystem editing - truncated class names like `iagaraDataInterfaceColorCurve` prevented proper export type detection.
+
+---
+
+## JSON Serialization
+
+**Implementation:** `UAssetAPI/UAsset.cs`
+
+UAssetTool supports full bidirectional JSON serialization of uasset files, enabling easy inspection and modification of asset data without binary editing.
+
+### Capabilities
+
+| Direction | Method | Description |
+|-----------|--------|-------------|
+| Export | `SerializeJson()` | Converts UAsset to JSON string |
+| Import | `DeserializeJson()` | Parses JSON string back to UAsset |
+
+### CLI Usage
+
+```bash
+# Convert uasset to JSON (single file)
+UAssetTool to_json <uasset_path> [usmap_path] [output_dir]
+
+# Convert uasset to JSON (batch - all .uasset files in directory)
+UAssetTool to_json <directory> [usmap_path] [output_dir]
+
+# Convert JSON back to uasset
+UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]
+```
+
+**`to_json` Arguments:**
+- `<path>` - Path to a `.uasset` file or directory containing `.uasset` files
+- `[usmap_path]` - Optional `.usmap` mappings file for better property parsing
+- `[output_dir]` - Optional output directory (default: same location as input)
+
+**Batch Mode:** When given a directory, recursively processes all `.uasset` files and preserves relative directory structure in output.
+
+### Interactive JSON API
+
+```json
+{"action": "export_to_json", "file_path": "path/to/asset.uasset", "usmap_path": "path/to/mappings.usmap"}
+{"action": "import_from_json", "file_path": "path/to/output.uasset", "usmap_path": "...", "json_data": "..."}
+```
+
+### JSON Structure
+
+The serialized JSON preserves the complete asset structure:
+
+```json
+{
+  "Info": "Serialized with UAssetAPI x.x.x",
+  "PackageGuid": "00000000-0000-0000-0000-000000000000",
+  "EngineVersion": "VER_UE5_3",
+  "CustomVersionContainer": [...],
+  "NameMap": ["None", "ObjectName", ...],
+  "Imports": [
+    {
+      "ClassPackage": "/Script/Engine",
+      "ClassName": "StaticMesh",
+      "OuterIndex": 0,
+      "ObjectName": "SM_MyMesh"
+    }
+  ],
+  "Exports": [
+    {
+      "ObjectName": "MyExport",
+      "ClassIndex": {...},
+      "Data": [
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.IntPropertyData",
+          "Name": "MyIntProperty",
+          "Value": 42
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Property Types
+
+All UAssetAPI property types are serialized with their `$type` discriminator for proper deserialization:
+
+| Property Type | JSON Representation |
+|---------------|---------------------|
+| `IntPropertyData` | `{"$type": "...IntPropertyData", "Value": 42}` |
+| `FloatPropertyData` | `{"$type": "...FloatPropertyData", "Value": 1.5}` |
+| `StrPropertyData` | `{"$type": "...StrPropertyData", "Value": "text"}` |
+| `ArrayPropertyData` | `{"$type": "...ArrayPropertyData", "Value": [...]}` |
+| `StructPropertyData` | `{"$type": "...StructPropertyData", "Value": [...]}` |
+| `ObjectPropertyData` | `{"$type": "...ObjectPropertyData", "Value": {...}}` |
+
+### Use Cases
+
+1. **Asset Inspection** - Human-readable view of asset contents
+2. **Batch Editing** - Modify properties with text processing tools
+3. **Diff/Merge** - Compare asset versions using standard diff tools
+4. **Scripted Modifications** - Programmatic asset editing via JSON manipulation
+5. **Documentation** - Generate asset structure documentation
+
+### Encoding
+
+JSON files are written with UTF-8 encoding to preserve Unicode characters (Chinese, Korean, Japanese text in asset names).

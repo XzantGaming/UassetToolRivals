@@ -364,10 +364,16 @@ public class PakReader : IDisposable
         _stream.Seek((long)entry.Offset, SeekOrigin.Begin);
         using var reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
         
+        // Debug: show entry offset
+        if (Environment.GetEnvironmentVariable("DEBUG_PAK") == "1")
+        {
+            Console.Error.WriteLine($"[PakReader] Reading entry at offset={entry.Offset}, compressed={compressedSize}, uncompressed={uncompressedSize}");
+        }
+        
         // Read FPakEntry header (V11 format):
-        // offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20) + flags(1) + blocksize(4) = 53 bytes
-        // Then if compressed: blockCount(4) + blocks(16 each)
-        reader.ReadBytes(53); // Skip entry header
+        // offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20) = 48 bytes
+        // Then: blockCount(4) + blocks(16 each for compressed) OR data directly for uncompressed
+        reader.ReadBytes(48); // Skip base entry header
 
         if (!isCompressed)
         {
@@ -393,51 +399,66 @@ public class PakReader : IDisposable
             return data;
         }
 
-        // Compressed: read compression blocks info then decompress
+        // Compressed: read block count from file header (at position 48), then block offsets
         uint blockCount = reader.ReadUInt32();
-        var compressionBlocks = new List<(long start, long end)>((int)blockCount);
-        for (uint i = 0; i < blockCount; i++)
-        {
-            long blockStart = reader.ReadInt64();
-            long blockEnd = reader.ReadInt64();
-            compressionBlocks.Add((blockStart, blockEnd));
-        }
-
-        // Block size: use 65536 (64KB) as default - this is the standard UE4/5 block size
-        // The CompressionBlockSize field is shifted left by 11 (per CUE4Parse FPakEntry.cs)
+        
+        // Block size from encoded entry (shifted left by 11), or default 64KB
         uint blockSize;
         if (entry.CompressionBlockSize > 0)
         {
-            blockSize = entry.CompressionBlockSize << 11; // 32 << 11 = 65536
+            blockSize = entry.CompressionBlockSize << 11;
         }
         else
         {
-            // Default to 64KB which is the standard UE4/5 compression block size
             blockSize = 65536;
+        }
+
+        var compressionBlocks = new List<(long start, long size)>();
+        
+        if (blockCount == 0)
+        {
+            // No block info in file - single block, data follows the header
+            // Header is 48 bytes + 4 bytes blockCount = 52 bytes
+            long dataOffset = (long)entry.Offset + 52;
+            compressionBlocks.Add((dataOffset, (long)compressedSize));
+        }
+        else
+        {
+            // Read block offsets - each block has (start:8, end:8) = 16 bytes
+            // Block offsets are RELATIVE to entry.Offset, not absolute
+            for (uint i = 0; i < blockCount; i++)
+            {
+                long blockStart = reader.ReadInt64();
+                long blockEnd = reader.ReadInt64();
+                // Convert relative offsets to absolute by adding entry.Offset
+                long absoluteStart = (long)entry.Offset + blockStart;
+                compressionBlocks.Add((absoluteStart, blockEnd - blockStart));
+            }
         }
 
         // Decompress each block
         using var outputStream = new MemoryStream((int)uncompressedSize);
-        long entryBaseOffset = (long)entry.Offset;
 
         for (int blockIdx = 0; blockIdx < compressionBlocks.Count; blockIdx++)
         {
-            var (blockStart, blockEnd) = compressionBlocks[blockIdx];
-            
-            // Block offsets are RELATIVE to entry start position
-            long absoluteBlockStart = entryBaseOffset + blockStart;
-            long blockCompressedSize = blockEnd - blockStart;
+            var (blockStart, blockCompressedSize) = compressionBlocks[blockIdx];
             
             if (blockCompressedSize <= 0)
                 continue;
             
-            // Read block data directly from stream
-            _stream.Seek(absoluteBlockStart, SeekOrigin.Begin);
+            _stream.Seek(blockStart, SeekOrigin.Begin);
             byte[] blockData = new byte[blockCompressedSize];
             int bytesRead = _stream.Read(blockData, 0, (int)blockCompressedSize);
             if (bytesRead != blockCompressedSize)
             {
                 throw new InvalidDataException($"Failed to read block {blockIdx}: expected {blockCompressedSize} bytes, got {bytesRead}");
+            }
+            
+            // Debug: show first bytes of block data
+            if (Environment.GetEnvironmentVariable("DEBUG_PAK") == "1" && blockIdx == 0)
+            {
+                string firstBytes = string.Join(" ", blockData.Take(16).Select(b => b.ToString("X2")));
+                Console.Error.WriteLine($"[PakReader] Block {blockIdx}: offset={blockStart}, size={blockCompressedSize}, first16bytes={firstBytes}");
             }
 
             if (isEncrypted)
@@ -455,7 +476,6 @@ public class PakReader : IDisposable
             }
 
             // Calculate expected uncompressed size for this block
-            // Last block may be smaller than blockSize
             long remainingUncompressed = (long)uncompressedSize - outputStream.Position;
             int blockUncompressedSize = (int)Math.Min(blockSize, remainingUncompressed);
             

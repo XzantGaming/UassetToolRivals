@@ -65,6 +65,7 @@ public partial class Program
                 "recompress_iostore" => CliRecompressIoStore(args),
                 "cityhash" => CliCityHash(args),
                 "from_json" => CliFromJson(args),
+                "to_json" => CliToJson(args),
                 "dump_zen_from_game" => CliDumpZenFromGame(args),
                 "extract_pak" => CliExtractPak(args),
                 "modify_colors" => CliModifyColors(args),
@@ -110,6 +111,7 @@ public partial class Program
         Console.WriteLine("  extract_script_objects <paks_path> <output>    - Extract ScriptObjects.bin from game");
         Console.WriteLine("  recompress_iostore <utoc_path>                 - Recompress IoStore with Oodle");
         Console.WriteLine("  from_json <json_path> <output_uasset> [usmap]  - Convert JSON back to uasset");
+        Console.WriteLine("  to_json <path> [usmap] [output_dir]            - Convert uasset to JSON (supports directory for batch)");
         Console.WriteLine("  extract_pak <pak_path> <output_dir> [options]   - Extract assets from legacy PAK file");
         Console.WriteLine();
         Console.WriteLine("Zen Conversion Pipeline (2 steps for debugging):");
@@ -1633,6 +1635,101 @@ public partial class Program
         
         Console.WriteLine($"Asset imported from JSON and saved to {outputPath}");
         return 0;
+    }
+    
+    private static int CliToJson(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool to_json <path> [usmap_path] [output_dir]");
+            Console.Error.WriteLine("  <path>       - Path to a .uasset file or directory containing .uasset files");
+            Console.Error.WriteLine("  [usmap_path] - Optional path to .usmap mappings file");
+            Console.Error.WriteLine("  [output_dir] - Optional output directory (default: same as input)");
+            return 1;
+        }
+
+        string inputPath = args[1];
+        string? usmapPath = args.Length > 2 ? args[2] : null;
+        string? outputDir = args.Length > 3 ? args[3] : null;
+
+        int successCount = 0;
+        int failCount = 0;
+
+        if (Directory.Exists(inputPath))
+        {
+            // Batch mode: process all .uasset files in directory
+            var files = Directory.GetFiles(inputPath, "*.uasset", SearchOption.AllDirectories);
+            Console.WriteLine($"Found {files.Length} .uasset files in {inputPath}");
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    string jsonOutputPath;
+                    if (!string.IsNullOrEmpty(outputDir))
+                    {
+                        // Preserve relative directory structure in output
+                        string relativePath = Path.GetRelativePath(inputPath, file);
+                        string relativeDir = Path.GetDirectoryName(relativePath) ?? "";
+                        string outputSubDir = Path.Combine(outputDir, relativeDir);
+                        Directory.CreateDirectory(outputSubDir);
+                        jsonOutputPath = Path.Combine(outputSubDir, Path.GetFileNameWithoutExtension(file) + ".json");
+                    }
+                    else
+                    {
+                        jsonOutputPath = Path.ChangeExtension(file, ".json");
+                    }
+
+                    var asset = LoadAsset(file, usmapPath);
+                    string json = asset.SerializeJson(true);
+                    File.WriteAllText(jsonOutputPath, json, System.Text.Encoding.UTF8);
+                    Console.WriteLine($"Converted: {file} -> {jsonOutputPath}");
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to convert {file}: {ex.Message}");
+                    failCount++;
+                }
+            }
+
+            Console.WriteLine($"\nBatch conversion complete: {successCount} succeeded, {failCount} failed");
+        }
+        else if (File.Exists(inputPath))
+        {
+            // Single file mode
+            try
+            {
+                string jsonOutputPath;
+                if (!string.IsNullOrEmpty(outputDir))
+                {
+                    Directory.CreateDirectory(outputDir);
+                    jsonOutputPath = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(inputPath) + ".json");
+                }
+                else
+                {
+                    jsonOutputPath = Path.ChangeExtension(inputPath, ".json");
+                }
+
+                var asset = LoadAsset(inputPath, usmapPath);
+                string json = asset.SerializeJson(true);
+                File.WriteAllText(jsonOutputPath, json, System.Text.Encoding.UTF8);
+                Console.WriteLine($"Asset exported to JSON: {jsonOutputPath}");
+                successCount = 1;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to convert: {ex.Message}");
+                return 1;
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine($"Path not found: {inputPath}");
+            return 1;
+        }
+
+        return failCount > 0 ? 1 : 0;
     }
     
     private static int CliModifyColors(string[] args)
