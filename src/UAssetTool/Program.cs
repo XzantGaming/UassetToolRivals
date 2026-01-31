@@ -3921,7 +3921,12 @@ public partial class Program
         
         if (asset.OtherAssetsFailedToAccess.Count > 0)
         {
-            Console.Error.WriteLine($"[UAssetTool] Warning: Could not find {asset.OtherAssetsFailedToAccess.Count} referenced assets on disk");
+            Console.Error.WriteLine($"[UAssetTool] Warning: Could not find {asset.OtherAssetsFailedToAccess.Count} referenced assets on disk:");
+            foreach (var missingPath in asset.OtherAssetsFailedToAccess)
+            {
+                Console.Error.WriteLine($"[UAssetTool]   - {missingPath.Value.Value}");
+            }
+            Console.Error.WriteLine($"[UAssetTool] To fix schema errors, extract these parent Blueprint assets to the same Content folder structure.");
         }
     }
     
