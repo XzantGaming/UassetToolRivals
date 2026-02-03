@@ -668,15 +668,28 @@ public partial class Program
                 Console.Error.WriteLine($"  Converting: {assetName}");
 
                 // Convert legacy asset to Zen format and get the package path and FZenPackage
+                // Use specialized AnimBlueprintZenConverter for AnimBlueprint/PhysicsAsset types
                 byte[] zenData;
                 string packagePath;
                 ZenPackage.FZenPackage zenPackage;
+                bool useAnimBlueprintConverter = ZenPackage.AnimBlueprintZenConverter.IsAnimBlueprintAsset(uassetPath, usmapPath);
                 try
                 {
-                    (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath,
-                        usmapPath,
-                        ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    if (useAnimBlueprintConverter)
+                    {
+                        Console.Error.WriteLine($"    Using AnimBlueprint converter for: {assetName}");
+                        (zenData, packagePath, zenPackage) = ZenPackage.AnimBlueprintZenConverter.ConvertLegacyToZenFull(
+                            uassetPath,
+                            usmapPath,
+                            ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    }
+                    else
+                    {
+                        (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
+                            uassetPath,
+                            usmapPath,
+                            ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                    }
                 }
                 catch (Exception ex)
                 {

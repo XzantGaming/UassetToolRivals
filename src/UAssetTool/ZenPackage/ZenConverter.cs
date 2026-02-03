@@ -1062,7 +1062,7 @@ public class ZenConverter
     private static void BuildDependencyBundles(UAsset asset, FZenPackage zenPackage)
     {
         // For each export, create a dependency bundle header
-        // In the simple case (single bundle), dependencies are straightforward
+        // Preserve actual preload dependencies from the legacy asset
         
         int currentEntryIndex = 0;
         
@@ -1070,32 +1070,61 @@ public class ZenConverter
         {
             var export = asset.Exports[i];
             
+            // Collect dependencies from all four preload dependency arrays
+            var createBeforeCreate = new List<FPackageIndex>();
+            var serializeBeforeCreate = new List<FPackageIndex>();
+            var createBeforeSerialize = new List<FPackageIndex>();
+            var serializeBeforeSerialize = new List<FPackageIndex>();
+            
+            // Preserve actual preload dependencies from legacy asset
+            if (export.CreateBeforeCreateDependencies != null)
+            {
+                foreach (var dep in export.CreateBeforeCreateDependencies)
+                    createBeforeCreate.Add(new FPackageIndex(dep.Index));
+            }
+            if (export.SerializationBeforeCreateDependencies != null)
+            {
+                foreach (var dep in export.SerializationBeforeCreateDependencies)
+                    serializeBeforeCreate.Add(new FPackageIndex(dep.Index));
+            }
+            if (export.CreateBeforeSerializationDependencies != null)
+            {
+                foreach (var dep in export.CreateBeforeSerializationDependencies)
+                    createBeforeSerialize.Add(new FPackageIndex(dep.Index));
+            }
+            if (export.SerializationBeforeSerializationDependencies != null)
+            {
+                foreach (var dep in export.SerializationBeforeSerializationDependencies)
+                    serializeBeforeSerialize.Add(new FPackageIndex(dep.Index));
+            }
+            
             // Create dependency header for this export
             var depHeader = new FDependencyBundleHeader
             {
                 FirstEntryIndex = currentEntryIndex,
-                CreateBeforeCreateDependencies = 0,
-                SerializeBeforeCreateDependencies = 0,
-                CreateBeforeSerializeDependencies = 0,
-                SerializeBeforeSerializeDependencies = 0
+                CreateBeforeCreateDependencies = (uint)createBeforeCreate.Count,
+                SerializeBeforeCreateDependencies = (uint)serializeBeforeCreate.Count,
+                CreateBeforeSerializeDependencies = (uint)createBeforeSerialize.Count,
+                SerializeBeforeSerializeDependencies = (uint)serializeBeforeSerialize.Count
             };
             
-            // Add dependencies based on export's outer/class/super/template indices
-            var dependencies = new List<FPackageIndex>();
-            
-            // Check OuterIndex - if it references another export, add dependency
-            if (export.OuterIndex.Index != 0)
+            // Add dependency entries in order: CBC, SBC, CBS, SBS
+            foreach (var dep in createBeforeCreate)
             {
-                var outerIdx = new FPackageIndex(export.OuterIndex.Index);
-                if (outerIdx.IsExport())
-                {
-                    dependencies.Add(outerIdx);
-                    depHeader.CreateBeforeCreateDependencies++;
-                }
+                zenPackage.DependencyBundleEntries.Add(new FDependencyBundleEntry(dep));
+                currentEntryIndex++;
             }
-            
-            // Add dependency entries
-            foreach (var dep in dependencies)
+            foreach (var dep in serializeBeforeCreate)
+            {
+                zenPackage.DependencyBundleEntries.Add(new FDependencyBundleEntry(dep));
+                currentEntryIndex++;
+            }
+            foreach (var dep in createBeforeSerialize)
+            {
+                zenPackage.DependencyBundleEntries.Add(new FDependencyBundleEntry(dep));
+                currentEntryIndex++;
+            }
+            foreach (var dep in serializeBeforeSerialize)
             {
                 zenPackage.DependencyBundleEntries.Add(new FDependencyBundleEntry(dep));
                 currentEntryIndex++;
@@ -1103,8 +1132,6 @@ public class ZenConverter
             
             zenPackage.DependencyBundleHeaders.Add(depHeader);
         }
-        
-        // Verbose logging disabled for parallel performance
     }
 
     private static void WriteZenPackage(

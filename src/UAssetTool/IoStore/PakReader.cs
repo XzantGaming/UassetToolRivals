@@ -297,25 +297,35 @@ public class PakReader : IDisposable
     }
 
     /// <summary>
-    /// Parse encoded entry (from entry.rs read_encoded)
+    /// Parse encoded entry (from repak entry.rs read_encoded)
     /// </summary>
     private static PakEntry ParseEncodedEntry(byte[] data, int offset)
     {
         using var stream = new MemoryStream(data, offset, data.Length - offset);
         using var reader = new BinaryReader(stream);
 
-        uint flags = reader.ReadUInt32();
+        uint bits = reader.ReadUInt32();
 
-        // Extract flags (based on CUE4Parse FPakEntry.cs)
-        // compressionBlockSize is stored as value << 11 (not << 10)
-        // So we extract the raw value and will shift by 11 when using it
-        uint compressionBlockSizeRaw = flags & 0x3F;
-        uint compressionBlocksCount = (flags >> 6) & 0xFFFF;
-        bool isEncrypted = ((flags >> 22) & 1) != 0;
-        uint compressionSlot = (flags >> 23) & 0x3F;
-        bool isSizeSafe = ((flags >> 29) & 1) != 0;
-        bool isUncompressedSizeSafe = ((flags >> 30) & 1) != 0;
-        bool isOffsetSafe = ((flags >> 31) & 1) != 0;
+        // Extract flags (matching repak's read_encoded exactly)
+        uint compressionSlot = (bits >> 23) & 0x3F;
+        bool isEncrypted = (bits & (1 << 22)) != 0;
+        uint compressionBlockCount = (bits >> 6) & 0xFFFF;
+        uint compressionBlockSizeRaw = bits & 0x3F;
+        
+        // Handle special case where block size needs extra read
+        uint compressionBlockSize;
+        if (compressionBlockSizeRaw == 0x3F)
+        {
+            compressionBlockSize = reader.ReadUInt32();
+        }
+        else
+        {
+            compressionBlockSize = compressionBlockSizeRaw << 11;
+        }
+
+        bool isOffsetSafe = (bits & (1u << 31)) != 0;
+        bool isUncompressedSizeSafe = (bits & (1 << 30)) != 0;
+        bool isSizeSafe = (bits & (1 << 29)) != 0;
 
         // Read offset
         ulong entryOffset = isOffsetSafe ? reader.ReadUInt32() : reader.ReadUInt64();
@@ -323,11 +333,39 @@ public class PakReader : IDisposable
         // Read uncompressed size
         ulong uncompressedSize = isUncompressedSizeSafe ? reader.ReadUInt32() : reader.ReadUInt64();
 
-        // Compressed size (if compression is used)
+        // Compressed size (only if compression is used)
         ulong compressedSize = uncompressedSize;
         if (compressionSlot > 0)
         {
             compressedSize = isSizeSafe ? reader.ReadUInt32() : reader.ReadUInt64();
+        }
+
+        // Calculate the inline entry header size (offset_base in repak)
+        // This is where the actual data starts relative to entry.Offset
+        ulong offsetBase = GetSerializedEntrySize(compressionSlot > 0 ? (int?)compressionSlot : null, compressionBlockCount);
+
+        // Build block list (matching repak's read_encoded)
+        List<(ulong start, ulong end)>? blocks = null;
+        if (compressionBlockCount == 1 && !isEncrypted)
+        {
+            // Single block, not encrypted: block spans from offset_base to offset_base + compressed
+            blocks = new List<(ulong start, ulong end)> { (offsetBase, offsetBase + compressedSize) };
+        }
+        else if (compressionBlockCount > 0)
+        {
+            // Multiple blocks or encrypted: read block sizes from encoded entry
+            blocks = new List<(ulong start, ulong end)>((int)compressionBlockCount);
+            ulong index = offsetBase;
+            for (uint i = 0; i < compressionBlockCount; i++)
+            {
+                uint blockSize = reader.ReadUInt32();
+                blocks.Add((index, index + blockSize));
+                if (isEncrypted)
+                {
+                    blockSize = (blockSize + 15) & ~15u; // Align to 16 bytes
+                }
+                index += blockSize;
+            }
         }
 
         return new PakEntry
@@ -337,19 +375,38 @@ public class PakReader : IDisposable
             UncompressedSize = uncompressedSize,
             CompressionSlot = compressionSlot > 0 ? (int?)(compressionSlot - 1) : null,
             IsEncrypted = isEncrypted,
-            CompressionBlockSize = compressionBlockSizeRaw,
-            CompressionBlocksCount = compressionBlocksCount
+            CompressionBlockSize = compressionBlockSize,
+            CompressionBlocksCount = compressionBlockCount,
+            Blocks = blocks
         };
+    }
+    
+    /// <summary>
+    /// Calculate serialized entry size (matching repak's Entry::get_serialized_size for V11)
+    /// </summary>
+    private static ulong GetSerializedEntrySize(int? compressionSlot, uint blockCount)
+    {
+        ulong size = 0;
+        size += 8; // offset
+        size += 8; // compressed
+        size += 8; // uncompressed
+        size += 4; // compression (32-bit for V11)
+        size += 20; // hash
+        if (compressionSlot.HasValue)
+        {
+            size += 4 + (8 + 8) * blockCount; // blockCount + blocks (start:8 + end:8 each)
+        }
+        size += 1; // flags/encrypted
+        size += 4; // compression_block_size
+        return size;
     }
 
     /// <summary>
-    /// Read entry data from PAK file using entry info from index
+    /// Read entry data from PAK file using pre-calculated block info from encoded entry
     /// </summary>
     private byte[] ReadEntryData(PakEntry entry, string path)
     {
-        // Use the entry info from the index (already parsed from encoded entries)
         ulong uncompressedSize = entry.UncompressedSize;
-        ulong compressedSize = entry.CompressedSize;
         bool isCompressed = entry.CompressionSlot.HasValue;
         bool isEncrypted = entry.IsEncrypted;
         uint compressionMethod = isCompressed ? (uint)(entry.CompressionSlot!.Value + 1) : 0;
@@ -360,38 +417,30 @@ public class PakReader : IDisposable
             return Array.Empty<byte>();
         }
 
-        // Seek to entry offset
-        _stream.Seek((long)entry.Offset, SeekOrigin.Begin);
-        using var reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
-        
-        // Debug: show entry offset
-        if (Environment.GetEnvironmentVariable("DEBUG_PAK") == "1")
+        // For uncompressed entries without blocks, calculate data offset
+        if (!isCompressed && (entry.Blocks == null || entry.Blocks.Count == 0))
         {
-            Console.Error.WriteLine($"[PakReader] Reading entry at offset={entry.Offset}, compressed={compressedSize}, uncompressed={uncompressedSize}");
-        }
-        
-        // Read FPakEntry header (V11 format):
-        // offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20) = 48 bytes
-        // Then: blockCount(4) + blocks(16 each for compressed) OR data directly for uncompressed
-        reader.ReadBytes(48); // Skip base entry header
-
-        if (!isCompressed)
-        {
-            // Uncompressed: data follows directly after header
-            // For encrypted files, data is padded to 16-byte alignment
+            // Data starts after the inline entry header
+            ulong dataOffset = entry.Offset + GetSerializedEntrySize(null, 0);
+            _stream.Seek((long)dataOffset, SeekOrigin.Begin);
+            
             int dataSize = (int)uncompressedSize;
             if (isEncrypted)
             {
-                // Calculate padded size (16-byte alignment)
                 dataSize = ((int)uncompressedSize + 15) & ~15;
             }
             
-            byte[] data = reader.ReadBytes(dataSize);
+            byte[] data = new byte[dataSize];
+            int bytesRead = _stream.Read(data, 0, dataSize);
+            if (bytesRead != dataSize)
+            {
+                throw new InvalidDataException($"Failed to read uncompressed data: expected {dataSize} bytes, got {bytesRead}");
+            }
+            
             if (isEncrypted)
             {
                 data = PartialDecrypt(data, path);
             }
-            // Truncate to actual uncompressed size (remove padding)
             if (data.Length > (int)uncompressedSize)
             {
                 Array.Resize(ref data, (int)uncompressedSize);
@@ -399,66 +448,36 @@ public class PakReader : IDisposable
             return data;
         }
 
-        // Compressed: read block count from file header (at position 48), then block offsets
-        uint blockCount = reader.ReadUInt32();
-        
-        // Block size from encoded entry (shifted left by 11), or default 64KB
-        uint blockSize;
-        if (entry.CompressionBlockSize > 0)
+        // Compressed or has blocks: use pre-calculated block info
+        if (entry.Blocks == null || entry.Blocks.Count == 0)
         {
-            blockSize = entry.CompressionBlockSize << 11;
-        }
-        else
-        {
-            blockSize = 65536;
+            throw new InvalidDataException($"Compressed entry has no block info");
         }
 
-        var compressionBlocks = new List<(long start, long size)>();
-        
-        if (blockCount == 0)
-        {
-            // No block info in file - single block, data follows the header
-            // Header is 48 bytes + 4 bytes blockCount = 52 bytes
-            long dataOffset = (long)entry.Offset + 52;
-            compressionBlocks.Add((dataOffset, (long)compressedSize));
-        }
-        else
-        {
-            // Read block offsets - each block has (start:8, end:8) = 16 bytes
-            // Block offsets are RELATIVE to entry.Offset, not absolute
-            for (uint i = 0; i < blockCount; i++)
-            {
-                long blockStart = reader.ReadInt64();
-                long blockEnd = reader.ReadInt64();
-                // Convert relative offsets to absolute by adding entry.Offset
-                long absoluteStart = (long)entry.Offset + blockStart;
-                compressionBlocks.Add((absoluteStart, blockEnd - blockStart));
-            }
-        }
+        // Block size for calculating uncompressed size per block
+        uint blockSize = entry.CompressionBlockSize > 0 ? entry.CompressionBlockSize : 65536;
 
         // Decompress each block
         using var outputStream = new MemoryStream((int)uncompressedSize);
+        long entryBaseOffset = (long)entry.Offset;
 
-        for (int blockIdx = 0; blockIdx < compressionBlocks.Count; blockIdx++)
+        for (int blockIdx = 0; blockIdx < entry.Blocks.Count; blockIdx++)
         {
-            var (blockStart, blockCompressedSize) = compressionBlocks[blockIdx];
+            var (blockStart, blockEnd) = entry.Blocks[blockIdx];
+            
+            // Block offsets are RELATIVE to entry start position
+            long absoluteBlockStart = entryBaseOffset + (long)blockStart;
+            long blockCompressedSize = (long)(blockEnd - blockStart);
             
             if (blockCompressedSize <= 0)
                 continue;
             
-            _stream.Seek(blockStart, SeekOrigin.Begin);
+            _stream.Seek(absoluteBlockStart, SeekOrigin.Begin);
             byte[] blockData = new byte[blockCompressedSize];
             int bytesRead = _stream.Read(blockData, 0, (int)blockCompressedSize);
             if (bytesRead != blockCompressedSize)
             {
                 throw new InvalidDataException($"Failed to read block {blockIdx}: expected {blockCompressedSize} bytes, got {bytesRead}");
-            }
-            
-            // Debug: show first bytes of block data
-            if (Environment.GetEnvironmentVariable("DEBUG_PAK") == "1" && blockIdx == 0)
-            {
-                string firstBytes = string.Join(" ", blockData.Take(16).Select(b => b.ToString("X2")));
-                Console.Error.WriteLine($"[PakReader] Block {blockIdx}: offset={blockStart}, size={blockCompressedSize}, first16bytes={firstBytes}");
             }
 
             if (isEncrypted)
@@ -694,4 +713,8 @@ public class PakEntry
     public bool IsEncrypted { get; set; }
     public uint CompressionBlockSize { get; set; }
     public uint CompressionBlocksCount { get; set; }
+    /// <summary>
+    /// Pre-calculated block offsets (relative to entry.Offset). Each tuple is (start, end).
+    /// </summary>
+    public List<(ulong start, ulong end)>? Blocks { get; set; }
 }
