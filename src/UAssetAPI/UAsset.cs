@@ -594,26 +594,7 @@ namespace UAssetAPI
         public virtual string FindAssetOnDiskFromPath(string path)
         {
             if (!path.StartsWith("/") || path.StartsWith("/Script")) return null;
-            
-            // Handle both /Game/ and /Marvel/ style paths
-            string relativePath;
-            if (path.StartsWith("/Game/"))
-            {
-                relativePath = path.Substring(6) + ".uasset";
-            }
-            else
-            {
-                // For paths like /Marvel/..., strip the leading slash and first segment
-                var parts = path.Split('/');
-                if (parts.Length > 2)
-                {
-                    relativePath = string.Join(Path.DirectorySeparatorChar.ToString(), parts.Skip(2)) + ".uasset";
-                }
-                else
-                {
-                    relativePath = path.Substring(1) + ".uasset";
-                }
-            }
+            path = path.Substring(6) + ".uasset";
 
             string mappedPathOnDisk = string.Empty;
             bool foundMappedPath = false;
@@ -628,31 +609,15 @@ namespace UAssetAPI
                 if (!foundMappedPath && contentIndex > 0)
                 {
                     var contentDir = fixedFilePath.Substring(0, contentIndex + contentPart.Length);
-                    mappedPathOnDisk = Path.Combine(contentDir, relativePath.FixDirectorySeparatorsForDisk());
-                    foundMappedPath = File.Exists(mappedPathOnDisk);
-                }
-
-                // Try searching up the directory tree for a Content folder
-                if (!foundMappedPath)
-                {
-                    var currentDir = Directory.GetParent(fixedFilePath);
-                    while (currentDir != null && !foundMappedPath)
-                    {
-                        var potentialContentDir = Path.Combine(currentDir.FullName, "Content");
-                        if (Directory.Exists(potentialContentDir))
-                        {
-                            mappedPathOnDisk = Path.Combine(potentialContentDir, relativePath.FixDirectorySeparatorsForDisk());
-                            foundMappedPath = File.Exists(mappedPathOnDisk);
-                        }
-                        currentDir = currentDir.Parent;
-                    }
+                    mappedPathOnDisk = Path.Combine(contentDir, path.FixDirectorySeparatorsForDisk());
+                    foundMappedPath = File.Exists(mappedPathOnDisk); // not worrying too much about race condition, we'll put a try catch later
                 }
 
                 if (!foundMappedPath)
                 {
                     // let's see if it exists in the same directory
-                    var rawFileName = Path.GetFileName(relativePath);
-                    mappedPathOnDisk = Path.Combine(Directory.GetParent(FilePath).FullName, rawFileName);
+                    var rawFileName = Path.GetFileName(path);
+                    mappedPathOnDisk = Path.Combine(Directory.GetParent(FilePath).FullName, Path.GetFileName(path));
                     foundMappedPath = File.Exists(mappedPathOnDisk);
                 }
             }
