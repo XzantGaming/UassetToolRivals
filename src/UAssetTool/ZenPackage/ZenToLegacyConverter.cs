@@ -884,64 +884,6 @@ public class ZenToLegacyConverter
             return result;
         }
     }
-    
-    // Dead code - kept for reference if rebuild logic is ever needed
-    #pragma warning disable CS0162 // Unreachable code detected
-    private byte[] RebuildExportDataFull()
-    {
-        // Calculate total size
-        long totalSize = 0;
-        foreach (var export in _builder.Exports)
-        {
-            totalSize += export.SerialSize;
-        }
-        totalSize += 4; // Footer
-        
-        byte[] data = new byte[totalSize];
-        int headerSize2 = (int)_zenPackage.Summary.HeaderSize;
-        
-        // Copy export data in order
-        foreach (var bundleHeader in _zenPackage.ExportBundleHeaders)
-        {
-            long currentSerialOffset = bundleHeader.SerialOffset != ulong.MaxValue
-                ? headerSize2 + (long)bundleHeader.SerialOffset
-                : headerSize2;
-            
-            for (int i = 0; i < bundleHeader.EntryCount; i++)
-            {
-                int entryIndex = (int)(bundleHeader.FirstEntryIndex + i);
-                if (entryIndex >= _zenPackage.ExportBundleEntries.Count) break;
-                
-                var entry = _zenPackage.ExportBundleEntries[entryIndex];
-                if (entry.CommandType != EExportCommandType.Serialize) continue;
-                
-                int exportIndex = (int)entry.LocalExportIndex;
-                if (exportIndex >= _builder.Exports.Count) continue;
-                
-                var export = _builder.Exports[exportIndex];
-                int exportSerialSize = (int)export.SerialSize;
-                int targetOffset = (int)export.SerialOffset;
-                
-                if (currentSerialOffset + exportSerialSize <= _rawPackageData.Length &&
-                    targetOffset + exportSerialSize <= data.Length - 4)
-                {
-                    Array.Copy(_rawPackageData, (int)currentSerialOffset, data, targetOffset, exportSerialSize);
-                }
-                
-                currentSerialOffset += exportSerialSize;
-            }
-        }
-        
-        // Write footer
-        using (var ms = new MemoryStream(data))
-        {
-            ms.Seek(totalSize - 4, SeekOrigin.Begin);
-            using var writer = new BinaryWriter(ms);
-            writer.Write(0x9E2A83C1); // PACKAGE_FILE_TAG
-        }
-        
-        return data;
-    }
 
     private int ResolveLocalPackageObject(FPackageObjectIndex packageObject)
     {

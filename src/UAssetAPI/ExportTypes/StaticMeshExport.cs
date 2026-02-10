@@ -56,7 +56,7 @@ namespace UAssetAPI.ExportTypes
         private void TryParseMaterials()
         {
             const int MAX_MATERIAL_COUNT = 50;
-            const int MATERIAL_STRUCT_SIZE = 40; // FStaticMaterial size
+            const int MATERIAL_STRUCT_SIZE = 36; // FStaticMaterial: FPackageIndex(4) + FName(8) + FPackageIndex(4) + FMeshUVChannelInfo(20)
             
             // Search from near the end of the file
             int searchStart = Math.Max(4, Extras.Length - 2000);
