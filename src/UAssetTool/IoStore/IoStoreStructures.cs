@@ -303,13 +303,19 @@ public class FIoContainerHeader
     /// </summary>
     private void SerializeStoreEntries(BinaryWriter writer)
     {
+        bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
+        
         // Package count
         writer.Write((uint)Packages.Count);
+        if (debugMode)
+            Console.Error.WriteLine($"[ContainerHeader] Writing {Packages.Count} packages, Version={Version}");
 
         // Package IDs
-        foreach (var (packageId, _) in Packages)
+        foreach (var (packageId, entry) in Packages)
         {
             writer.Write(packageId.Value);
+            if (debugMode)
+                Console.Error.WriteLine($"[ContainerHeader]   PackageId={packageId.Value:X16}, ImportedPackages={entry.ImportedPackages.Count}");
         }
 
         // Calculate entry size based on version

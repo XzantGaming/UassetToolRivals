@@ -220,15 +220,27 @@ public class ZenConverter
             
             if (skeletalExport != null)
             {
-                // Enable FGameplayTagContainer writing and re-serialize
-                skeletalExport.IncludeGameplayTags = true;
-                var reserializedData = ReserializeExportData(asset);
-                if (reserializedData != null && reserializedData.Length > 0)
+                // CRITICAL: If source already had FGameplayTagContainer (extracted from game),
+                // DO NOT re-serialize! Re-serialization would add 4-byte ObjectGuid booleans to
+                // inner objects like MorphTargets, causing serial size mismatches.
+                // Files extracted from IoStore already have correct format - pass through raw data.
+                if (skeletalExport.SourceHadGameplayTags)
                 {
-                    int sizeDiff = reserializedData.Length - uexpData.Length;
-                    // Verbose logging disabled for parallel performance
-                    uexpData = reserializedData;
-                    materialPaddingToAdd = sizeDiff;
+                    // Source already has correct format - no re-serialization needed
+                    // Just use the original uexpData as-is
+                }
+                else
+                {
+                    // Source needs FGameplayTagContainer padding - re-serialize
+                    skeletalExport.IncludeGameplayTags = true;
+                    var reserializedData = ReserializeExportData(asset);
+                    if (reserializedData != null && reserializedData.Length > 0)
+                    {
+                        int sizeDiff = reserializedData.Length - uexpData.Length;
+                        // Verbose logging disabled for parallel performance
+                        uexpData = reserializedData;
+                        materialPaddingToAdd = sizeDiff;
+                    }
                 }
             }
             else
@@ -303,18 +315,6 @@ public class ZenConverter
         long headerSize,
         int materialPaddingToAdd = 0)
     {
-        // Calculate the actual data length (excluding PACKAGE_FILE_TAG if present)
-        // This must match what WriteZenPackage writes
-        int actualDataLength = uexpData.Length;
-        if (actualDataLength >= 4)
-        {
-            uint lastDword = BitConverter.ToUInt32(uexpData, actualDataLength - 4);
-            if (lastDword == 0x9E2A83C1) // PACKAGE_FILE_TAG
-            {
-                actualDataLength -= 4;
-            }
-        }
-        
         // Calculate export sizes from the actual data
         // For non-last exports, use the gap between SerialOffsets (these are relative positions)
         // For the last export, use the remaining data length
@@ -384,12 +384,19 @@ public class ZenConverter
             if (isPublic)
             {
                 string exportName = export.ObjectName?.Value?.Value ?? "None";
+                int nameNumber = export.ObjectName?.Number ?? 0;
+                // UE FName with Number > 0 displays as "BaseName_N" where N = Number - 1
+                if (nameNumber > 0)
+                    exportName = exportName + "_" + (nameNumber - 1);
                 publicExportHash = CalculatePublicExportHash(exportName);
-                // Verbose logging disabled for parallel performance
             }
 
-            // Determine filter flags (these properties may not exist on all exports)
+            // Preserve FilterFlags from legacy export - retoc preserves these and the game expects them
             EExportFilterFlags filterFlags = EExportFilterFlags.None;
+            if (export.bNotForClient)
+                filterFlags = EExportFilterFlags.NotForClient;
+            else if (export.bNotForServer)
+                filterFlags = EExportFilterFlags.NotForServer;
 
             // Create Zen export entry with ACTUAL calculated size
             // CookedSerialOffset is relative to CookedHeaderSize (which equals HeaderSize in Zen packages)
@@ -553,6 +560,8 @@ public class ZenConverter
     private static void BuildNameMap(UAsset asset, FZenPackage zenPackage)
     {
         // Add all names from legacy name map
+        // NOTE: We cannot filter names here because the export data contains FName references
+        // that use indices into this name map. Filtering would break those references.
         foreach (var fstring in asset.GetNameMapIndexList())
         {
             string nameStr = fstring?.Value ?? "None";
@@ -635,6 +644,21 @@ public class ZenConverter
 
     private static void BuildImportMap(UAsset asset, FZenPackage zenPackage)
     {
+        // Determine this asset's own package path to prevent self-references
+        // FolderName is the full package path (e.g., /Game/Marvel/VFX/.../MI_Environment_13_304)
+        string assetName = Path.GetFileNameWithoutExtension(asset.FilePath);
+        string folderName = asset.FolderName?.Value ?? "";
+        string ownPackagePath = "";
+        string normalizedFolder = NormalizePath(folderName);
+        if (normalizedFolder.StartsWith("/Game/"))
+            ownPackagePath = normalizedFolder.TrimEnd('/');
+        else if (!string.IsNullOrEmpty(normalizedFolder))
+            ownPackagePath = "/Game/" + normalizedFolder.TrimStart('/').TrimEnd('/');
+        
+        bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
+        if (debugMode)
+            Console.Error.WriteLine($"[BuildImportMap] ownPackagePath={ownPackagePath}, folderName={folderName}, normalizedFolder={normalizedFolder}");
+        
         // Build import map from legacy imports
         // For script imports (from /Script/), use pre-computed hashes from game's script objects database
         // For package imports (from other packages), create package import indices
@@ -673,10 +697,16 @@ public class ZenConverter
             }
             else
             {
-                // For non-script imports, check if this is a package import (outer is null, meaning it's a package reference)
-                // Package imports are represented as Null in Zen format
+                // For non-script imports:
+                // OuterIndex == 0 means this IS a package reference (like /Game/Marvel/VFX/.../SomePackage)
+                // OuterIndex < 0 means this is an export FROM a package (the outer points to the package import)
+                // 
+                // In Zen format, package references themselves are Null - the package is implicit
+                // in the FPackageImportReference that points to exports from that package.
+                
                 if (import.OuterIndex.Index == 0)
                 {
+                    // Package reference - use Null (package is implicit in Zen format)
                     zenPackage.ImportMap.Add(FPackageObjectIndex.CreateNull());
                 }
                 else
@@ -686,7 +716,18 @@ public class ZenConverter
                     string packagePath = GetImportPackagePath(asset, import);
                     string exportPath = GetImportExportPath(asset, import);
                     
-                    if (!string.IsNullOrEmpty(packagePath) && !string.IsNullOrEmpty(exportPath))
+                    // Skip self-references: if the import's package path matches our own package, use Null
+                    if (debugMode)
+                        Console.Error.WriteLine($"[BuildImportMap] Import[{i}]: packagePath={packagePath}, exportPath={exportPath}, objectName={objectName}");
+                    
+                    if (!string.IsNullOrEmpty(packagePath) && !string.IsNullOrEmpty(ownPackagePath) && 
+                        packagePath.Equals(ownPackagePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (debugMode)
+                            Console.Error.WriteLine($"[BuildImportMap] SKIPPING self-reference: {packagePath}");
+                        zenPackage.ImportMap.Add(FPackageObjectIndex.CreateNull());
+                    }
+                    else if (!string.IsNullOrEmpty(packagePath) && !string.IsNullOrEmpty(exportPath))
                     {
                         // Calculate package ID from the package path
                         ulong packageId = IoStore.FPackageId.FromName(packagePath).Value;
@@ -826,59 +867,40 @@ public class ZenConverter
         if (names.Count == 0)
             return;
 
-        // Calculate total string bytes - NO alignment padding in serialized format
+        // Calculate total string bytes using ASCII encoding for all names
+        // Non-ASCII characters are replaced with '?' (0x3F), matching MagikIO behavior
         uint totalStringBytes = 0;
         foreach (var name in names)
         {
-            if (IsAscii(name))
-                totalStringBytes += (uint)name.Length;
-            else
-                totalStringBytes += (uint)Encoding.Unicode.GetByteCount(name);
+            totalStringBytes += (uint)Encoding.ASCII.GetByteCount(name);
         }
         writer.Write(totalStringBytes);
 
         // Hash algorithm ID
         writer.Write(FNAME_HASH_ALGORITHM_ID);
 
-        // Write hashes (CityHash64 of lowercase name - ASCII bytes for ASCII strings, UTF-16LE for non-ASCII)
-        // This is a NAME hash, not a package ID hash. Name hashes use ASCII bytes.
+        // Write hashes (CityHash64 of lowercase ASCII name)
         foreach (var name in names)
         {
             string lower = name.ToLowerInvariant();
-            byte[] bytes;
-            if (IsAscii(lower))
-                bytes = Encoding.ASCII.GetBytes(lower);
-            else
-                bytes = Encoding.Unicode.GetBytes(lower);
-            
-            // Use C# CityHash64 for name hashes (ASCII-based)
+            byte[] bytes = Encoding.ASCII.GetBytes(lower);
             ulong hash = IoStore.CityHash.CityHash64(bytes, 0, bytes.Length);
             writer.Write(hash);
         }
 
-        // Write headers (i16 big-endian: positive = ASCII length, negative = UTF16 length)
+        // Write headers (i16 big-endian: positive = ASCII byte length)
         foreach (var name in names)
         {
-            short len;
-            if (IsAscii(name))
-                len = (short)name.Length;
-            else
-                len = (short)(name.Length + short.MinValue); // Negative indicates UTF-16
-            
+            short len = (short)Encoding.ASCII.GetByteCount(name);
             // Write as big-endian
-            byte[] beBytes = BitConverter.GetBytes(len);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(beBytes);
-            writer.Write(beBytes);
+            writer.Write((byte)(len >> 8));
+            writer.Write((byte)(len & 0xFF));
         }
 
-        // Write string data - NO alignment padding, strings are consecutive
+        // Write string data - ASCII encoding, consecutive
         foreach (var name in names)
         {
-            if (IsAscii(name))
-                writer.Write(Encoding.ASCII.GetBytes(name));
-            else
-                writer.Write(Encoding.Unicode.GetBytes(name));
+            writer.Write(Encoding.ASCII.GetBytes(name));
         }
     }
 
@@ -1061,6 +1083,8 @@ public class ZenConverter
     /// </summary>
     private static void BuildDependencyBundles(UAsset asset, FZenPackage zenPackage)
     {
+        bool debugMode = Environment.GetEnvironmentVariable("DEBUG") == "1";
+        
         // For each export, create a dependency bundle header
         // Preserve actual preload dependencies from the legacy asset
         
@@ -1070,7 +1094,7 @@ public class ZenConverter
         {
             var export = asset.Exports[i];
             
-            // Collect dependencies from all four preload dependency arrays
+            // Collect dependencies from all 4 preload dependency arrays
             var createBeforeCreate = new List<FPackageIndex>();
             var serializeBeforeCreate = new List<FPackageIndex>();
             var createBeforeSerialize = new List<FPackageIndex>();
@@ -1096,6 +1120,11 @@ public class ZenConverter
             {
                 foreach (var dep in export.SerializationBeforeSerializationDependencies)
                     serializeBeforeSerialize.Add(new FPackageIndex(dep.Index));
+            }
+            
+            if (debugMode)
+            {
+                Console.Error.WriteLine($"[BuildDepBundles] Export[{i}]: CBC={createBeforeCreate.Count}, SBC={serializeBeforeCreate.Count}, CBS={createBeforeSerialize.Count}, SBS={serializeBeforeSerialize.Count}");
             }
             
             // Create dependency header for this export
@@ -1147,57 +1176,10 @@ public class ZenConverter
         long summaryOffset = writer.BaseStream.Position;
         zenPackage.Summary.Write(writer, containerVersion);
         
-        // Write name map in Rust read_name_batch format:
-        // 1. num (u32) - count of names
-        // 2. If num > 0:
-        //    - num_string_bytes (u32) - total bytes of all strings
-        //    - hash_version (u64) - must be 0xC1640000
-        //    - hashes (8 bytes each, CityHash64 of lowercase name)
-        //    - headers (2 bytes each, big-endian i16 length)
-        //    - string data (concatenated ASCII bytes)
+        // Write name map using standard UE name batch format
+        // (ASCII for ASCII-only names, UTF-16LE for non-ASCII names)
         int nameMapNamesOffset = (int)writer.BaseStream.Position;
-        
-        // Write count
-        writer.Write((uint)zenPackage.NameMap.Count);
-        
-        if (zenPackage.NameMap.Count > 0)
-        {
-            // Write total byte size of all string data
-            uint totalStringBytes = 0;
-            foreach (var name in zenPackage.NameMap)
-            {
-                totalStringBytes += (uint)Encoding.ASCII.GetBytes(name).Length;
-            }
-            writer.Write(totalStringBytes);
-            
-            // Write hash algorithm ID (0xC1640000)
-            writer.Write((ulong)0xC1640000);
-            
-            // Write hashes (CityHash64 of lowercase ASCII name)
-            foreach (var name in zenPackage.NameMap)
-            {
-                string lowerName = name.ToLowerInvariant();
-                byte[] nameBytes = Encoding.ASCII.GetBytes(lowerName);
-                ulong hash = IoStore.CityHash.CityHash64(nameBytes, 0, nameBytes.Length);
-                writer.Write(hash);
-            }
-            
-            // Write headers (2 bytes each, big-endian i16 length)
-            foreach (var name in zenPackage.NameMap)
-            {
-                short len = (short)Encoding.ASCII.GetBytes(name).Length;
-                // Big-endian
-                writer.Write((byte)(len >> 8));
-                writer.Write((byte)(len & 0xFF));
-            }
-            
-            // Write string data (concatenated ASCII bytes)
-            foreach (var name in zenPackage.NameMap)
-            {
-                byte[] nameBytes = Encoding.ASCII.GetBytes(name);
-                writer.Write(nameBytes);
-            }
-        }
+        WriteNameBatch(writer, zenPackage.NameMap);
         int nameMapNamesSize = (int)writer.BaseStream.Position - nameMapNamesOffset;
         
         // For UE5.3+ format, hashes are included in the name batch, so no separate hash section
@@ -1323,7 +1305,7 @@ public class ZenConverter
             dependencyBundleHeadersOffset = (int)writer.BaseStream.Position;
             foreach (var header in zenPackage.DependencyBundleHeaders)
             {
-                header.Write(writer);
+                header.Write(writer, containerVersion);
             }
             
             dependencyBundleEntriesOffset = (int)writer.BaseStream.Position;
@@ -1349,114 +1331,14 @@ public class ZenConverter
         // Record header size before writing export data
         int zenHeaderSize = (int)writer.BaseStream.Position;
 
-        // Write export data - reorder if exports were reordered
+        // Write the full .uexp data as export data (do NOT strip trailing PACKAGE_FILE_TAG)
+        // retoc preserves the complete .uexp contents including the 4-byte tag
         int exportDataLength = uexpData.Length;
-        if (exportDataLength >= 4)
-        {
-            uint lastDword = BitConverter.ToUInt32(uexpData, exportDataLength - 4);
-            if (lastDword == PACKAGE_FILE_TAG)
-            {
-                exportDataLength -= 4;
-            }
-        }
+        writer.Write(uexpData, 0, exportDataLength);
         
-        // Calculate preload size - the data before actual export serialization in .uexp
-        // The preload contains dependency info and is written before export data
-        // In Zen format: preload is between HeaderSize and CookedHeaderSize
-        // In legacy format: preload is at start of .uexp, before first export's actual data
-        
-        // Get PreloadDependencyCount - this tells us how many dependency entries exist
-        var preloadDepCountField = asset.GetType().GetField("PreloadDependencyCount", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        int preloadDependencyCount = preloadDepCountField != null ? (int)preloadDepCountField.GetValue(asset)! : 0;
-        
-        // Calculate preload size based on the structure written by ZenToLegacyConverter
-        // The preload data structure is:
-        // - For each export with dependencies: the dependency indices (4 bytes each)
-        // - Total size = sum of all dependency counts * 4
-        int preloadSize = 0;
-        if (preloadDependencyCount > 0)
-        {
-            // Preload size = dependency count * sizeof(int32)
-            // Plus some header bytes for the preload structure
-            // The exact format depends on how ZenToLegacyConverter wrote it
-            
-            // Calculate total dependencies from all exports
-            int totalDeps = 0;
-            foreach (var export in asset.Exports)
-            {
-                var sbs = export.GetType().GetField("SerializationBeforeSerializationDependenciesSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                var cbs = export.GetType().GetField("CreateBeforeSerializationDependenciesSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                var sbc = export.GetType().GetField("SerializationBeforeCreateDependenciesSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                var cbc = export.GetType().GetField("CreateBeforeCreateDependenciesSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                
-                if (sbs != null) totalDeps += (int)sbs.GetValue(export)!;
-                if (cbs != null) totalDeps += (int)cbs.GetValue(export)!;
-                if (sbc != null) totalDeps += (int)sbc.GetValue(export)!;
-                if (cbc != null) totalDeps += (int)cbc.GetValue(export)!;
-            }
-            
-            // Preload size = total dependency indices * 4 bytes each
-            preloadSize = totalDeps * 4;
-        }
-        
-        // Use PreloadDependencyCount directly if totalDeps didn't work
-        if (preloadSize == 0 && preloadDependencyCount > 0)
-        {
-            preloadSize = preloadDependencyCount * 4;
-        }
-        
-        // The preload data also includes a header with counts for each export
-        // Each export has 4 count fields (4 bytes each = 16 bytes per export with deps)
-        // Plus the actual dependency indices
-        if (preloadSize > 0)
-        {
-            // Add header bytes: typically includes per-export dependency counts
-            // The structure is: for each export, 4 int32 counts, then the indices
-            // But the indices are already counted, so we just need alignment
-            // Looking at original: 1333 bytes for 324 deps = 324*4 + 37 header
-            // The 37 bytes is likely: some header + padding
-            preloadSize += 37; // Match the original's header overhead
-        }
-        
-        // If we couldn't calculate from dependencies, try to detect from .uexp content
-        if (preloadSize == 0 && uexpData.Length > 4)
-        {
-            int firstInt = BitConverter.ToInt32(uexpData, 0);
-            // If first int is small (looks like a count), there's likely preload data
-            if (firstInt >= 0 && firstInt < 1000)
-            {
-                // Use preloadDependencyCount * 4 as estimate
-                preloadSize = preloadDependencyCount * 4;
-            }
-        }
-        
-        // Verbose logging disabled for parallel performance
-        
-        // Check if this is a SkeletalMesh, StaticMesh, or StringTable that needs padding
-        bool isSkeletalMesh = asset.Exports.Any(e => 
-            e.GetExportClassType()?.Value?.Value == "SkeletalMesh" ||
-            e.GetExportClassType()?.Value?.Value?.Contains("SkeletalMesh") == true);
-        
-        bool isStaticMesh = asset.Exports.Any(e => 
-            e.GetExportClassType()?.Value?.Value == "StaticMesh");
-        
-        bool isStringTable = asset.Exports.Any(e => 
-            e.GetExportClassType()?.Value?.Value == "StringTable" ||
-            e.GetExportClassType()?.Value?.Value?.EndsWith("StringTable") == true);
-        
-        byte[] exportDataToWrite = uexpData;
-        
-        // SkeletalMesh and StringTable padding is now handled via UAssetAPI re-serialization in ConvertToZen()
-        // The structured SkeletalMeshExport approach handles legacy files that need FGameplayTagContainer added.
-        // Files extracted from the game already have FGameplayTagContainer and don't need modification.
-        
-        // Write export data (possibly patched)
-        // Verbose logging disabled for parallel performance
-        writer.Write(exportDataToWrite, 0, exportDataLength);
-        
-        // CookedHeaderSize points to where actual export data starts (after preload)
-        // HeaderSize is where the Zen header ends, CookedHeaderSize is where exports start
-        int cookedHeaderSize = zenHeaderSize + preloadSize;
+        // CookedHeaderSize = the legacy .uasset file size
+        // This is what retoc uses and what the engine expects for serial offset calculations
+        int cookedHeaderSize = (int)new FileInfo(asset.FilePath).Length;
 
         // Update summary with calculated offsets
         zenPackage.Summary.HeaderSize = (uint)zenHeaderSize;

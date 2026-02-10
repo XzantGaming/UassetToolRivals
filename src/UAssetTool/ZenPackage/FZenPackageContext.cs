@@ -536,9 +536,19 @@ public class FZenPackageContext : IDisposable
         ulong exportHash = sourcePackage.ImportedPublicExportHashes[exportHashIndex];
         
         // Search for export with matching hash
+        // In UE5.3+ (NoExportInfo), FExportMapEntry.PublicExportHash is a GlobalImportIndex,
+        // not a CityHash64 hash. ImportedPublicExportHashes contains CityHash64 of export names.
+        // So we must also try CityHash64 of each export's name.
         foreach (var export in targetPackage.ExportMap)
         {
             if (export.PublicExportHash == exportHash)
+            {
+                return (targetPackage, export);
+            }
+            // Fallback: compute CityHash64 of export name for UE5.3+ matching
+            string expName = targetPackage.GetName(export.ObjectName);
+            ulong computedHash = IoStore.CityHash.CityHash64(expName.ToLowerInvariant());
+            if (computedHash == exportHash)
             {
                 return (targetPackage, export);
             }

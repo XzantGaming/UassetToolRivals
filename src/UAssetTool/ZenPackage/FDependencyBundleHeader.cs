@@ -5,14 +5,15 @@ namespace UAssetTool.ZenPackage;
 
 /// <summary>
 /// Dependency bundle header - defines dependencies between export bundles
+/// Always 20 bytes (4 counts) for compatibility with retoc and game
 /// </summary>
 public class FDependencyBundleHeader
 {
-    public const int Size = 20; // 4 + 4*4 bytes
+    public const int Size = 20; // 4 + 4*4 bytes (FirstEntryIndex + 4 dependency counts)
     
     public int FirstEntryIndex { get; set; }
     
-    // Dependency counts organized as [FromCommandType][ToCommandType]
+    // Dependency counts - all 4 types
     public uint CreateBeforeCreateDependencies { get; set; }
     public uint SerializeBeforeCreateDependencies { get; set; }
     public uint CreateBeforeSerializeDependencies { get; set; }
@@ -22,7 +23,12 @@ public class FDependencyBundleHeader
     {
     }
 
-    public void Read(BinaryReader reader)
+    public static int GetSize(EIoContainerHeaderVersion version)
+    {
+        return Size; // Always 20 bytes
+    }
+
+    public void Read(BinaryReader reader, EIoContainerHeaderVersion version = EIoContainerHeaderVersion.NoExportInfo)
     {
         FirstEntryIndex = reader.ReadInt32();
         CreateBeforeCreateDependencies = reader.ReadUInt32();
@@ -31,7 +37,7 @@ public class FDependencyBundleHeader
         SerializeBeforeSerializeDependencies = reader.ReadUInt32();
     }
 
-    public void Write(BinaryWriter writer)
+    public void Write(BinaryWriter writer, EIoContainerHeaderVersion version = EIoContainerHeaderVersion.NoExportInfo)
     {
         writer.Write(FirstEntryIndex);
         writer.Write(CreateBeforeCreateDependencies);
@@ -40,7 +46,7 @@ public class FDependencyBundleHeader
         writer.Write(SerializeBeforeSerializeDependencies);
     }
     
-    public uint GetTotalDependencyCount()
+    public uint GetTotalDependencyCount(EIoContainerHeaderVersion version = EIoContainerHeaderVersion.NoExportInfo)
     {
         return CreateBeforeCreateDependencies + SerializeBeforeCreateDependencies +
                CreateBeforeSerializeDependencies + SerializeBeforeSerializeDependencies;

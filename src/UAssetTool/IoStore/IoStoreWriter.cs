@@ -210,7 +210,7 @@ public class IoStoreWriter : IDisposable
     /// <summary>
     /// Write a chunk without compression (used for Container Header which must not be compressed).
     /// </summary>
-    private void WriteChunkUncompressed(FIoChunkId chunkId, byte[] data)
+    public void WriteChunkUncompressed(FIoChunkId chunkId, byte[] data)
     {
         long chunkStartOffset = _casStream.Position;
         int startBlock = _compressionBlocks.Count;

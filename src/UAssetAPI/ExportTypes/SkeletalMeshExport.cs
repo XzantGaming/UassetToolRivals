@@ -74,6 +74,12 @@ namespace UAssetAPI.ExportTypes
         private int _parsedDataEndOffset = 0;
         private bool _sourceHadGameplayTags = false;
 
+        /// <summary>
+        /// Whether the source file already had FGameplayTagContainer in materials.
+        /// If true, the file was extracted from game and already has correct format - no re-serialization needed.
+        /// </summary>
+        public bool SourceHadGameplayTags => _sourceHadGameplayTags;
+
         #endregion
 
         #region Constructors

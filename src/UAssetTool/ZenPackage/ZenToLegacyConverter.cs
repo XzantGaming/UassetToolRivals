@@ -191,7 +191,9 @@ public class ZenToLegacyConverter
     {
         // Copy name map
         _builder.NameMap = new List<string>(_zenPackage.NameMap);
-        _builder.NamesReferencedFromExportDataCount = _builder.NameMap.Count;
+        // NamesReferencedFromExportDataCount = original zen name map count
+        // This counts only names referenced from export (serialized) data, not names added for imports
+        _builder.NamesReferencedFromExportDataCount = _zenPackage.NameMap.Count;
         
         // Copy bulk data resources from zen package
         foreach (var zenBulkData in _zenPackage.BulkData)
@@ -233,6 +235,13 @@ public class ZenToLegacyConverter
         if (_debugMode)
         {
             Console.Error.WriteLine($"[DEBUG] BuildImportMap: {_zenPackage.ImportMap.Count} imports to resolve");
+            Console.Error.WriteLine($"[DEBUG] ImportedPackages: {_zenPackage.ImportedPackages.Count}");
+            Console.Error.WriteLine($"[DEBUG] ImportedPublicExportHashes: {_zenPackage.ImportedPublicExportHashes.Count}");
+            for (int i = 0; i < _zenPackage.ImportedPackages.Count; i++)
+            {
+                string pkgName = i < _zenPackage.ImportedPackageNames.Count ? _zenPackage.ImportedPackageNames[i] : "?";
+                Console.Error.WriteLine($"[DEBUG]   ImportedPackage[{i}]: {_zenPackage.ImportedPackages[i]:X16} = {pkgName}");
+            }
         }
         
         for (int importIndex = 0; importIndex < _zenPackage.ImportMap.Count; importIndex++)
@@ -241,13 +250,22 @@ public class ZenToLegacyConverter
             
             // Skip holes in the zen import map
             if (importObjectIndex.IsNull())
+            {
+                if (_debugMode)
+                    Console.Error.WriteLine($"[DEBUG] Import[{importIndex}]: NULL");
                 continue;
+            }
             
             if (_debugMode)
             {
                 string importType = importObjectIndex.IsScriptImport() ? "Script" : 
-                                   importObjectIndex.IsPackageImport() ? "Package" : "Other";
+                                   importObjectIndex.IsImport() ? "Package" : "Other";
                 Console.Error.WriteLine($"[DEBUG] Import[{importIndex}]: Type={importType}, Value={importObjectIndex.Value:X16}");
+                if (importObjectIndex.IsImport())
+                {
+                    var pkgImport = importObjectIndex.GetPackageImport();
+                    Console.Error.WriteLine($"[DEBUG]   PackageIndex={pkgImport.ImportedPackageIndex}, HashIndex={pkgImport.ImportedPublicExportHashIndex}");
+                }
             }
             
             try
@@ -669,8 +687,8 @@ public class ZenToLegacyConverter
         // ThumbnailTableOffset
         writer.Write(0);
         
-        // PackageGuid (16 bytes)
-        writer.Write(Guid.NewGuid().ToByteArray());
+        // PackageGuid (16 bytes) - zeroed for cooked packages
+        writer.Write(new byte[16]);
         
         // Generations array
         writer.Write(1); // GenerationCount
@@ -833,11 +851,38 @@ public class ZenToLegacyConverter
 
     private byte[] RebuildExportData()
     {
-        // Just strip the header - zen data already includes footer
+        // Strip the header from zen data
         int headerSize = (int)_zenPackage.Summary.HeaderSize;
-        byte[] result = new byte[_rawPackageData.Length - headerSize];
-        Array.Copy(_rawPackageData, headerSize, result, 0, _rawPackageData.Length - headerSize);
-        return result;
+        int dataLength = _rawPackageData.Length - headerSize;
+        
+        // Check if the data already has the PACKAGE_FILE_TAG footer
+        bool hasFooter = false;
+        if (dataLength >= 4)
+        {
+            uint lastDword = BitConverter.ToUInt32(_rawPackageData, _rawPackageData.Length - 4);
+            hasFooter = (lastDword == 0x9E2A83C1);
+        }
+        
+        if (hasFooter)
+        {
+            // Data already has footer, just copy it
+            byte[] result = new byte[dataLength];
+            Array.Copy(_rawPackageData, headerSize, result, 0, dataLength);
+            return result;
+        }
+        else
+        {
+            // Data doesn't have footer (e.g., from mod IoStore where ZenConverter stripped it)
+            // Add the PACKAGE_FILE_TAG footer
+            byte[] result = new byte[dataLength + 4];
+            Array.Copy(_rawPackageData, headerSize, result, 0, dataLength);
+            // Write footer at end
+            result[dataLength] = 0xC1;
+            result[dataLength + 1] = 0x83;
+            result[dataLength + 2] = 0x2A;
+            result[dataLength + 3] = 0x9E;
+            return result;
+        }
     }
     
     // Dead code - kept for reference if rebuild logic is ever needed
@@ -1088,10 +1133,19 @@ public class ZenToLegacyConverter
                     ulong exportHash = _zenPackage.ImportedPublicExportHashes[packageImport.ImportedPublicExportHashIndex];
                     
                     // Search for export with matching hash in target package
+                    // NOTE: In UE5.3+ (NoExportInfo), FExportMapEntry.PublicExportHash is actually a
+                    // GlobalImportIndex (FPackageObjectIndex), NOT a CityHash64 hash. But
+                    // ImportedPublicExportHashes contains actual CityHash64 hashes of export names.
+                    // So we must compute CityHash64 of each export's name and compare that.
                     bool foundExport = false;
                     foreach (var export in targetPackage.ExportMap)
                     {
-                        if (export.PublicExportHash == exportHash)
+                        // Try direct hash match first (works for older UE5 versions)
+                        // Then try CityHash64 of export name (required for UE5.3+ NoExportInfo)
+                        string expName = targetPackage.GetName(export.ObjectName, _scriptObjects);
+                        ulong computedHash = IoStore.CityHash.CityHash64(expName.ToLowerInvariant());
+                        
+                        if (export.PublicExportHash == exportHash || computedHash == exportHash)
                         {
                             foundExport = true;
                             // Debug: Check what name we're getting
@@ -1147,7 +1201,8 @@ public class ZenToLegacyConverter
                             Console.Error.WriteLine($"[DEBUG] Export hash not found: {exportHash:X16} in {packageName} (has {targetPackage.ExportMap.Count} exports)");
                             foreach (var exp in targetPackage.ExportMap)
                             {
-                                Console.Error.WriteLine($"  Export: hash={exp.PublicExportHash:X16}");
+                                string expNameDbg = targetPackage.GetName(exp.ObjectName, _scriptObjects);
+                                Console.Error.WriteLine($"  Export: hash={exp.PublicExportHash:X16}, name={expNameDbg}");
                             }
                         }
                         
@@ -1413,10 +1468,21 @@ public class ZenToLegacyConverter
 
     private void WriteString(BinaryWriter writer, string value)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(value);
-        writer.Write(bytes.Length + 1);
-        writer.Write(bytes);
-        writer.Write((byte)0);
+        if (NeedsUtf16(value))
+        {
+            byte[] bytes = Encoding.Unicode.GetBytes(value);
+            // Negative length signals UTF-16LE encoding (char count + null, negated)
+            writer.Write(-(value.Length + 1));
+            writer.Write(bytes);
+            writer.Write((short)0); // UTF-16 null terminator
+        }
+        else
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            writer.Write(bytes.Length + 1);
+            writer.Write(bytes);
+            writer.Write((byte)0);
+        }
     }
 
     private void WriteFString(BinaryWriter writer, string value)
@@ -1427,11 +1493,38 @@ public class ZenToLegacyConverter
             return;
         }
         
-        // FString format: int32 length (including null terminator), then UTF-8 bytes, then null
-        byte[] bytes = Encoding.UTF8.GetBytes(value);
-        writer.Write(bytes.Length + 1); // +1 for null terminator
-        writer.Write(bytes);
-        writer.Write((byte)0); // null terminator
+        // FString format:
+        //   Positive length + UTF-8/Latin1 bytes + null byte  (for ASCII-safe strings)
+        //   Negative length + UTF-16LE bytes + null ushort    (for non-ASCII strings)
+        if (NeedsUtf16(value))
+        {
+            byte[] bytes = Encoding.Unicode.GetBytes(value);
+            // Negative length = -(charCount + 1) to signal UTF-16LE
+            writer.Write(-(value.Length + 1));
+            writer.Write(bytes);
+            writer.Write((short)0); // UTF-16 null terminator (2 bytes)
+        }
+        else
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            writer.Write(bytes.Length + 1); // +1 for null terminator
+            writer.Write(bytes);
+            writer.Write((byte)0); // null terminator
+        }
+    }
+
+    /// <summary>
+    /// Check if a string contains non-ASCII characters that require UTF-16LE encoding.
+    /// UE's FString uses negative length to signal UTF-16LE for strings with characters > 0x7F.
+    /// </summary>
+    private static bool NeedsUtf16(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return false;
+        foreach (char c in value)
+        {
+            if (c > 127) return true;
+        }
+        return false;
     }
 
     private void WriteImport(BinaryWriter writer, LegacyObjectImport import)
