@@ -10,8 +10,11 @@ Technical documentation for UAssetTool's file format handling and data structure
 4. [SkeletalMesh Structure](#skeletalmesh-structure)
 5. [StaticMesh Structure](#staticmesh-structure)
 6. [NiagaraSystem Data Interfaces](#niagarasystem-data-interfaces)
-7. [Script Objects Database](#script-objects-database)
-8. [JSON Serialization](#json-serialization)
+7. [Legacy-to-Zen Conversion: Critical Fixes](#legacy-to-zen-conversion-critical-fixes)
+8. [FString UTF-16LE Encoding](#fstring-utf-16le-encoding)
+9. [IoStore Recompression](#iostore-recompression)
+10. [Script Objects Database](#script-objects-database)
+11. [JSON Serialization](#json-serialization)
 
 ---
 
@@ -602,10 +605,21 @@ The Zen package format is UE5's optimized asset format for IoStore containers. C
 
 ```
 HeaderSize = Size of Zen header (up to end of imported package names)
-CookedHeaderSize = HeaderSize + PreloadSize
+CookedHeaderSize = Legacy .uasset file size (NOT zenHeaderSize + preloadSize)
 
-Preload data sits between HeaderSize and CookedHeaderSize.
+CRITICAL: CookedHeaderSize must equal the original legacy .uasset file size.
+This is what retoc uses and what the engine expects for serial offset calculations.
+Using zenHeaderSize + preloadSize produces wrong offsets and breaks loading.
+
 Export serial offsets are relative to CookedHeaderSize.
+```
+
+```csharp
+// CORRECT:
+int cookedHeaderSize = (int)new FileInfo(asset.FilePath).Length;
+
+// WRONG (old buggy formula):
+// int cookedHeaderSize = zenHeaderSize + preloadSize;
 ```
 
 #### Export Serial Size Calculation
@@ -959,16 +973,29 @@ for (int i = 0; i < exports.Count; i++)
 
 ### Public Export Hash
 
-Public exports (accessible from other packages) need a hash for lookup:
+Public exports (accessible from other packages) need a hash for lookup. **Critical:** The export name must include the FName number suffix when `Number > 0`.
 
 ```csharp
 if (export.IsPublic)
 {
+    string exportName = export.ObjectName.Value;
+    int nameNumber = export.ObjectName.Number;
+    
+    // UE FName with Number > 0 displays as "BaseName_N" where N = Number - 1
+    if (nameNumber > 0)
+        exportName = exportName + "_" + (nameNumber - 1);
+    
     string fullPath = $"{packageName}.{exportName}";
     ulong hash = CityHash64(fullPath.ToLower());
     zenExport.PublicExportHash = hash;
 }
 ```
+
+**Example:** An FName `{Value="LODSettings", Number=304}` hashes as `"LODSettings_303"`, not `"LODSettings"`.
+
+#### PublicExportHash Dual Meaning (UE5.3+ NoExportInfo)
+
+In `NoExportInfo` version, `FExportMapEntry.PublicExportHash` stores a `GlobalImportIndex` (`FPackageObjectIndex`), **not** a CityHash64 hash. However, the `ImportedPublicExportHashes` array in the Zen header does contain CityHash64 values. During extraction, compare by computing CityHash64 of each export's display name.
 
 ---
 
@@ -1063,6 +1090,182 @@ foreach (int idx in createOrder)
 
 ---
 
+## Legacy-to-Zen Conversion: Critical Fixes
+
+### Overview
+
+These fixes were identified by comparing our tool's output byte-for-byte against `retoc`'s output (which produces known-working in-game mods). All fixes apply to both `ZenConverter.cs` and `AnimBlueprintZenConverter.cs`.
+
+### 1. CookedHeaderSize
+
+**See:** [HeaderSize vs CookedHeaderSize](#headersize-vs-cookedheadersize)
+
+Must be the legacy `.uasset` file size. Using `zenHeaderSize + preloadSize` produces incorrect serial offsets.
+
+### 2. FilterFlags Preservation
+
+The engine uses `FilterFlags` to control export visibility per platform. Our tool was forcing `FilterFlags = None` for all exports. `retoc` preserves the original flags from legacy exports.
+
+```csharp
+// CORRECT: preserve from legacy export
+EExportFilterFlags filterFlags = EExportFilterFlags.None;
+if (export.bNotForClient)
+    filterFlags = EExportFilterFlags.NotForClient;
+else if (export.bNotForServer)
+    filterFlags = EExportFilterFlags.NotForServer;
+
+// WRONG: forcing None for all exports
+// filterFlags = EExportFilterFlags.None;
+```
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| `None` | 0 | Available on all platforms |
+| `NotForClient` | 1 | Server-only export |
+| `NotForServer` | 2 | Client-only export |
+
+### 3. Export Data: PACKAGE_FILE_TAG Preservation
+
+Legacy `.uexp` files end with a 4-byte tag `PACKAGE_FILE_TAG` (`0x9E2A83C1`). Our tool was stripping this tag when writing export data. `retoc` preserves the full `.uexp` contents including the tag.
+
+```csharp
+// CORRECT: write full .uexp data
+writer.Write(uexpData, 0, uexpData.Length);
+
+// WRONG: stripping trailing 4 bytes
+// writer.Write(uexpData, 0, uexpData.Length - 4);
+```
+
+### 4. PublicExportHash: FName Number Suffix
+
+**See:** [Public Export Hash](#public-export-hash)
+
+Must include the FName number suffix (`_N` where `N = Number - 1`) in the hash calculation.
+
+### 5. Name Map ASCII Encoding
+
+The Zen name map must use **ASCII encoding** for all names, matching the game's behavior. Non-ASCII characters are replaced with `?` (`0x3F`). Using UTF-16LE for non-ASCII names causes 18-byte size differences per affected name.
+
+```csharp
+// Name map encoding: always ASCII
+// Hashes use CityHash64 of lowercase ASCII name
+// Headers use big-endian i16 (positive = ASCII byte length)
+// String data is consecutive ASCII bytes
+
+foreach (var name in names)
+{
+    string lower = name.ToLowerInvariant();
+    byte[] bytes = Encoding.ASCII.GetBytes(lower);
+    ulong hash = CityHash64(bytes, 0, bytes.Length);
+    writer.Write(hash);
+}
+```
+
+### Verification Method
+
+```bash
+# 1. Generate mod with our tool
+UAssetTool create_mod_iostore output_base input_dir --usmap mappings.usmap
+
+# 2. Generate mod with retoc from same input
+retoc create output_retoc input_dir
+
+# 3. Extract raw chunks from both
+retoc unpack-raw our_output.utoc our_raw_chunks/
+retoc unpack-raw retoc_output.utoc retoc_raw_chunks/
+
+# 4. Compare chunk-by-chunk
+# Check CookedHeaderSize, FilterFlags, ExportDataSize, PublicExportHash
+```
+
+---
+
+## FString UTF-16LE Encoding
+
+### Overview
+
+UE's `FString` serialization uses a length-prefixed format where negative length indicates UTF-16LE encoding.
+
+### Format
+
+```
+Positive length N: N bytes of UTF-8/ASCII string + null terminator
+Negative length N: |N| UTF-16LE characters + null terminator (2 bytes)
+```
+
+```csharp
+static bool NeedsUtf16(string s)
+{
+    foreach (char c in s)
+        if (c > 127) return true;
+    return false;
+}
+
+// Writing:
+if (NeedsUtf16(str))
+{
+    byte[] utf16 = Encoding.Unicode.GetBytes(str);
+    writer.Write(-(str.Length + 1));  // Negative = UTF-16LE
+    writer.Write(utf16);
+    writer.Write((short)0);          // Null terminator (2 bytes)
+}
+else
+{
+    byte[] ascii = Encoding.UTF8.GetBytes(str);
+    writer.Write(str.Length + 1);     // Positive = ASCII/UTF-8
+    writer.Write(ascii);
+    writer.Write((byte)0);           // Null terminator (1 byte)
+}
+```
+
+**Affected characters:** Em Dash (—), fullwidth parentheses (（）), CJK characters (世界偏移大小), etc.
+
+---
+
+## IoStore Recompression
+
+### Overview
+
+**Implementation:** `IoStore/IoStoreRecompressor.cs`
+
+Recompresses an uncompressed IoStore container with Oodle Kraken compression.
+
+### Algorithm
+
+```
+1. Read ALL chunks into memory from original .utoc/.ucas
+2. Separate the ContainerHeader chunk (type 6) from regular chunks
+3. Dispose the reader (release file locks)
+4. Create a new IoStoreWriter with:
+   - containerHeaderVersion = null (don't generate new header)
+   - enableCompression = true
+5. Write all regular chunks compressed via WriteChunk()
+6. Write original ContainerHeader uncompressed via WriteChunkUncompressed()
+7. Call Complete() to finalize TOC
+8. Replace original files with recompressed ones
+```
+
+### Critical Design Decisions
+
+- **Container header pass-through:** The original container header is preserved byte-for-byte and written uncompressed. Generating a new container header would require parsing the original to extract store entries (imported packages, export counts, etc.), which is complex and error-prone.
+- **No containerHeaderVersion:** Passing `null` prevents the writer from generating a duplicate container header chunk.
+- **Reader scoping:** The `IoStoreReader` must be disposed before attempting to delete/replace the original files, otherwise file locks prevent the swap.
+- **Temp directory:** Uses a temp subdirectory (not `.tmp` extension) because `IoStoreWriter` derives the `.ucas` path from `Path.ChangeExtension(tocPath, ".ucas")`.
+
+### Container Header Versions
+
+| Version | Value | Entry Size | Fields |
+|---------|-------|------------|--------|
+| `Initial` | 0 | 32 bytes | ExportBundlesSize, ExportCount, ExportBundleCount, LoadOrder |
+| `LocalizedPackages` | 1 | 24 bytes | ExportCount, ExportBundleCount |
+| `OptionalSegmentPackages` | 2 | 24 bytes | ExportCount, ExportBundleCount |
+| `NoExportInfo` | 3 | 16 bytes | ImportedPackages only |
+| `SoftPackageReferences` | 4 | 16 bytes | ImportedPackages + soft refs flag |
+
+**Marvel Rivals uses `NoExportInfo` (version 3).** The recompressor must preserve this version, not hardcode a different one.
+
+---
+
 ## PackageGuid Handling
 
 ### Issue
@@ -1092,8 +1295,9 @@ int preloadSize = preloadDependencyCount * 4;
 if (preloadSize > 0)
     preloadSize += 37; // Header overhead
 
-// CookedHeaderSize includes preload
-int cookedHeaderSize = zenHeaderSize + preloadSize;
+// NOTE: CookedHeaderSize is NOT zenHeaderSize + preloadSize.
+// CookedHeaderSize = legacy .uasset file size (see Key Calculations section).
+// Preload data fills the gap between the Zen header end and CookedHeaderSize.
 ```
 
 ### Structure

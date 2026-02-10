@@ -857,10 +857,13 @@ public class ZenToUAssetConverter
                 
                 foreach (var export in targetPackage.ExportMap)
                 {
-                    if (export.PublicExportHash == exportHash)
+                    // In UE5.3+ (NoExportInfo), FExportMapEntry.PublicExportHash is a GlobalImportIndex,
+                    // not a CityHash64 hash. ImportedPublicExportHashes contains CityHash64 of export names.
+                    string exportName = targetPackage.GetName(export.ObjectName, _scriptObjects);
+                    ulong computedHash = IoStore.CityHash.CityHash64(exportName.ToLowerInvariant());
+                    
+                    if (export.PublicExportHash == exportHash || computedHash == exportHash)
                     {
-                        // Use GetName with scriptObjects for Global name type support
-                        string exportName = targetPackage.GetName(export.ObjectName, _scriptObjects);
                         
                         // Get class info
                         string className = OBJECT_NAME;

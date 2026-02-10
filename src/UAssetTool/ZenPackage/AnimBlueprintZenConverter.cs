@@ -421,6 +421,13 @@ public class AnimBlueprintZenConverter
                 publicExportHash = CalculatePublicExportHash(exportPath);
             }
 
+            // Preserve FilterFlags from legacy export - retoc preserves these
+            EExportFilterFlags filterFlags = EExportFilterFlags.None;
+            if (export.bNotForClient)
+                filterFlags = EExportFilterFlags.NotForClient;
+            else if (export.bNotForServer)
+                filterFlags = EExportFilterFlags.NotForServer;
+
             var entry = new FExportMapEntry
             {
                 CookedSerialOffset = (ulong)currentOffset,
@@ -431,7 +438,8 @@ public class AnimBlueprintZenConverter
                 SuperIndex = superIndex,
                 TemplateIndex = templateIndex,
                 PublicExportHash = publicExportHash,
-                ObjectFlags = (uint)export.ObjectFlags
+                ObjectFlags = (uint)export.ObjectFlags,
+                FilterFlags = filterFlags
             };
 
             zenPackage.ExportMap.Add(entry);
@@ -688,7 +696,7 @@ public class AnimBlueprintZenConverter
         int dependencyBundleHeadersOffset = (int)writer.BaseStream.Position;
         foreach (var header in zenPackage.DependencyBundleHeaders)
         {
-            header.Write(writer);
+            header.Write(writer, EIoContainerHeaderVersion.NoExportInfo);
         }
 
         // Write dependency bundle entries
@@ -704,9 +712,9 @@ public class AnimBlueprintZenConverter
 
         int zenHeaderSize = (int)writer.BaseStream.Position;
 
-        // For Zen packages, CookedHeaderSize = HeaderSize (no separate preload area in NoExportInfo format)
-        // The export data starts immediately after the header
-        int cookedHeaderSize = zenHeaderSize;
+        // CookedHeaderSize = the legacy .uasset file size
+        // This is what retoc uses and what the engine expects for serial offset calculations
+        int cookedHeaderSize = (int)new FileInfo(asset.FilePath).Length;
 
         // Update export map offsets - CookedSerialOffset is RELATIVE to start of export data
         // In Zen format, CookedSerialOffset starts at 0, not at CookedHeaderSize
@@ -718,11 +726,9 @@ public class AnimBlueprintZenConverter
             currentExportOffset += (long)exportEntry.CookedSerialSize;
         }
 
-        // Write export data - only write the actual export data, not trailing bytes
-        // Calculate total export size from sum of all SerialSizes
-        long totalExportSize = asset.Exports.Sum(e => e.SerialSize);
-        int exportDataLength = (int)Math.Min(totalExportSize, uexpData.Length);
-        writer.Write(uexpData, 0, exportDataLength);
+        // Write the full .uexp data as export data (do NOT strip trailing PACKAGE_FILE_TAG)
+        // retoc preserves the complete .uexp contents including the 4-byte tag
+        writer.Write(uexpData, 0, uexpData.Length);
 
         // Update summary with correct offsets
         zenPackage.Summary.HeaderSize = (uint)zenHeaderSize;

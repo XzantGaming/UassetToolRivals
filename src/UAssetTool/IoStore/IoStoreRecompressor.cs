@@ -26,65 +26,78 @@ public static class IoStoreRecompressor
 
         string basePath = Path.ChangeExtension(utocPath, null);
         string ucasPath = basePath + ".ucas";
-        string tempUtocPath = basePath + ".utoc.tmp";
-        string tempUcasPath = basePath + ".ucas.tmp";
+        // Use a temp subdirectory so the writer's Path.ChangeExtension produces correct .ucas path
+        string tempDir = basePath + "_recomp_tmp";
+        Directory.CreateDirectory(tempDir);
+        string tempUtocPath = Path.Combine(tempDir, Path.GetFileName(utocPath));
+        string tempUcasPath = Path.Combine(tempDir, Path.GetFileName(ucasPath));
 
         Console.Error.WriteLine($"[IoStoreRecompressor] Recompressing: {Path.GetFileName(utocPath)}");
 
-        // Read original IoStore
-        using var reader = new IoStoreReader(utocPath, aesKey);
-        var toc = reader.Toc;
-
-        // Collect all chunks with their data
+        // Read all chunks into memory, then close the reader before writing
         var chunks = new List<(FIoChunkId ChunkId, string? Path, byte[] Data)>();
-        int chunkIndex = 0;
-        foreach (var chunkId in reader.GetChunks())
+        FIoChunkId? containerHeaderChunkId = null;
+        byte[]? containerHeaderData = null;
+        EIoStoreTocVersion tocVersion;
+        string mountPoint;
+
+        using (var reader = new IoStoreReader(utocPath, aesKey))
         {
-            try
-            {
-                byte[] data = reader.ReadChunk(chunkId);
-                string? path = reader.GetChunkPath(chunkId);
-                chunks.Add((chunkId, path, data));
-                chunkIndex++;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[IoStoreRecompressor] Warning: Failed to read chunk {chunkIndex}: {ex.Message}");
-            }
-        }
+            var toc = reader.Toc;
+            tocVersion = toc.Version;
+            mountPoint = toc.MountPoint;
+            int chunkIndex = 0;
 
-        Console.Error.WriteLine($"[IoStoreRecompressor] Read {chunks.Count} chunks, writing with Oodle compression...");
+            foreach (var chunkId in reader.GetChunks())
+            {
+                try
+                {
+                    byte[] data = reader.ReadChunk(chunkId);
+                    string? path = reader.GetChunkPath(chunkId);
 
-        // Create new IoStore with Oodle compression (enableCompression: true)
+                    // Separate container header - it needs special handling
+                    if (chunkId.ChunkType == EIoChunkType.ContainerHeader)
+                    {
+                        containerHeaderChunkId = chunkId;
+                        containerHeaderData = data;
+                    }
+                    else
+                    {
+                        chunks.Add((chunkId, path, data));
+                    }
+                    chunkIndex++;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[IoStoreRecompressor] Warning: Failed to read chunk {chunkIndex}: {ex.Message}");
+                }
+            }
+        } // Reader disposed here - files are now unlocked
+
+        Console.Error.WriteLine($"[IoStoreRecompressor] Read {chunks.Count} chunks + container header, writing with Oodle compression...");
+
+        // Create new IoStore with Oodle compression
+        // Pass null for containerHeaderVersion so the writer does NOT generate a new container header
+        // We pass through the original container header uncompressed instead
         using (var writer = new IoStoreWriter(
             tempUtocPath,
-            toc.Version,
-            EIoContainerHeaderVersion.OptionalSegmentPackages,
-            toc.MountPoint,
+            tocVersion,
+            null, // Don't generate new container header
+            mountPoint,
             enableCompression: true,
             enableEncryption: false,
             aesKeyHex: aesKeyHex))
         {
+            // Write all regular chunks (compressed)
             foreach (var (chunkId, path, data) in chunks)
             {
-                // Determine store entry based on chunk type
-                var storeEntry = new StoreEntry
-                {
-                    ExportCount = 1,
-                    ExportBundleCount = 1,
-                    LoadOrder = 0
-                };
+                writer.WriteChunk(chunkId, path, data);
+            }
 
-                // Write chunk with path if available
-                if (!string.IsNullOrEmpty(path))
-                {
-                    writer.WritePackageChunk(chunkId, path, data, storeEntry);
-                }
-                else
-                {
-                    // Write raw chunk without path
-                    writer.WriteRawChunk(chunkId, data);
-                }
+            // Write original container header uncompressed (preserving exact original data)
+            if (containerHeaderChunkId.HasValue && containerHeaderData != null)
+            {
+                writer.WriteChunkUncompressed(containerHeaderChunkId.Value, containerHeaderData);
             }
 
             writer.Complete();
@@ -95,6 +108,9 @@ public static class IoStoreRecompressor
         File.Delete(ucasPath);
         File.Move(tempUtocPath, utocPath);
         File.Move(tempUcasPath, ucasPath);
+
+        // Clean up temp directory
+        try { Directory.Delete(tempDir, recursive: true); } catch { /* best effort */ }
 
         // Get new sizes
         var utocInfo = new FileInfo(utocPath);

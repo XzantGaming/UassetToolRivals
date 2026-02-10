@@ -67,6 +67,7 @@ public partial class Program
                 "from_json" => CliFromJson(args),
                 "to_json" => CliToJson(args),
                 "dump_zen_from_game" => CliDumpZenFromGame(args),
+                "clone_mod_iostore" => CliCloneModIoStore(args),
                 "extract_pak" => CliExtractPak(args),
                 "modify_colors" => CliModifyColors(args),
                 "niagara_list" => CliNiagaraList(args),
@@ -555,8 +556,9 @@ public partial class Program
     {
         if (args.Length < 3)
         {
-            Console.Error.WriteLine("Usage: UAssetTool create_mod_iostore <output_base> <uasset1> [uasset2] ...");
-            Console.Error.WriteLine("  Converts legacy .uasset/.uexp files to Zen format and creates IoStore bundle.");
+            Console.Error.WriteLine("Usage: UAssetTool create_mod_iostore <output_base> <input> [input2] ...");
+            Console.Error.WriteLine("  Converts legacy assets to Zen format and creates IoStore bundle.");
+            Console.Error.WriteLine("  Input can be .uasset files, directories, or .pak files.");
             Console.Error.WriteLine("  This is the complete pipeline for Marvel Rivals mod creation.");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Options:");
@@ -567,6 +569,7 @@ public partial class Program
             Console.Error.WriteLine("  --no-compress         - Disable compression");
             Console.Error.WriteLine("  --encrypt             - Enable AES encryption");
             Console.Error.WriteLine("  --aes-key <hex>       - AES key in hex format");
+            Console.Error.WriteLine("  --pak-aes <hex>       - AES key for decrypting input .pak files");
             return 1;
         }
 
@@ -577,7 +580,9 @@ public partial class Program
         bool enableCompression = true;
         bool enableEncryption = false;
         string? aesKey = null;
+        string? pakAesKey = null;
         var uassetFiles = new List<string>();
+        var tempDirsToCleanup = new List<string>();
 
         for (int i = 2; i < args.Length; i++)
         {
@@ -609,6 +614,53 @@ public partial class Program
             {
                 aesKey = args[++i];
                 enableEncryption = true;
+            }
+            else if (args[i] == "--pak-aes" && i + 1 < args.Length)
+            {
+                pakAesKey = args[++i];
+            }
+            else if (args[i].EndsWith(".pak", StringComparison.OrdinalIgnoreCase) && File.Exists(args[i]))
+            {
+                // Extract legacy assets from .pak file to temp directory
+                string pakInputPath = Path.GetFullPath(args[i]);
+                string tempDir = Path.Combine(Path.GetTempPath(), "UAssetTool_pak_" + Path.GetFileNameWithoutExtension(pakInputPath) + "_" + Guid.NewGuid().ToString("N")[..8]);
+                Directory.CreateDirectory(tempDir);
+                tempDirsToCleanup.Add(tempDir);
+
+                Console.Error.WriteLine($"[CreateModIoStore] Extracting legacy PAK: {pakInputPath}");
+                try
+                {
+                    using var pakReader = new IoStore.PakReader(pakInputPath, pakAesKey);
+                    int extracted = 0;
+                    foreach (var file in pakReader.Files)
+                    {
+                        // Only extract .uasset, .uexp, and .ubulk files
+                        string ext = Path.GetExtension(file).ToLowerInvariant();
+                        if (ext != ".uasset" && ext != ".uexp" && ext != ".ubulk")
+                            continue;
+
+                        byte[] data = pakReader.Get(file);
+                        string outPath = Path.Combine(tempDir, file.Replace('/', Path.DirectorySeparatorChar));
+                        string? dir = Path.GetDirectoryName(outPath);
+                        if (!string.IsNullOrEmpty(dir))
+                            Directory.CreateDirectory(dir);
+                        File.WriteAllBytes(outPath, data);
+                        extracted++;
+                    }
+                    Console.Error.WriteLine($"[CreateModIoStore]   Extracted {extracted} files from PAK");
+
+                    // Find all .uasset files in the extracted directory
+                    var dirFiles = Directory.GetFiles(tempDir, "*.uasset", SearchOption.AllDirectories);
+                    foreach (var f in dirFiles)
+                    {
+                        uassetFiles.Add(Path.GetFullPath(f));
+                    }
+                    Console.Error.WriteLine($"[CreateModIoStore]   Found {dirFiles.Length} .uasset files");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error extracting PAK: {ex.Message}");
+                }
             }
             else if (args[i].EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && File.Exists(args[i]))
             {
@@ -784,6 +836,22 @@ public partial class Program
                 Console.Error.WriteLine(ex.StackTrace);
             }
             return 1;
+        }
+        finally
+        {
+            // Clean up temp directories created from .pak extraction
+            foreach (var tempDir in tempDirsToCleanup)
+            {
+                try
+                {
+                    if (Directory.Exists(tempDir))
+                    {
+                        Directory.Delete(tempDir, recursive: true);
+                        Console.Error.WriteLine($"[CreateModIoStore] Cleaned up temp directory: {tempDir}");
+                    }
+                }
+                catch { /* Best effort cleanup */ }
+            }
         }
     }
 
@@ -4159,6 +4227,197 @@ public partial class Program
         }
     }
     
+    /// <summary>
+    /// Clone packages directly from game IoStore to create a mod IoStore.
+    /// This preserves the exact Zen package structure without going through legacy conversion.
+    /// </summary>
+    private static int CliCloneModIoStore(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool clone_mod_iostore <paks_path> <output_base> <package_paths...>");
+            Console.Error.WriteLine("  Clones packages directly from game IoStore, preserving exact Zen structure.");
+            Console.Error.WriteLine("  This avoids the legacy conversion which can add extra names to the name map.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --compress            - Enable Oodle compression (default: enabled)");
+            Console.Error.WriteLine("  --no-compress         - Disable compression");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Example:");
+            Console.Error.WriteLine("  clone_mod_iostore \"E:\\Game\\Paks\" \"MyMod\" \"/Game/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001\"");
+            return 1;
+        }
+
+        string paksPath = args[1];
+        string outputBase = args[2];
+        bool enableCompression = true;
+        var packagePaths = new List<string>();
+
+        for (int i = 3; i < args.Length; i++)
+        {
+            if (args[i] == "--compress")
+                enableCompression = true;
+            else if (args[i] == "--no-compress")
+                enableCompression = false;
+            else if (args[i].StartsWith("/Game/") || args[i].StartsWith("/Script/"))
+                packagePaths.Add(args[i]);
+            else
+                Console.Error.WriteLine($"Warning: Ignoring unknown argument: {args[i]}");
+        }
+
+        if (packagePaths.Count == 0)
+        {
+            Console.Error.WriteLine("Error: No package paths provided");
+            return 1;
+        }
+
+        if (!Directory.Exists(paksPath))
+        {
+            Console.Error.WriteLine($"Error: Paks directory not found: {paksPath}");
+            return 1;
+        }
+
+        try
+        {
+            // Find all .utoc files
+            var utocFiles = Directory.GetFiles(paksPath, "*.utoc", SearchOption.TopDirectoryOnly)
+                .OrderBy(f => f)
+                .ToList();
+
+            Console.Error.WriteLine($"[CloneModIoStore] Creating IoStore mod bundle: {outputBase}");
+            Console.Error.WriteLine($"[CloneModIoStore]   Packages: {packagePaths.Count}");
+            Console.Error.WriteLine($"[CloneModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
+            Console.Error.WriteLine($"[CloneModIoStore]   Source containers: {utocFiles.Count}");
+
+            // Parse AES key for Marvel Rivals
+            byte[] aesKey = Convert.FromHexString("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74");
+
+            string utocPath = outputBase + ".utoc";
+            string pakPath = outputBase + ".pak";
+            string mountPoint = "../../../";
+
+            using var ioStoreWriter = new IoStore.IoStoreWriter(
+                utocPath,
+                IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
+                IoStore.EIoContainerHeaderVersion.NoExportInfo,
+                mountPoint,
+                enableCompression,
+                false, // no encryption
+                null);
+
+            var filePaths = new List<string>();
+            int successCount = 0;
+
+            foreach (var packagePath in packagePaths)
+            {
+                Console.Error.WriteLine($"  Cloning: {packagePath}");
+
+                var packageId = IoStore.FPackageId.FromName(packagePath);
+                bool found = false;
+
+                foreach (var utocFile in utocFiles)
+                {
+                    try
+                    {
+                        using var reader = new IoStore.IoStoreReader(utocFile, aesKey);
+                        var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
+
+                        if (reader.HasChunk(chunkId))
+                        {
+                            // Read original Zen data
+                            byte[] zenData = reader.ReadChunk(chunkId);
+                            Console.Error.WriteLine($"    Found in: {Path.GetFileName(utocFile)}");
+                            Console.Error.WriteLine($"    Zen size: {zenData.Length} bytes");
+
+                            // Parse the Zen header to get export count and imported packages
+                            var zenHeader = ZenPackage.FZenPackageHeader.Deserialize(zenData, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+
+                            // Create store entry
+                            var storeEntry = new IoStore.StoreEntry
+                            {
+                                ExportCount = zenHeader.ExportMap.Count,
+                                ExportBundleCount = 1,
+                                LoadOrder = 0
+                            };
+
+                            // Add imported packages
+                            foreach (ulong importedPkgId in zenHeader.ImportedPackages)
+                            {
+                                storeEntry.ImportedPackages.Add(new IoStore.FPackageId(importedPkgId));
+                            }
+                            if (storeEntry.ImportedPackages.Count > 0)
+                            {
+                                Console.Error.WriteLine($"    Imported packages: {storeEntry.ImportedPackages.Count}");
+                            }
+
+                            // Convert package path to file path for directory index
+                            // /Game/Marvel/Characters/... -> Marvel/Content/Marvel/Characters/...
+                            string filePath;
+                            if (packagePath.StartsWith("/Game/"))
+                            {
+                                filePath = "Marvel/Content/" + packagePath.Substring("/Game/".Length);
+                            }
+                            else
+                            {
+                                filePath = packagePath.TrimStart('/');
+                            }
+
+                            string fullPath = mountPoint + filePath + ".uasset";
+                            ioStoreWriter.WritePackageChunk(chunkId, fullPath, zenData, storeEntry);
+                            filePaths.Add(filePath + ".uasset");
+                            filePaths.Add(filePath + ".uexp");
+
+                            // Check for BulkData chunk
+                            var bulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.BulkData);
+                            if (reader.HasChunk(bulkChunkId))
+                            {
+                                byte[] bulkData = reader.ReadChunk(bulkChunkId);
+                                string bulkFullPath = mountPoint + filePath + ".ubulk";
+                                ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, bulkData);
+                                filePaths.Add(filePath + ".ubulk");
+                                Console.Error.WriteLine($"    BulkData: {bulkData.Length} bytes");
+                            }
+
+                            found = true;
+                            successCount++;
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Silently continue to next container
+                        _ = ex;
+                    }
+                }
+
+                if (!found)
+                {
+                    Console.Error.WriteLine($"    ERROR: Package not found in any container");
+                }
+            }
+
+            // Complete IoStore
+            ioStoreWriter.Complete();
+
+            // Create companion PAK with chunk names
+            IoStore.ChunkNamesPakWriter.Create(pakPath, filePaths, mountPoint, 0, null);
+
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"SUCCESS: Created IoStore mod bundle:");
+            Console.Error.WriteLine($"  {utocPath}");
+            Console.Error.WriteLine($"  {Path.ChangeExtension(utocPath, ".ucas")}");
+            Console.Error.WriteLine($"  {pakPath}");
+            Console.Error.WriteLine($"  Packages cloned: {successCount}/{packagePaths.Count}");
+
+            return successCount > 0 ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+    }
+
     private static int CliExtractPak(string[] args)
     {
         // Usage: extract_pak <pak_path> <output_dir> [--aes <key>] [--filter <patterns...>]
@@ -5290,6 +5549,13 @@ public partial class Program
                         Console.WriteLine($"        SlotName: {mat.MaterialSlotName?.Value?.Value ?? "None"}");
                         Console.WriteLine($"        ImportedSlotName: {mat.ImportedMaterialSlotName?.Value?.Value ?? "None"}");
                         Console.WriteLine($"        GameplayTags: {mat.GameplayTagContainer?.GameplayTags?.Count ?? 0}");
+                        if (mat.GameplayTagContainer?.GameplayTags != null && mat.GameplayTagContainer.GameplayTags.Count > 0)
+                        {
+                            foreach (var tag in mat.GameplayTagContainer.GameplayTags)
+                            {
+                                Console.WriteLine($"          - {tag.TagName?.Value?.Value ?? "Unknown"}");
+                            }
+                        }
                     }
                 }
                 

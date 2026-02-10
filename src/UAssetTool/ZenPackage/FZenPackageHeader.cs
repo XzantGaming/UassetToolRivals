@@ -245,11 +245,12 @@ public class FZenPackageHeader
         {
             // Read dependency bundle headers
             reader.BaseStream.Seek(startPos + header.Summary.DependencyBundleHeadersOffset, SeekOrigin.Begin);
-            int depHeaderCount = (header.Summary.DependencyBundleEntriesOffset - header.Summary.DependencyBundleHeadersOffset) / FDependencyBundleHeader.Size;
+            int depHeaderSize = FDependencyBundleHeader.GetSize(containerHeaderVersion);
+            int depHeaderCount = (header.Summary.DependencyBundleEntriesOffset - header.Summary.DependencyBundleHeadersOffset) / depHeaderSize;
             for (int i = 0; i < depHeaderCount; i++)
             {
                 var depHeader = new FDependencyBundleHeader();
-                depHeader.Read(reader);
+                depHeader.Read(reader, containerHeaderVersion);
                 header.DependencyBundleHeaders.Add(depHeader);
             }
 
