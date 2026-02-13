@@ -127,12 +127,21 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [usmap_path]");
+            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [usmap_path] [--material-tags]");
             return 1;
         }
 
         string uassetPath = args[1];
-        string? usmapPath = args.Length > 2 ? args[2] : null;
+        string? usmapPath = null;
+        bool materialTags = false;
+        
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--material-tags")
+                materialTags = true;
+            else if (usmapPath == null && !args[i].StartsWith("--"))
+                usmapPath = args[i];
+        }
 
         if (!File.Exists(uassetPath))
         {
@@ -142,6 +151,9 @@ public partial class Program
 
         try
         {
+            if (materialTags)
+                ZenPackage.ZenConverter.SetMaterialTagsEnabled(true);
+            
             Console.Error.WriteLine($"[CliToZen] Converting {uassetPath} to Zen format...");
             
             byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath, usmapPath);
@@ -570,6 +582,7 @@ public partial class Program
             Console.Error.WriteLine("  --encrypt             - Enable AES encryption");
             Console.Error.WriteLine("  --aes-key <hex>       - AES key in hex format");
             Console.Error.WriteLine("  --pak-aes <hex>       - AES key for decrypting input .pak files");
+            Console.Error.WriteLine("  --material-tags       - [EXPERIMENTAL] Read MaterialTagAssetUserData and inject per-slot gameplay tags");
             return 1;
         }
 
@@ -581,12 +594,17 @@ public partial class Program
         bool enableEncryption = false;
         string? aesKey = null;
         string? pakAesKey = null;
+        bool materialTags = false;
         var uassetFiles = new List<string>();
         var tempDirsToCleanup = new List<string>();
 
         for (int i = 2; i < args.Length; i++)
         {
-            if (args[i] == "--usmap" && i + 1 < args.Length)
+            if (args[i] == "--material-tags")
+            {
+                materialTags = true;
+            }
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
             {
                 usmapPath = args[++i];
             }
@@ -640,7 +658,8 @@ public partial class Program
                             continue;
 
                         byte[] data = pakReader.Get(file);
-                        string outPath = Path.Combine(tempDir, file.Replace('/', Path.DirectorySeparatorChar));
+                        string relativePath = file.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+                        string outPath = Path.Combine(tempDir, relativePath);
                         string? dir = Path.GetDirectoryName(outPath);
                         if (!string.IsNullOrEmpty(dir))
                             Directory.CreateDirectory(dir);
@@ -697,10 +716,15 @@ public partial class Program
             string utocPath = outputBase + ".utoc";
             string pakPath = outputBase + ".pak";
 
+            if (materialTags)
+                ZenPackage.ZenConverter.SetMaterialTagsEnabled(true);
+            
             Console.Error.WriteLine($"[CreateModIoStore] Creating IoStore mod bundle: {outputBase}");
             Console.Error.WriteLine($"[CreateModIoStore]   Assets: {uassetFiles.Count}");
             Console.Error.WriteLine($"[CreateModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
             Console.Error.WriteLine($"[CreateModIoStore]   Encryption: {(enableEncryption ? "AES-256" : "None")}");
+            if (materialTags)
+                Console.Error.WriteLine($"[CreateModIoStore]   MaterialTags: ENABLED (experimental)");
 
             // Create IoStore container
             using var ioStoreWriter = new IoStore.IoStoreWriter(

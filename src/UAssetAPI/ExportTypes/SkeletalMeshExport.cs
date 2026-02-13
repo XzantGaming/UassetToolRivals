@@ -452,24 +452,28 @@ namespace UAssetAPI.ExportTypes
         /// </summary>
         private void ReconstructExtrasWithMaterialsOnly()
         {
-            // With FGameplayTagContainer: 40 + 4 (empty tag count) = 44 bytes per material
-            // NOTE: ParentTags is NOT serialized (per CUE4Parse)
-            int newMaterialSize = IncludeGameplayTags ? FSkeletalMaterial.SerializedSizeWithEmptyTags : FSkeletalMaterial.LegacySerializedSize;
-            int newMaterialsByteLength = 4 + (Materials.Count * newMaterialSize);
+            // Serialize materials to an expandable stream first to get actual byte length.
+            // Materials with injected FGameplayTags are larger than the fixed 44-byte empty-tag size
+            // (each tag adds 8 bytes for its FName).
+            byte[] serializedMaterials;
+            using (var matStream = new MemoryStream())
+            using (var matWriter = new AssetBinaryWriter(matStream, Asset))
+            {
+                matWriter.Write(Materials.Count);
+                foreach (var mat in Materials)
+                {
+                    mat.Write(matWriter, IncludeGameplayTags);
+                }
+                serializedMaterials = matStream.ToArray();
+            }
+            
+            int newMaterialsByteLength = serializedMaterials.Length;
             int sizeDiff = newMaterialsByteLength - _originalMaterialsByteLength;
             
             byte[] newExtras = new byte[Extras.Length + sizeDiff];
             
             Array.Copy(Extras, 0, newExtras, 0, _materialsOffset);
-            
-            using var ms = new MemoryStream(newExtras, _materialsOffset, newMaterialsByteLength);
-            using var matWriter = new AssetBinaryWriter(ms, Asset);
-            
-            matWriter.Write(Materials.Count);
-            foreach (var mat in Materials)
-            {
-                mat.Write(matWriter, IncludeGameplayTags);
-            }
+            Array.Copy(serializedMaterials, 0, newExtras, _materialsOffset, newMaterialsByteLength);
             
             int afterMaterialsOffset = _materialsOffset + _originalMaterialsByteLength;
             int afterMaterialsNewOffset = _materialsOffset + newMaterialsByteLength;

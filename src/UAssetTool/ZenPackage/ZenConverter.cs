@@ -25,6 +25,24 @@ public class ZenConverter
     private static readonly Dictionary<string, UAssetAPI.Unversioned.Usmap> _usmapCache = new();
     private static readonly object _usmapLock = new();
     
+    // [EXPERIMENTAL] When true, reads MaterialTagAssetUserData from SkeletalMesh packages
+    // and injects per-slot FGameplayTagContainer data into FSkeletalMaterial during Zen conversion.
+    // This does NOT override the original empty-tag padding logic — it runs as an additional step.
+    // Enable via --material-tags CLI flag.
+    private static bool _enableMaterialTags = false;
+    
+    /// <summary>
+    /// [EXPERIMENTAL] Enable or disable MaterialTagAssetUserData reading.
+    /// When enabled, SkeletalMesh packages with MaterialTagAssetUserData will have
+    /// per-slot gameplay tags injected into FSkeletalMaterial during Zen conversion.
+    /// </summary>
+    public static void SetMaterialTagsEnabled(bool enabled)
+    {
+        _enableMaterialTags = enabled;
+        if (enabled)
+            Console.Error.WriteLine("[ZenConverter] [EXPERIMENTAL] MaterialTags injection ENABLED");
+    }
+    
     /// <summary>
     /// Set the script objects database to use for resolving class hashes
     /// </summary>
@@ -164,35 +182,52 @@ public class ZenConverter
         byte[] uexpData = File.ReadAllBytes(uexpPath);
         long headerSize = asset.Exports.Min(e => e.SerialOffset);
 
-        // Build Zen package
-        var zenPackage = new FZenPackage
-        {
-            ContainerVersion = containerVersion,
-            Summary = new FZenPackageSummary(),
-            NameMap = new List<string>(),
-            ImportMap = new List<FPackageObjectIndex>(),
-            ExportMap = new List<FExportMapEntry>(),
-            ExportBundleHeaders = new List<FExportBundleHeader>(),
-            ExportBundleEntries = new List<FExportBundleEntry>(),
-            DependencyBundleHeaders = new List<FDependencyBundleHeader>(),
-            DependencyBundleEntries = new List<FDependencyBundleEntry>()
-        };
-
-        // Build name map from legacy asset (includes package name)
-        BuildNameMap(asset, zenPackage);
-
-        // Set package name and flags from legacy asset
-        SetPackageSummary(asset, zenPackage);
-
-        // Build import map with proper remapping
-        BuildImportMap(asset, zenPackage);
-
-        // Check if this is a SkeletalMesh or StaticMesh that needs material slot padding
-        // We need to calculate padding BEFORE building export map so sizes are correct
+        // Check if this is a SkeletalMesh - needed for material parsing and tag injection
         bool isSkeletalMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "SkeletalMesh" ||
             e.GetExportClassType()?.Value?.Value?.Contains("SkeletalMesh") == true);
-        
+
+        UAssetAPI.ExportTypes.SkeletalMeshExport? skeletalExport = null;
+        if (isSkeletalMesh)
+        {
+            skeletalExport = asset.Exports.FirstOrDefault(e => e is UAssetAPI.ExportTypes.SkeletalMeshExport)
+                as UAssetAPI.ExportTypes.SkeletalMeshExport;
+            skeletalExport?.EnsureExtraDataParsed();
+            if (skeletalExport?.Materials == null || skeletalExport.Materials.Count == 0)
+                skeletalExport = null;
+        }
+
+        // [EXPERIMENTAL] MaterialTags: read tags and inject into materials.
+        // The MaterialTagAssetUserData export is kept in the package (can't strip it —
+        // Extras raw binary has FPackageIndex referencing MorphTargets by export index).
+        // Instead, its class import is remapped to /Script/Engine.AssetUserData in BuildImportMap.
+        if (_enableMaterialTags && skeletalExport != null && skeletalExport.Materials != null && skeletalExport.Materials.Count > 0)
+        {
+            try
+            {
+                var tagResult = MaterialTagReader.ReadFromAsset(asset);
+                if (tagResult.FoundUserData)
+                {
+                    int injected = MaterialTagReader.ApplyTagsToMaterials(
+                        skeletalExport.Materials, tagResult, asset);
+                    
+                    string meshName = System.IO.Path.GetFileNameWithoutExtension(asset.FilePath ?? "");
+                    Console.Error.WriteLine($"[MaterialTags] {meshName}: Found UserData with {tagResult.TotalTagCount} tag(s) across {tagResult.SlotTags.Count} slot(s), injected into {injected} material(s)");
+                    
+                    if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+                    {
+                        foreach (var diag in tagResult.Diagnostics)
+                            Console.Error.WriteLine($"[MaterialTags]   {diag}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[MaterialTags] WARNING: Failed to read MaterialTagAssetUserData: {ex.Message}");
+            }
+        }
+
+        // Check if this is a StaticMesh or StringTable
         bool isStaticMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "StaticMesh");
         
@@ -202,24 +237,8 @@ public class ZenConverter
         
         int materialPaddingToAdd = 0;
         int stringTablePaddingToAdd = 0;
-        if (isSkeletalMesh)
+        if (isSkeletalMesh && skeletalExport != null)
         {
-            // For SkeletalMesh, try to use UAssetAPI's proper serialization via SkeletalMeshExport
-            // which automatically includes FGameplayTagContainer padding
-            var skeletalExport = asset.Exports.FirstOrDefault(e => e is UAssetAPI.ExportTypes.SkeletalMeshExport)
-                as UAssetAPI.ExportTypes.SkeletalMeshExport;
-            
-            // Ensure extra data is parsed (lazy parsing since Extras is populated after Read)
-            skeletalExport?.EnsureExtraDataParsed();
-            
-            // Check if materials were successfully parsed
-            if (skeletalExport?.Materials == null || skeletalExport.Materials.Count == 0)
-            {
-                skeletalExport = null; // Reset to trigger fallback message
-            }
-            
-            if (skeletalExport != null)
-            {
                 // CRITICAL: If source already had FGameplayTagContainer (extracted from game),
                 // DO NOT re-serialize! Re-serialization would add 4-byte ObjectGuid booleans to
                 // inner objects like MorphTargets, causing serial size mismatches.
@@ -232,6 +251,8 @@ public class ZenConverter
                 else
                 {
                     // Source needs FGameplayTagContainer padding - re-serialize
+                    // If MaterialTags injection ran above, the containers now hold actual tags.
+                    // If not, they remain empty (count=0, 4 bytes each) — the original behavior.
                     skeletalExport.IncludeGameplayTags = true;
                     var reserializedData = ReserializeExportData(asset);
                     if (reserializedData != null && reserializedData.Length > 0)
@@ -240,18 +261,19 @@ public class ZenConverter
                         // Verbose logging disabled for parallel performance
                         uexpData = reserializedData;
                         materialPaddingToAdd = sizeDiff;
+                        // WriteData() recalculates SerialOffset values based on a new header size.
+                        headerSize = asset.Exports.Min(e => e.SerialOffset);
                     }
                 }
-            }
-            else
-            {
+        }
+        else if (isSkeletalMesh)
+        {
                 // Materials weren't parsed by SkeletalMeshExport
                 // This could mean:
                 // 1. The file already has FGameplayTagContainer (extracted from game) - no padding needed
                 // 2. Parsing failed for some other reason
                 // For files extracted from the game, they already have the correct format
                 // Verbose logging disabled for parallel performance
-            }
         }
         else if (isStaticMesh)
         {
@@ -281,6 +303,29 @@ public class ZenConverter
         // uses original SerialOffset values which don't account for the padding.
         // Pass the padding amount so it can be added to the last export's size.
         int totalPaddingToAdd = materialPaddingToAdd + stringTablePaddingToAdd;
+
+        // Build Zen package
+        var zenPackage = new FZenPackage
+        {
+            ContainerVersion = containerVersion,
+            Summary = new FZenPackageSummary(),
+            NameMap = new List<string>(),
+            ImportMap = new List<FPackageObjectIndex>(),
+            ExportMap = new List<FExportMapEntry>(),
+            ExportBundleHeaders = new List<FExportBundleHeader>(),
+            ExportBundleEntries = new List<FExportBundleEntry>(),
+            DependencyBundleHeaders = new List<FDependencyBundleHeader>(),
+            DependencyBundleEntries = new List<FDependencyBundleEntry>()
+        };
+
+        // Build name map from legacy asset (includes package name)
+        BuildNameMap(asset, zenPackage);
+
+        // Set package name and flags from legacy asset
+        SetPackageSummary(asset, zenPackage);
+
+        // Build import map with proper remapping
+        BuildImportMap(asset, zenPackage);
 
         // Build export map with RECALCULATED SerialSize from actual data
         BuildExportMapWithRecalculatedSizes(asset, zenPackage, uexpData, headerSize, totalPaddingToAdd);
@@ -670,6 +715,35 @@ public class ZenConverter
             // Build the full object path to determine the package
             string objectPath = BuildScriptObjectPath(asset, import);
             
+            // [EXPERIMENTAL] MaterialTags: replace /Script/MaterialTagPlugin imports with
+            // /Script/Engine equivalents. The game doesn't know about MaterialTagPlugin —
+            // we can't strip the export (Extras raw binary has FPackageIndex we can't remap)
+            // so instead we remap the class to the engine-native base class AssetUserData.
+            if (_enableMaterialTags && objectPath.Contains("/MaterialTagPlugin"))
+            {
+                string replacedPath;
+                if (objectPath.Contains("Default__"))
+                    replacedPath = "/Script/Engine.Default__AssetUserData";
+                else if (objectPath.Contains("MaterialTagAssetUserData"))
+                    replacedPath = "/Script/Engine.AssetUserData";
+                else
+                    replacedPath = "/Script/Engine"; // package itself
+
+                FPackageObjectIndex replacedImport;
+                if (_scriptObjectsDb != null && _scriptObjectsDb.TryGetGlobalIndexByPath(replacedPath, out ulong replacedGlobalIndex))
+                {
+                    replacedImport = FPackageObjectIndex.CreateFromRaw(replacedGlobalIndex);
+                }
+                else
+                {
+                    replacedImport = FPackageObjectIndex.CreateScriptImport(replacedPath);
+                }
+                
+                Console.Error.WriteLine($"[MaterialTags] Remapped import[{i}]: {objectPath} -> {replacedPath}");
+                zenPackage.ImportMap.Add(replacedImport);
+                continue;
+            }
+
             // Check if this import is from a /Script/ package (based on the object path, not class package)
             if (objectPath.StartsWith("/Script/"))
             {
@@ -860,6 +934,12 @@ public class ZenConverter
     /// <summary>
     /// Write a name batch in UE format.
     /// Format: count (u32), if count > 0: string_bytes (u32), hash_algo_id (u64), hashes (u64[]), headers (i16 BE[]), strings
+    /// 
+    /// Header i16 (big-endian):
+    ///   positive = ASCII byte length
+    ///   negative = -(UTF-16LE code unit count) — string data is UTF-16LE
+    /// 
+    /// Hash: CityHash64 of lowercase bytes (ASCII for ASCII names, UTF-16LE for non-ASCII names)
     /// </summary>
     private static void WriteNameBatch(BinaryWriter writer, List<string> names)
     {
@@ -867,40 +947,58 @@ public class ZenConverter
         if (names.Count == 0)
             return;
 
-        // Calculate total string bytes using ASCII encoding for all names
-        // Non-ASCII characters are replaced with '?' (0x3F), matching MagikIO behavior
+        // Pre-compute encoded bytes and whether each name is ASCII
+        var encodedNames = new List<(byte[] bytes, bool isAscii)>(names.Count);
         uint totalStringBytes = 0;
         foreach (var name in names)
         {
-            totalStringBytes += (uint)Encoding.ASCII.GetByteCount(name);
+            bool ascii = IsAscii(name);
+            byte[] bytes = ascii
+                ? Encoding.ASCII.GetBytes(name)
+                : Encoding.Unicode.GetBytes(name); // UTF-16LE
+            encodedNames.Add((bytes, ascii));
+            totalStringBytes += (uint)bytes.Length;
         }
         writer.Write(totalStringBytes);
 
         // Hash algorithm ID
         writer.Write(FNAME_HASH_ALGORITHM_ID);
 
-        // Write hashes (CityHash64 of lowercase ASCII name)
-        foreach (var name in names)
+        // Write hashes (CityHash64 of lowercase encoded bytes)
+        for (int i = 0; i < names.Count; i++)
         {
-            string lower = name.ToLowerInvariant();
-            byte[] bytes = Encoding.ASCII.GetBytes(lower);
-            ulong hash = IoStore.CityHash.CityHash64(bytes, 0, bytes.Length);
+            string lower = names[i].ToLowerInvariant();
+            byte[] hashBytes = encodedNames[i].isAscii
+                ? Encoding.ASCII.GetBytes(lower)
+                : Encoding.Unicode.GetBytes(lower); // UTF-16LE
+            ulong hash = IoStore.CityHash.CityHash64(hashBytes, 0, hashBytes.Length);
             writer.Write(hash);
         }
 
-        // Write headers (i16 big-endian: positive = ASCII byte length)
-        foreach (var name in names)
+        // Write headers (i16 big-endian)
+        for (int i = 0; i < names.Count; i++)
         {
-            short len = (short)Encoding.ASCII.GetByteCount(name);
+            short headerVal;
+            if (encodedNames[i].isAscii)
+            {
+                // Positive = ASCII byte length
+                headerVal = (short)encodedNames[i].bytes.Length;
+            }
+            else
+            {
+                // Wide string: headerVal = short.MinValue + charCount
+                // Reader decodes: charCount = Math.Abs(short.MinValue - headerVal)
+                headerVal = (short)(short.MinValue + names[i].Length);
+            }
             // Write as big-endian
-            writer.Write((byte)(len >> 8));
-            writer.Write((byte)(len & 0xFF));
+            writer.Write((byte)(headerVal >> 8));
+            writer.Write((byte)(headerVal & 0xFF));
         }
 
-        // Write string data - ASCII encoding, consecutive
-        foreach (var name in names)
+        // Write string data - consecutive, encoding per name
+        for (int i = 0; i < names.Count; i++)
         {
-            writer.Write(Encoding.ASCII.GetBytes(name));
+            writer.Write(encodedNames[i].bytes);
         }
     }
 
@@ -1386,6 +1484,173 @@ public class ZenConverter
         return asset;
     }
     
+    /// <summary>
+    /// [EXPERIMENTAL] Strip MaterialTagAssetUserData export from the legacy asset.
+    /// The game doesn't know about /Script/MaterialTagPlugin — leaving this export in
+    /// causes an Access Violation at runtime. After tags have been read and injected into
+    /// FSkeletalMaterial, the UserData export is no longer needed.
+    /// 
+    /// This method:
+    /// 1. Finds and removes the MaterialTagAssetUserData export from asset.Exports
+    /// 2. Excises its bytes from uexpData
+    /// 3. Remaps all FPackageIndex export references on remaining exports
+    /// 4. Removes orphaned imports (MaterialTagPlugin class/CDO/package)
+    /// </summary>
+    /// <returns>Updated uexpData with the export's bytes removed, or original if nothing stripped</returns>
+    private static byte[] StripMaterialTagExport(UAsset asset, byte[] uexpData, long headerSize)
+    {
+        // Find the MaterialTagAssetUserData export
+        int removeIdx = -1;
+        for (int i = 0; i < asset.Exports.Count; i++)
+        {
+            string? className = null;
+            try { className = asset.Exports[i].GetExportClassType()?.Value?.Value; } catch { }
+            if (className != null && className.Contains("MaterialTagAssetUserData", StringComparison.OrdinalIgnoreCase))
+            {
+                removeIdx = i;
+                break;
+            }
+        }
+
+        if (removeIdx < 0)
+            return uexpData; // Nothing to strip
+
+        var removedExport = asset.Exports[removeIdx];
+        long removedOffset = removedExport.SerialOffset - headerSize; // offset within uexpData
+        long removedSize = removedExport.SerialSize;
+
+        Console.Error.WriteLine($"[MaterialTags] Stripping MaterialTagAssetUserData export (index {removeIdx}, offset {removedOffset}, size {removedSize})");
+
+        // 1. Excise the export's bytes from uexpData
+        byte[] newUexpData = new byte[uexpData.Length - removedSize];
+        Array.Copy(uexpData, 0, newUexpData, 0, (int)removedOffset);
+        long afterRemoved = removedOffset + removedSize;
+        if (afterRemoved < uexpData.Length)
+        {
+            Array.Copy(uexpData, (int)afterRemoved, newUexpData, (int)removedOffset, (int)(uexpData.Length - afterRemoved));
+        }
+
+        // 2. Collect import indices used by the removed export (class, template, etc.)
+        //    These may be orphaned after removal (MaterialTagPlugin class/CDO/package)
+        var removedImportIndices = new HashSet<int>();
+        void CollectImportIndex(UAssetAPI.UnrealTypes.FPackageIndex idx)
+        {
+            if (idx != null && idx.IsImport())
+            {
+                int importIdx = -idx.Index - 1;
+                removedImportIndices.Add(importIdx);
+            }
+        }
+        CollectImportIndex(removedExport.ClassIndex);
+        CollectImportIndex(removedExport.TemplateIndex);
+        CollectImportIndex(removedExport.SuperIndex);
+
+        // Also collect the outer package import for MaterialTagPlugin classes
+        // Walk up the import chain to find /Script/MaterialTagPlugin package
+        foreach (int impIdx in removedImportIndices.ToList())
+        {
+            if (impIdx >= 0 && impIdx < asset.Imports.Count)
+            {
+                var imp = asset.Imports[impIdx];
+                if (imp.OuterIndex != null && imp.OuterIndex.IsImport())
+                {
+                    int outerIdx = -imp.OuterIndex.Index - 1;
+                    removedImportIndices.Add(outerIdx);
+                }
+            }
+        }
+
+        // Check if any remaining export still references these imports — if so, don't remove them
+        var usedImportIndices = new HashSet<int>();
+        for (int i = 0; i < asset.Exports.Count; i++)
+        {
+            if (i == removeIdx) continue;
+            var exp = asset.Exports[i];
+            void MarkUsed(UAssetAPI.UnrealTypes.FPackageIndex idx)
+            {
+                if (idx != null && idx.IsImport())
+                    usedImportIndices.Add(-idx.Index - 1);
+            }
+            MarkUsed(exp.ClassIndex);
+            MarkUsed(exp.TemplateIndex);
+            MarkUsed(exp.SuperIndex);
+            MarkUsed(exp.OuterIndex);
+        }
+        // Only remove imports that are truly orphaned
+        removedImportIndices.ExceptWith(usedImportIndices);
+
+        // 3. Remove the export from asset.Exports
+        asset.Exports.RemoveAt(removeIdx);
+
+        // 4. Remap FPackageIndex export references on all remaining exports
+        // Export FPackageIndex: Index = arrayIndex + 1 (1-based)
+        // Removed export had Index = removeIdx + 1
+        int removedPkgIndex = removeIdx + 1; // 1-based FPackageIndex for the removed export
+
+        void RemapIndex(ref UAssetAPI.UnrealTypes.FPackageIndex idx)
+        {
+            if (idx == null || idx.Index == 0) return;
+            if (idx.IsExport())
+            {
+                if (idx.Index == removedPkgIndex)
+                {
+                    // Points to removed export — null it out
+                    idx = new UAssetAPI.UnrealTypes.FPackageIndex(0);
+                }
+                else if (idx.Index > removedPkgIndex)
+                {
+                    // Shift down by 1
+                    idx = new UAssetAPI.UnrealTypes.FPackageIndex(idx.Index - 1);
+                }
+            }
+            // Import indices are unaffected (we don't actually remove imports from the array
+            // because that would require remapping all import indices everywhere including
+            // in serialized binary data — too risky. Orphaned imports are harmless.)
+        }
+
+        foreach (var exp in asset.Exports)
+        {
+            RemapIndex(ref exp.OuterIndex);
+            RemapIndex(ref exp.ClassIndex);
+            RemapIndex(ref exp.SuperIndex);
+            RemapIndex(ref exp.TemplateIndex);
+
+            // Remap dependency arrays
+            void RemapDepArray(List<UAssetAPI.UnrealTypes.FPackageIndex>? deps)
+            {
+                if (deps == null) return;
+                for (int d = deps.Count - 1; d >= 0; d--)
+                {
+                    var dep = deps[d];
+                    if (dep.IsExport())
+                    {
+                        if (dep.Index == removedPkgIndex)
+                        {
+                            deps.RemoveAt(d); // Remove dependency on stripped export
+                        }
+                        else if (dep.Index > removedPkgIndex)
+                        {
+                            deps[d] = new UAssetAPI.UnrealTypes.FPackageIndex(dep.Index - 1);
+                        }
+                    }
+                }
+            }
+            RemapDepArray(exp.CreateBeforeCreateDependencies);
+            RemapDepArray(exp.SerializationBeforeCreateDependencies);
+            RemapDepArray(exp.CreateBeforeSerializationDependencies);
+            RemapDepArray(exp.SerializationBeforeSerializationDependencies);
+
+            // Fix SerialOffset for exports that came after the removed one
+            if (exp.SerialOffset > removedExport.SerialOffset)
+            {
+                exp.SerialOffset -= removedSize;
+            }
+        }
+
+        Console.Error.WriteLine($"[MaterialTags] Stripped export: {asset.Exports.Count} exports remain, uexp {uexpData.Length} -> {newUexpData.Length} bytes");
+        return newUexpData;
+    }
+
     /// <summary>
     /// Re-serialize the asset's export data using UAssetAPI's proper serialization.
     /// This ensures types like StringTable get proper FGameplayTagContainer padding automatically.
