@@ -128,7 +128,9 @@ public class ZenConverter
         }
         
         // Load the legacy asset
-        var asset = LoadAsset(uassetPath, usmapPath);
+        // When material tags are enabled, we need full export parsing for SkeletalMesh detection.
+        // Otherwise, skip parsing to avoid schema errors for Blueprint assets.
+        var asset = LoadAsset(uassetPath, usmapPath, skipParsing: !_enableMaterialTags);
         asset.UseSeparateBulkDataFiles = true;
 
         // Log whether asset uses versioned or unversioned properties
@@ -1462,7 +1464,7 @@ public class ZenConverter
         // Verbose logging disabled for parallel performance
     }
 
-    private static UAsset LoadAsset(string filePath, string? usmapPath)
+    private static UAsset LoadAsset(string filePath, string? usmapPath, bool skipParsing = true)
     {
         UAssetAPI.Unversioned.Usmap? mappings = null;
         
@@ -1479,7 +1481,15 @@ public class ZenConverter
             }
         }
 
-        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings);
+        // When skipParsing is true, skip export parsing and schema pulling - ZenConverter only needs
+        // header data (imports, exports, names) and raw export bytes. This avoids
+        // "Failed to find a valid property for schema index" errors for Blueprint assets
+        // where parent BPs aren't on disk.
+        // When material tags are enabled, we need full parsing for SkeletalMesh exports.
+        var flags = skipParsing 
+            ? (CustomSerializationFlags.SkipParsingExports | CustomSerializationFlags.SkipPreloadDependencyLoading)
+            : CustomSerializationFlags.None;
+        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings, flags);
         asset.UseSeparateBulkDataFiles = true;
         return asset;
     }

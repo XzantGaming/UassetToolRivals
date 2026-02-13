@@ -1071,7 +1071,10 @@ public class AnimBlueprintZenConverter
             }
         }
 
-        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings);
+        // Skip export parsing and schema pulling - ZenConverter only needs header data and raw bytes.
+        // This avoids schema errors for Blueprint assets where parent BPs aren't on disk.
+        var flags = CustomSerializationFlags.SkipParsingExports | CustomSerializationFlags.SkipPreloadDependencyLoading;
+        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings, flags);
         asset.UseSeparateBulkDataFiles = true;
         return asset;
     }

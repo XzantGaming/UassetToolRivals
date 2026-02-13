@@ -613,6 +613,41 @@ namespace UAssetAPI
                     foundMappedPath = File.Exists(mappedPathOnDisk); // not worrying too much about race condition, we'll put a try catch later
                 }
 
+                // Fallback: walk up directory tree to find where the relative path exists
+                // This handles extracted assets without a Content folder (e.g. xzant-extracted\Marvel\...)
+                if (!foundMappedPath)
+                {
+                    var fixedRelPath = path.FixDirectorySeparatorsForDisk();
+                    // Get the first path component (e.g. "Marvel" from "Marvel\Characters\...")
+                    var firstComponent = fixedRelPath.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)[0];
+                    var currentDir = Directory.GetParent(fixedFilePath)?.FullName;
+                    while (currentDir != null && !foundMappedPath)
+                    {
+                        // Check if this directory contains the relative path
+                        mappedPathOnDisk = Path.Combine(currentDir, fixedRelPath);
+                        foundMappedPath = File.Exists(mappedPathOnDisk);
+
+                        // Also check if current dir name matches the first component
+                        // (e.g. currentDir ends with \Marvel, and relPath starts with Marvel\...)
+                        if (!foundMappedPath)
+                        {
+                            var dirName = Path.GetFileName(currentDir);
+                            if (string.Equals(dirName, firstComponent, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Strip the first component since the directory itself IS that component
+                                var subPath = fixedRelPath.Substring(firstComponent.Length).TrimStart(Path.DirectorySeparatorChar);
+                                if (!string.IsNullOrEmpty(subPath))
+                                {
+                                    mappedPathOnDisk = Path.Combine(currentDir, subPath);
+                                    foundMappedPath = File.Exists(mappedPathOnDisk);
+                                }
+                            }
+                        }
+
+                        currentDir = Directory.GetParent(currentDir)?.FullName;
+                    }
+                }
+
                 if (!foundMappedPath)
                 {
                     // let's see if it exists in the same directory

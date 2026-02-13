@@ -323,7 +323,9 @@ public class ZenToLegacyConverter
             uint objectFlags = zenExport.ObjectFlags;
             
             long serialSize = (long)zenExport.CookedSerialSize;
-            long serialOffset = (long)zenExport.CookedSerialOffset;
+            // Serial offset will be recalculated after all exports are added
+            // In Zen format, exports are in bundle order which may differ from sequential order
+            long serialOffset = -1;
             
             bool isNotForClient = zenExport.FilterFlags == EExportFilterFlags.NotForClient;
             bool isNotForServer = zenExport.FilterFlags == EExportFilterFlags.NotForServer;
@@ -356,6 +358,14 @@ public class ZenToLegacyConverter
             _builder.Exports.Add(newExport);
         }
         
+        // Recalculate serial offsets sequentially (matching retoc)
+        // Export bundle headers exist means exports need reordering
+        long currentExportSerialOffset = 0;
+        for (int i = 0; i < _builder.Exports.Count; i++)
+        {
+            _builder.Exports[i].SerialOffset = currentExportSerialOffset;
+            currentExportSerialOffset += _builder.Exports[i].SerialSize;
+        }
     }
 
     private void ResolveExportDependencies()
@@ -851,38 +861,124 @@ public class ZenToLegacyConverter
 
     private byte[] RebuildExportData()
     {
-        // Strip the header from zen data
         int headerSize = (int)_zenPackage.Summary.HeaderSize;
+        
+        // If we have export bundle headers, exports are in bundle order and need reordering
+        // This is the case for all UE5.0+ packages
+        if (_zenPackage.ExportBundleHeaders.Count > 0)
+        {
+            return RebuildExportDataFromBundles();
+        }
+        
+        // Fallback: no bundle headers, just strip the header
         int dataLength = _rawPackageData.Length - headerSize;
         
-        // Check if the data already has the PACKAGE_FILE_TAG footer
-        bool hasFooter = false;
-        if (dataLength >= 4)
+        // Calculate total export serial size + footer
+        long totalExportSize = 0;
+        foreach (var export in _builder.Exports)
+            totalExportSize += export.SerialSize;
+        int totalFileSize = (int)totalExportSize + 4; // +4 for PACKAGE_FILE_TAG footer
+        
+        byte[] result = new byte[totalFileSize];
+        Array.Copy(_rawPackageData, headerSize, result, 0, Math.Min(dataLength, (int)totalExportSize));
+        
+        // Write PACKAGE_FILE_TAG footer
+        result[totalFileSize - 4] = 0xC1;
+        result[totalFileSize - 3] = 0x83;
+        result[totalFileSize - 2] = 0x2A;
+        result[totalFileSize - 1] = 0x9E;
+        return result;
+    }
+    
+    /// <summary>
+    /// Rebuild export data by iterating through export bundle headers and entries,
+    /// copying each export's data from its bundle position to its sequential position.
+    /// This is critical because Zen format organizes exports in bundles where the order
+    /// can differ from the export map order. Matches retoc's rebuild_asset_export_data_internal.
+    /// </summary>
+    private byte[] RebuildExportDataFromBundles()
+    {
+        int headerSize = (int)_zenPackage.Summary.HeaderSize;
+        
+        // Calculate total export serial size
+        long totalExportSerialSize = 0;
+        foreach (var export in _builder.Exports)
+            totalExportSerialSize += export.SerialSize;
+        
+        // Allocate result buffer: exports + PACKAGE_FILE_TAG footer
+        int totalFileSize = (int)totalExportSerialSize + 4;
+        byte[] result = new byte[totalFileSize];
+        
+        int endOfLastExportBundle = 0;
+        int currentPackageOffset = headerSize; // For legacy UE4.27 packages
+        
+        for (int bundleIndex = 0; bundleIndex < _zenPackage.ExportBundleHeaders.Count; bundleIndex++)
         {
-            uint lastDword = BitConverter.ToUInt32(_rawPackageData, _rawPackageData.Length - 4);
-            hasFooter = (lastDword == 0x9E2A83C1);
+            var bundleHeader = _zenPackage.ExportBundleHeaders[bundleIndex];
+            
+            // Determine the starting serial offset for this bundle
+            int currentSerialOffset;
+            if (bundleHeader.SerialOffset != ulong.MaxValue)
+            {
+                // UE5.0+: explicit serial offset relative to header
+                currentSerialOffset = headerSize + (int)bundleHeader.SerialOffset;
+            }
+            else
+            {
+                // Legacy UE4.27: sequential from current position
+                currentSerialOffset = currentPackageOffset;
+            }
+            
+            for (uint i = 0; i < bundleHeader.EntryCount; i++)
+            {
+                int entryIndex = (int)bundleHeader.FirstEntryIndex + (int)i;
+                if (entryIndex >= _zenPackage.ExportBundleEntries.Count) break;
+                
+                var bundleEntry = _zenPackage.ExportBundleEntries[entryIndex];
+                
+                // Only Serialize commands encode export data blobs
+                if (bundleEntry.CommandType == EExportCommandType.Serialize)
+                {
+                    int exportIndex = (int)bundleEntry.LocalExportIndex;
+                    if (exportIndex >= _builder.Exports.Count) continue;
+                    
+                    int exportSerialSize = (int)_builder.Exports[exportIndex].SerialSize;
+                    long exportTargetOffset = _builder.Exports[exportIndex].SerialOffset;
+                    
+                    int sourceStart = currentSerialOffset;
+                    int sourceEnd = sourceStart + exportSerialSize;
+                    
+                    // Bounds check
+                    if (sourceEnd <= _rawPackageData.Length && exportTargetOffset + exportSerialSize <= totalExportSerialSize)
+                    {
+                        Array.Copy(_rawPackageData, sourceStart, result, (int)exportTargetOffset, exportSerialSize);
+                    }
+                    
+                    currentSerialOffset += exportSerialSize;
+                }
+            }
+            
+            endOfLastExportBundle = Math.Max(endOfLastExportBundle, currentSerialOffset);
+            currentPackageOffset = currentSerialOffset;
         }
         
-        if (hasFooter)
+        // Copy any additional data past the last export bundle (rare but handle it)
+        if (endOfLastExportBundle < _rawPackageData.Length)
         {
-            // Data already has footer, just copy it
-            byte[] result = new byte[dataLength];
-            Array.Copy(_rawPackageData, headerSize, result, 0, dataLength);
-            return result;
+            int additionalDataLength = _rawPackageData.Length - endOfLastExportBundle;
+            if (additionalDataLength > 0 && (int)totalExportSerialSize + additionalDataLength <= result.Length - 4)
+            {
+                Array.Copy(_rawPackageData, endOfLastExportBundle, result, (int)totalExportSerialSize, additionalDataLength);
+            }
         }
-        else
-        {
-            // Data doesn't have footer (e.g., from mod IoStore where ZenConverter stripped it)
-            // Add the PACKAGE_FILE_TAG footer
-            byte[] result = new byte[dataLength + 4];
-            Array.Copy(_rawPackageData, headerSize, result, 0, dataLength);
-            // Write footer at end
-            result[dataLength] = 0xC1;
-            result[dataLength + 1] = 0x83;
-            result[dataLength + 2] = 0x2A;
-            result[dataLength + 3] = 0x9E;
-            return result;
-        }
+        
+        // Write PACKAGE_FILE_TAG footer
+        result[totalFileSize - 4] = 0xC1;
+        result[totalFileSize - 3] = 0x83;
+        result[totalFileSize - 2] = 0x2A;
+        result[totalFileSize - 1] = 0x9E;
+        
+        return result;
     }
 
     private int ResolveLocalPackageObject(FPackageObjectIndex packageObject)
