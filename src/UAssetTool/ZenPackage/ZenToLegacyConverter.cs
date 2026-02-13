@@ -73,7 +73,7 @@ public class ZenToLegacyConverter
     /// <summary>
     /// Convert Zen package to legacy format
     /// </summary>
-    public LegacyAssetBundle Convert()
+    public LegacyAssetBundle Convert(bool skipBulkData = false)
     {
         BeginBuildSummary();
         CopyPackageSections();
@@ -85,7 +85,7 @@ public class ZenToLegacyConverter
         var bundle = SerializeAsset();
         
         // Extract bulk data from IoStore if available
-        if (_context != null && _packageId != 0)
+        if (!skipBulkData && _context != null && _packageId != 0)
         {
             byte[]? bulkData = _context.ReadBulkData(_packageId);
             if (bulkData != null && bulkData.Length > 0)

@@ -15,6 +15,7 @@ public class FZenPackageContext : IDisposable
 {
     private readonly List<IoStoreReader> _containers = new();
     private readonly ConcurrentDictionary<ulong, CachedPackage> _packageCache = new();
+    private readonly object _loadLock = new();
     private readonly Dictionary<ulong, (int ContainerIndex, FIoChunkId ChunkId)> _packageIdToChunk = new();
     private readonly Dictionary<ulong, string> _packageIdToPath = new(); // PackageId -> full package path
     private readonly Dictionary<ulong, List<ulong>> _packageExportHashes = new(); // PackageId -> list of public export hashes
@@ -336,43 +337,46 @@ public class FZenPackageContext : IDisposable
     /// </summary>
     public FZenPackageHeader? GetPackage(ulong packageId)
     {
-        // Check cache first
+        // Check cache first (lock-free fast path)
         if (_packageCache.TryGetValue(packageId, out var cached))
         {
             return cached.Header;
         }
         
-        // Find and load the package
-        if (!_packageIdToChunk.TryGetValue(packageId, out var location))
+        // Slow path: load from disk under lock (IoStoreReader isn't thread-safe)
+        lock (_loadLock)
         {
-            return null;
-        }
-        
-        try
-        {
-            var reader = _containers[location.ContainerIndex];
-            byte[] rawData = reader.ReadChunk(location.ChunkId);
+            // Double-check after acquiring lock
+            if (_packageCache.TryGetValue(packageId, out cached))
+                return cached.Header;
             
-            var header = FZenPackageHeader.Deserialize(rawData, ContainerHeaderVersion);
+            if (!_packageIdToChunk.TryGetValue(packageId, out var location))
+                return null;
             
-            // Cache the package
-            var cachedPackage = new CachedPackage
+            try
             {
-                Header = header,
-                RawData = rawData,
-                PackageId = packageId
-            };
-            _packageCache[packageId] = cachedPackage;
-            
-            // Index public export hashes for this package
-            IndexPackageExports(packageId, header);
-            
-            return header;
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[Context] Failed to load package {packageId:X16}: {ex.Message}");
-            return null;
+                var reader = _containers[location.ContainerIndex];
+                byte[] rawData = reader.ReadChunk(location.ChunkId);
+                
+                var header = FZenPackageHeader.Deserialize(rawData, ContainerHeaderVersion);
+                
+                var cachedPackage = new CachedPackage
+                {
+                    Header = header,
+                    RawData = rawData,
+                    PackageId = packageId
+                };
+                _packageCache[packageId] = cachedPackage;
+                
+                IndexPackageExports(packageId, header);
+                
+                return header;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[Context] Failed to load package {packageId:X16}: {ex.Message}");
+                return null;
+            }
         }
     }
 

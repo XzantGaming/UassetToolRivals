@@ -2125,6 +2125,20 @@ namespace UAssetAPI
             {
                 bool skipParsingExports = CustomSerializationFlags.HasFlag(CustomSerializationFlags.SkipParsingExports);
 
+                // SCHEMA REFERENCES FIX
+                // Aggressively pull schemas for all dependencies (Packages starting with /Game/)
+                // This covers parent classes, components, and other referenced blueprints.
+                if (Imports != null)
+                {
+                    foreach (var import in Imports)
+                    {
+                        if (import.ClassName?.Value?.Value == "Package" && import.ObjectName?.Value?.Value?.StartsWith("/Game/") == true)
+                        {
+                            this.PullSchemasFromAnotherAsset(import.ObjectName);
+                        }
+                    }
+                }
+
                 // load dependencies, if needed and available
                 Dictionary<int, IList<int>> depsMap = new Dictionary<int, IList<int>>();
                 for (int i = 0; i < Exports.Count; i++)
