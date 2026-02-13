@@ -248,6 +248,7 @@ namespace UAssetAPI.Unversioned
     {
         public string Name;
         public string SuperType;
+        public string SuperTypeModulePath;
         public ushort PropCount;
         public string ModulePath;
         /// <summary>
@@ -278,10 +279,11 @@ namespace UAssetAPI.Unversioned
             }
         }
 
-        public UsmapSchema(string name, string superType, ushort propCount, ConcurrentDictionary<int, UsmapProperty> props, bool isCaseInsensitive, bool fromAsset = false)
+        public UsmapSchema(string name, string superType, ushort propCount, ConcurrentDictionary<int, UsmapProperty> props, bool isCaseInsensitive, string superTypeModulePath, bool fromAsset = false)
         {
             Name = name;
             SuperType = superType;
+            SuperTypeModulePath = superTypeModulePath;
             PropCount = propCount;
             properties = props;
             FromAsset = fromAsset;
@@ -651,7 +653,9 @@ namespace UAssetAPI.Unversioned
                 }
             }
 
-            return new UsmapSchema(exp.ObjectName.ToString(), exp.SuperStruct.IsImport() ? exp.SuperStruct.ToImport(exp.Asset).ObjectName.ToString() : null, (ushort)res.Count, res, isCaseInsensitive, true);
+            string ssName = exp.SuperStruct.IsImport() ? exp.SuperStruct.ToImport(exp.Asset).ObjectName.ToString() : null;
+            string ssPath = (exp.SuperStruct.IsImport() && exp.SuperStruct.ToImport(exp.Asset).OuterIndex.IsImport()) ? exp.SuperStruct.ToImport(exp.Asset).OuterIndex.ToImport(exp.Asset).ObjectName.ToString() : null;
+            return new UsmapSchema(exp.ObjectName.ToString(), ssName, (ushort)res.Count, res, isCaseInsensitive, ssPath, true);
         }
 
         /// <summary>
@@ -1030,7 +1034,7 @@ namespace UAssetAPI.Unversioned
                     }
                 }
 
-                var newSchema = new UsmapSchema(schemaName, schemaSuperName, numProps, props, this.AreFNamesCaseInsensitive);
+                var newSchema = new UsmapSchema(schemaName, schemaSuperName, numProps, props, this.AreFNamesCaseInsensitive, null);
                 schemaIndexMap[i] = newSchema;
 
                 if (SkipBlueprintSchemas && schemaName.Length >= 2 && schemaName.EndsWith("_C")) continue;
