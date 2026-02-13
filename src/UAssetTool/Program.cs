@@ -2478,64 +2478,72 @@ public partial class Program
         var result = new Dictionary<string, object?>
         {
             ["name"] = prop.Name?.ToString(),
-            ["type"] = prop.PropertyType.ToString(),
+            ["type"] = prop.PropertyType?.ToString(),
             ["array_index"] = prop.ArrayIndex
         };
         
-        // Add value based on property type
-        if (prop is IntPropertyData intProp)
-            result["value"] = intProp.Value;
-        else if (prop is FloatPropertyData floatProp)
-            result["value"] = floatProp.Value;
-        else if (prop is BoolPropertyData boolProp)
-            result["value"] = boolProp.Value;
-        else if (prop is StrPropertyData strProp)
-            result["value"] = strProp.Value?.ToString();
-        else if (prop is NamePropertyData nameProp)
-            result["value"] = nameProp.Value?.ToString();
-        else if (prop is ObjectPropertyData objProp)
-            result["value"] = objProp.Value.Index;
-        else if (prop is SoftObjectPropertyData softObjProp)
-            result["value"] = softObjProp.Value.AssetPath.ToString();
-        else if (prop is EnumPropertyData enumProp)
-            result["value"] = enumProp.Value?.ToString();
-        else if (prop is BytePropertyData byteProp)
-            result["value"] = byteProp.ByteType == BytePropertyType.Byte ? byteProp.Value : byteProp.EnumValue?.ToString();
-        else if (prop is ArrayPropertyData arrayProp)
+        try
         {
-            var items = new List<object?>();
-            if (arrayProp.Value != null && depth < 3)
+            // Add value based on property type
+            if (prop is IntPropertyData intProp)
+                result["value"] = intProp.Value;
+            else if (prop is FloatPropertyData floatProp)
+                result["value"] = floatProp.Value;
+            else if (prop is BoolPropertyData boolProp)
+                result["value"] = boolProp.Value;
+            else if (prop is StrPropertyData strProp)
+                result["value"] = strProp.Value?.ToString();
+            else if (prop is NamePropertyData nameProp)
+                result["value"] = nameProp.Value?.ToString();
+            else if (prop is ObjectPropertyData objProp)
+                result["value"] = objProp.Value?.Index;
+            else if (prop is SoftObjectPropertyData softObjProp)
+                result["value"] = softObjProp.Value.AssetPath.ToString();
+            else if (prop is EnumPropertyData enumProp)
+                result["value"] = enumProp.Value?.ToString();
+            else if (prop is BytePropertyData byteProp)
+                result["value"] = byteProp.ByteType == BytePropertyType.Byte ? byteProp.Value : byteProp.EnumValue?.ToString();
+            else if (prop is ArrayPropertyData arrayProp)
             {
-                foreach (var item in arrayProp.Value)
+                var items = new List<object?>();
+                if (arrayProp.Value != null && depth < 3)
                 {
-                    items.Add(SerializeProperty(item, depth + 1));
+                    foreach (var item in arrayProp.Value)
+                    {
+                        items.Add(SerializeProperty(item, depth + 1));
+                    }
                 }
+                result["value"] = items;
+                result["array_type"] = arrayProp.ArrayType?.ToString();
             }
-            result["value"] = items;
-            result["array_type"] = arrayProp.ArrayType?.ToString();
-        }
-        else if (prop is StructPropertyData structProp)
-        {
-            var structItems = new List<object?>();
-            if (structProp.Value != null && depth < 3)
+            else if (prop is StructPropertyData structProp)
             {
-                foreach (var item in structProp.Value)
+                var structItems = new List<object?>();
+                if (structProp.Value != null && depth < 3)
                 {
-                    structItems.Add(SerializeProperty(item, depth + 1));
+                    foreach (var item in structProp.Value)
+                    {
+                        structItems.Add(SerializeProperty(item, depth + 1));
+                    }
                 }
+                result["value"] = structItems;
+                result["struct_type"] = structProp.StructType?.ToString();
             }
-            result["value"] = structItems;
-            result["struct_type"] = structProp.StructType?.ToString();
+            else if (prop is MapPropertyData mapProp)
+            {
+                result["value"] = $"[Map with {mapProp.Value?.Count ?? 0} entries]";
+                result["key_type"] = mapProp.KeyType?.ToString();
+                result["value_type"] = mapProp.ValueType?.ToString();
+            }
+            else
+            {
+                try { result["value"] = prop.ToString(); }
+                catch { result["value"] = $"[{prop.GetType().Name}]"; }
+            }
         }
-        else if (prop is MapPropertyData mapProp)
+        catch (Exception)
         {
-            result["value"] = $"[Map with {mapProp.Value?.Count ?? 0} entries]";
-            result["key_type"] = mapProp.KeyType?.ToString();
-            result["value_type"] = mapProp.ValueType?.ToString();
-        }
-        else
-        {
-            result["value"] = prop.ToString();
+            result["value"] = $"[Error serializing {prop.GetType().Name}]";
         }
         
         return result;
@@ -2798,6 +2806,13 @@ public partial class Program
                 return new UAssetResponse { Success = false, Message = "Failed to deserialize JSON" };
             
             asset.Mappings = mappings;
+            asset.FilePath = Path.GetFullPath(filePath);
+            PreloadReferencedAssetsForSchemas(asset);
+            
+            string? outputDir = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(outputDir))
+                Directory.CreateDirectory(outputDir);
+            
             asset.Write(filePath);
             
             return new UAssetResponse { Success = true, Message = $"Asset imported from JSON and saved to {filePath}" };
