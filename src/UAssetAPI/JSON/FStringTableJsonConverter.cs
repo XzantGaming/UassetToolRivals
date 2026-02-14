@@ -2,6 +2,7 @@
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using UAssetAPI.UnrealTypes;
 using UAssetAPI.ExportTypes;
@@ -26,6 +27,8 @@ namespace UAssetAPI.JSON
             writer.WriteStartObject();
             writer.WritePropertyName("TableNamespace");
             writer.WriteValue(realVal.TableNamespace?.Value);
+            writer.WritePropertyName("HasGameplayTags");
+            writer.WriteValue(realVal.HasGameplayTags);
             writer.WritePropertyName("Value");
             writer.WriteStartArray();
             foreach (object key in keys)
@@ -38,6 +41,15 @@ namespace UAssetAPI.JSON
                 writer.WriteEndArray();
             }
             writer.WriteEndArray();
+
+            if (realVal.HasGameplayTags)
+            {
+                writer.WritePropertyName("EntryGameplayTags");
+                serializer.Serialize(writer, realVal.EntryGameplayTags);
+                writer.WritePropertyName("TrailingTagContainer");
+                serializer.Serialize(writer, realVal.TrailingTagContainer);
+            }
+
             writer.WriteEndObject();
         }
 
@@ -51,14 +63,32 @@ namespace UAssetAPI.JSON
             var dictionary = new FStringTable();
 
             JObject tableJson = JObject.Load(reader);
-            dictionary.TableNamespace = new FString(tableJson["TableNamespace"].ToObject<string>());
-            JArray tokens = (JArray)tableJson["Value"];
+            dictionary.TableNamespace = new FString(tableJson["TableNamespace"]?.ToObject<string>());
 
+            JToken hasTagsToken = tableJson["HasGameplayTags"];
+            dictionary.HasGameplayTags = hasTagsToken != null && hasTagsToken.ToObject<bool>();
+
+            JArray tokens = (JArray)tableJson["Value"];
             foreach (var eachToken in tokens)
             {
                 FString key = eachToken[0].ToObject<FString>(serializer);
                 FString value = eachToken[1].ToObject<FString>(serializer);
-                dictionary.Add(key, value);
+                if (key == null) continue;
+                if (dictionary.ContainsKey(key))
+                    dictionary[key] = value;
+                else
+                    dictionary.Add(key, value);
+            }
+
+            if (dictionary.HasGameplayTags)
+            {
+                JToken entryTagsToken = tableJson["EntryGameplayTags"];
+                if (entryTagsToken != null)
+                    dictionary.EntryGameplayTags = entryTagsToken.ToObject<List<FGameplayTagContainer>>(serializer);
+
+                JToken trailingToken = tableJson["TrailingTagContainer"];
+                if (trailingToken != null)
+                    dictionary.TrailingTagContainer = trailingToken.ToObject<FGameplayTagContainer>(serializer);
             }
 
             return dictionary;
