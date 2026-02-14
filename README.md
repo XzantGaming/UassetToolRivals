@@ -14,6 +14,7 @@ A unified command-line tool for parsing, editing, and converting Unreal Engine a
 - **IoStore Extraction** - Extract assets from game IoStore containers with dependency resolution
 - **PAK Extraction** - Extract assets from legacy PAK files with encryption and compression support
 - **Marvel Rivals Support** - Game-specific fixes for FGameplayTagContainer, material slots, and asset serialization
+- **MaterialTag Injection** - Automatically reads MaterialTagAssetUserData from SkeletalMesh assets and injects per-slot gameplay tags during mod creation
 - **NiagaraSystem Editing** - Modify particle effect colors with structured parsing
 - **Blueprint Analysis** - Scan ChildBP assets for parameter redirects (IsEnemy detection)
 - **GUI Backend** - JSON stdin/stdout API for frontend integration
@@ -59,8 +60,8 @@ UAssetTool fix <uasset_path> [usmap_path]
 # Batch detect assets
 UAssetTool batch_detect <directory> [usmap_path]
 
-# Convert legacy to Zen format
-UAssetTool to_zen <uasset_path> [usmap_path]
+# Convert legacy to Zen format (MaterialTag injection enabled by default)
+UAssetTool to_zen <uasset_path> [usmap_path] [--no-material-tags]
 
 # Get SkeletalMesh detailed info
 UAssetTool skeletal_mesh_info <uasset_path> <usmap_path>
@@ -122,13 +123,13 @@ Supports:
 
 ```bash
 # Extract assets from game IoStore to legacy format
-UAssetTool extract_iostore_legacy <utoc_path> <output_dir> [options]
+UAssetTool extract_iostore_legacy <paks_directory> <output_dir> [options]
 
 # Create IoStore mod bundle from legacy assets
-UAssetTool create_mod_iostore <output_base> [options] <uasset_files...>
+UAssetTool create_mod_iostore <output_base> [options] <inputs...>
 
 # Inspect Zen package structure
-UAssetTool inspect_zen <ucas_path>
+UAssetTool inspect_zen <zen_asset_path>
 
 # Extract script objects database
 UAssetTool extract_script_objects <paks_path> <output_file>
@@ -141,6 +142,9 @@ UAssetTool is_iostore_compressed <utoc_path>
 
 # Calculate CityHash for a path
 UAssetTool cityhash <path_string>
+
+# Clone/repackage a mod IoStore
+UAssetTool clone_mod_iostore <utoc_path> <output_base>
 ```
 
 ### Blueprint Analysis
@@ -283,28 +287,36 @@ UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --mod "C:/Mods/mod
 Create IoStore mod bundles from legacy assets for injection into Marvel Rivals:
 
 ```bash
-# Create mod bundle from single asset
+# Create mod bundle from single asset (MaterialTag injection is automatic)
 UAssetTool create_mod_iostore "output/MyMod" \
-    --usmap "path/to/mappings.usmap" \
     "Content/Marvel/Characters/1014/Meshes/SK_1014_1014001.uasset"
 
 # Create mod bundle from multiple assets
 UAssetTool create_mod_iostore "output/MyMod" \
-    --usmap "path/to/mappings.usmap" \
     "Content/Marvel/Textures/T_MyTexture.uasset" \
     "Content/Marvel/Materials/MI_MyMaterial.uasset"
 
+# Create from a directory (recursively finds all .uasset files)
+UAssetTool create_mod_iostore "output/MyMod" "Content/Marvel/Characters/1014/"
+
+# Create from a .pak file (extracts and converts automatically)
+UAssetTool create_mod_iostore "output/MyMod" "my_legacy_mod.pak"
+
 # Create without compression (faster, larger files)
-UAssetTool create_mod_iostore "output/MyMod" \
-    --usmap "path/to/mappings.usmap" \
-    --no-compress \
+UAssetTool create_mod_iostore "output/MyMod" --no-compress \
     "Content/Marvel/Characters/1014/Meshes/SK_1014_1014001.uasset"
 ```
 
 **Options:**
-- `--usmap <path>` - Path to .usmap mappings file (required)
-- `--aes <key>` - AES encryption key (optional)
-- `--no-compress` - Disable Oodle compression (faster creation)
+- `--usmap <path>` - Path to .usmap file for property parsing
+- `--mount-point <path>` - Mount point (default: `../../../`)
+- `--game-path <prefix>` - Game path prefix (default: `Marvel/Content/`)
+- `--compress` - Enable Oodle compression (default: enabled)
+- `--no-compress` - Disable compression (faster creation)
+- `--encrypt` - Enable AES encryption
+- `--aes-key <hex>` - AES key in hex format
+- `--pak-aes <hex>` - AES key for decrypting input .pak files
+- `--no-material-tags` - Disable MaterialTag injection (enabled by default)
 
 **Output Files:**
 - `<output_base>.utoc` - Table of Contents
@@ -570,6 +582,7 @@ This fork includes custom extensions beyond standard UAssetAPI:
 
 ### Mesh Handling
 - **SkeletalMesh**: FGameplayTagContainer padding (Marvel Rivals specific)
+- **MaterialTag Injection**: Reads `MaterialTagAssetUserData` exports and injects per-slot `FGameplayTagContainer` data into `FSkeletalMaterial` during Zen conversion
 - **StaticMesh**: FStaticMaterial struct handling
 - SerialSize recalculation for modified meshes
 - Material slot padding for game compatibility
@@ -584,6 +597,8 @@ This fork includes custom extensions beyond standard UAssetAPI:
 
 ### Marvel Rivals Specific
 - FGameplayTagContainer serialization (empty container = 4 bytes)
+- MaterialTag injection: per-slot gameplay tags from UE plugin → game-ready FSkeletalMaterial
+- `/Script/MaterialTagPlugin` import remapping to `/Script/Engine.AssetUserData`
 - PackageGuid zeroing for cooked assets
 - CookedHeaderSize calculation for preload data
 - Script object hash lookup using full paths

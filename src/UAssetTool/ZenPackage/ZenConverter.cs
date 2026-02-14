@@ -25,22 +25,23 @@ public class ZenConverter
     private static readonly Dictionary<string, UAssetAPI.Unversioned.Usmap> _usmapCache = new();
     private static readonly object _usmapLock = new();
     
-    // [EXPERIMENTAL] When true, reads MaterialTagAssetUserData from SkeletalMesh packages
+    // When true, reads MaterialTagAssetUserData from SkeletalMesh packages
     // and injects per-slot FGameplayTagContainer data into FSkeletalMaterial during Zen conversion.
     // This does NOT override the original empty-tag padding logic — it runs as an additional step.
-    // Enable via --material-tags CLI flag.
-    private static bool _enableMaterialTags = false;
+    // Enabled by default. Disable via --no-material-tags CLI flag if needed.
+    private static bool _enableMaterialTags = true;
     
     /// <summary>
-    /// [EXPERIMENTAL] Enable or disable MaterialTagAssetUserData reading.
+    /// Enable or disable MaterialTagAssetUserData reading.
     /// When enabled, SkeletalMesh packages with MaterialTagAssetUserData will have
     /// per-slot gameplay tags injected into FSkeletalMaterial during Zen conversion.
+    /// Enabled by default.
     /// </summary>
     public static void SetMaterialTagsEnabled(bool enabled)
     {
         _enableMaterialTags = enabled;
-        if (enabled)
-            Console.Error.WriteLine("[ZenConverter] [EXPERIMENTAL] MaterialTags injection ENABLED");
+        if (!enabled)
+            Console.Error.WriteLine("[ZenConverter] MaterialTags injection DISABLED");
     }
     
     /// <summary>
@@ -199,7 +200,7 @@ public class ZenConverter
                 skeletalExport = null;
         }
 
-        // [EXPERIMENTAL] MaterialTags: read tags and inject into materials.
+        // MaterialTags: read tags and inject into materials.
         // The MaterialTagAssetUserData export is kept in the package (can't strip it —
         // Extras raw binary has FPackageIndex referencing MorphTargets by export index).
         // Instead, its class import is remapped to /Script/Engine.AssetUserData in BuildImportMap.
@@ -717,7 +718,7 @@ public class ZenConverter
             // Build the full object path to determine the package
             string objectPath = BuildScriptObjectPath(asset, import);
             
-            // [EXPERIMENTAL] MaterialTags: replace /Script/MaterialTagPlugin imports with
+            // MaterialTags: replace /Script/MaterialTagPlugin imports with
             // /Script/Engine equivalents. The game doesn't know about MaterialTagPlugin —
             // we can't strip the export (Extras raw binary has FPackageIndex we can't remap)
             // so instead we remap the class to the engine-native base class AssetUserData.

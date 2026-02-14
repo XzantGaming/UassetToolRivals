@@ -10,7 +10,7 @@ using UAssetAPI.PropertyTypes;
 namespace UAssetTool.ZenPackage;
 
 /// <summary>
-/// [EXPERIMENTAL] Reads MaterialTagAssetUserData from a SkeletalMesh package and extracts
+/// Reads MaterialTagAssetUserData from a SkeletalMesh package and extracts
 /// per-slot FGameplayTagContainer data. Used to inject tags into FSkeletalMaterial during
 /// Zen conversion when the MaterialTagPlugin was used in the UE Editor.
 /// 

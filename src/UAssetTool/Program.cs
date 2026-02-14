@@ -97,27 +97,46 @@ public partial class Program
         Console.WriteLine("Usage: UAssetTool <command> [args]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.WriteLine("  detect <uasset_path> [usmap_path]       - Detect asset type");
-        Console.WriteLine("  fix <uasset_path> [usmap_path]          - Fix SerializeSize for meshes");
-        Console.WriteLine("  batch_detect <directory> [usmap_path]   - Detect all assets in directory");
-        Console.WriteLine("  dump <uasset_path> <usmap_path>         - Dump detailed asset info");
-        Console.WriteLine("  to_zen <uasset_path> [usmap_path]       - Convert legacy asset to Zen format");
-        Console.WriteLine("  to_iostore <output_path> <zen_files...> - Create IoStore from Zen packages");
-        Console.WriteLine("  inspect_zen <zen_asset_path>            - Inspect Zen-formatted asset");
-        Console.WriteLine("  create_pak <output.pak> <files...>      - Create encrypted PAK file");
-        Console.WriteLine("  create_companion_pak <output.pak> <file_list...> - Create companion PAK for IoStore");
-        Console.WriteLine("  create_iostore_bundle <output_base> <files...>   - Create complete IoStore bundle (.utoc/.ucas/.pak)");
-        Console.WriteLine("  create_mod_iostore <output_base> <uasset_files...> - Convert legacy assets to Zen and create IoStore bundle");
-        Console.WriteLine("  is_iostore_compressed <utoc_path>              - Check if IoStore is compressed");
-        Console.WriteLine("  extract_script_objects <paks_path> <output>    - Extract ScriptObjects.bin from game");
-        Console.WriteLine("  recompress_iostore <utoc_path>                 - Recompress IoStore with Oodle");
-        Console.WriteLine("  from_json <json_path> <output_uasset> [usmap]  - Convert JSON back to uasset");
-        Console.WriteLine("  to_json <path> [usmap] [output_dir]            - Convert uasset to JSON (supports directory for batch)");
-        Console.WriteLine("  extract_pak <pak_path> <output_dir> [options]   - Extract assets from legacy PAK file");
         Console.WriteLine();
-        Console.WriteLine("Zen Conversion Pipeline (2 steps for debugging):");
-        Console.WriteLine("  Step 1: to_zen    - Legacy .uasset/.uexp -> .uzenasset");
-        Console.WriteLine("  Step 2: to_iostore - .uzenasset files -> .utoc/.ucas");
+        Console.WriteLine("  Asset Inspection:");
+        Console.WriteLine("    detect <uasset_path> [usmap_path]       - Detect asset type");
+        Console.WriteLine("    batch_detect <directory> [usmap_path]   - Detect all assets in directory");
+        Console.WriteLine("    dump <uasset_path> <usmap_path>         - Dump detailed asset info");
+        Console.WriteLine("    skeletal_mesh_info <uasset> <usmap>     - Get SkeletalMesh material/bone info");
+        Console.WriteLine();
+        Console.WriteLine("  Asset Editing:");
+        Console.WriteLine("    fix <uasset_path> [usmap_path]          - Fix SerializeSize for meshes");
+        Console.WriteLine("    to_json <path> [usmap] [output_dir]     - Convert uasset to JSON (file or directory)");
+        Console.WriteLine("    from_json <json> <output_uasset> [usmap] - Convert JSON back to uasset");
+        Console.WriteLine();
+        Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
+        Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
+        Console.WriteLine("    to_zen <uasset> [usmap] [--no-material-tags] - Convert legacy to Zen format");
+        Console.WriteLine("    to_iostore <output> <zen_files...>       - Create IoStore from Zen packages");
+        Console.WriteLine("    create_pak <output.pak> <files...>       - Create encrypted PAK file");
+        Console.WriteLine("    create_companion_pak <output.pak> <files...> - Create companion PAK for IoStore");
+        Console.WriteLine("    create_iostore_bundle <output> <files...> - Create complete IoStore bundle");
+        Console.WriteLine();
+        Console.WriteLine("  Extraction:");
+        Console.WriteLine("    extract_iostore_legacy <paks> <output> [options] - Extract IoStore to legacy format");
+        Console.WriteLine("    extract_pak <pak_path> <output_dir> [options]    - Extract legacy PAK file");
+        Console.WriteLine("    extract_script_objects <paks> <output>           - Extract ScriptObjects.bin");
+        Console.WriteLine();
+        Console.WriteLine("  IoStore Utilities:");
+        Console.WriteLine("    inspect_zen <zen_asset_path>             - Inspect Zen package structure");
+        Console.WriteLine("    is_iostore_compressed <utoc_path>        - Check if IoStore is compressed");
+        Console.WriteLine("    recompress_iostore <utoc_path>           - Recompress IoStore with Oodle");
+        Console.WriteLine("    cityhash <path_string>                   - Calculate CityHash64 for a path");
+        Console.WriteLine("    clone_mod_iostore <utoc> <output>        - Clone/repackage a mod IoStore");
+        Console.WriteLine();
+        Console.WriteLine("  NiagaraSystem (Particle Effects):");
+        Console.WriteLine("    niagara_list <directory> [usmap]         - List NS files with color info");
+        Console.WriteLine("    niagara_details <asset> [usmap] [--full] - Get color curve details");
+        Console.WriteLine("    niagara_edit <asset> <R> <G> <B> [A] [options] - Edit particle colors");
+        Console.WriteLine("    modify_colors <directory> <usmap> [R G B A]    - Batch modify colors");
+        Console.WriteLine();
+        Console.WriteLine("  Blueprint Analysis:");
+        Console.WriteLine("    scan_childbp_isenemy <paks_dir> [--aes <key>]  - Scan for IsEnemy parameter usage");
         Console.WriteLine();
         Console.WriteLine("Interactive mode: Run without arguments to use JSON stdin/stdout");
         return 0;
@@ -127,18 +146,17 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [usmap_path] [--material-tags]");
+            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [usmap_path] [--no-material-tags]");
             return 1;
         }
 
         string uassetPath = args[1];
         string? usmapPath = null;
-        bool materialTags = false;
         
         for (int i = 2; i < args.Length; i++)
         {
-            if (args[i] == "--material-tags")
-                materialTags = true;
+            if (args[i] == "--no-material-tags")
+                ZenPackage.ZenConverter.SetMaterialTagsEnabled(false);
             else if (usmapPath == null && !args[i].StartsWith("--"))
                 usmapPath = args[i];
         }
@@ -151,9 +169,6 @@ public partial class Program
 
         try
         {
-            if (materialTags)
-                ZenPackage.ZenConverter.SetMaterialTagsEnabled(true);
-            
             Console.Error.WriteLine($"[CliToZen] Converting {uassetPath} to Zen format...");
             
             byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath, usmapPath);
@@ -582,7 +597,7 @@ public partial class Program
             Console.Error.WriteLine("  --encrypt             - Enable AES encryption");
             Console.Error.WriteLine("  --aes-key <hex>       - AES key in hex format");
             Console.Error.WriteLine("  --pak-aes <hex>       - AES key for decrypting input .pak files");
-            Console.Error.WriteLine("  --material-tags       - [EXPERIMENTAL] Read MaterialTagAssetUserData and inject per-slot gameplay tags");
+            Console.Error.WriteLine("  --no-material-tags    - Disable MaterialTag injection (enabled by default)");
             return 1;
         }
 
@@ -594,15 +609,14 @@ public partial class Program
         bool enableEncryption = false;
         string? aesKey = null;
         string? pakAesKey = null;
-        bool materialTags = false;
         var uassetFiles = new List<string>();
         var tempDirsToCleanup = new List<string>();
 
         for (int i = 2; i < args.Length; i++)
         {
-            if (args[i] == "--material-tags")
+            if (args[i] == "--no-material-tags")
             {
-                materialTags = true;
+                ZenPackage.ZenConverter.SetMaterialTagsEnabled(false);
             }
             else if (args[i] == "--usmap" && i + 1 < args.Length)
             {
@@ -716,15 +730,10 @@ public partial class Program
             string utocPath = outputBase + ".utoc";
             string pakPath = outputBase + ".pak";
 
-            if (materialTags)
-                ZenPackage.ZenConverter.SetMaterialTagsEnabled(true);
-            
             Console.Error.WriteLine($"[CreateModIoStore] Creating IoStore mod bundle: {outputBase}");
             Console.Error.WriteLine($"[CreateModIoStore]   Assets: {uassetFiles.Count}");
             Console.Error.WriteLine($"[CreateModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
             Console.Error.WriteLine($"[CreateModIoStore]   Encryption: {(enableEncryption ? "AES-256" : "None")}");
-            if (materialTags)
-                Console.Error.WriteLine($"[CreateModIoStore]   MaterialTags: ENABLED (experimental)");
 
             // Create IoStore container
             using var ioStoreWriter = new IoStore.IoStoreWriter(
