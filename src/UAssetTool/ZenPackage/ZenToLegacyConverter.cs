@@ -210,24 +210,8 @@ public class ZenToLegacyConverter
             });
         }
         
-        // If no bulk data but we have exports, create empty data resources for each export
-        // This matches the reference behavior where each export has a corresponding data resource
-        if (_builder.DataResources.Count == 0 && _zenPackage.ExportMap.Count > 0)
-        {
-            for (int i = 0; i < _zenPackage.ExportMap.Count; i++)
-            {
-                _builder.DataResources.Add(new LegacyDataResource
-                {
-                    Flags = 0,
-                    SerialOffset = 0,
-                    DuplicateSerialOffset = 0,
-                    SerialSize = 0,
-                    RawSize = 0,
-                    OuterIndex = FPackageIndex.CreateNull(),
-                    LegacyBulkDataFlags = 0
-                });
-            }
-        }
+        // Note: Do NOT fabricate empty DataResource entries when there are no zen BulkData entries.
+        // retoc leaves DataResources empty and sets DataResourceOffset to -1 in that case.
     }
 
     private void BuildImportMap()
@@ -803,14 +787,18 @@ public class ZenToLegacyConverter
             writer.Write(dep.Index);
         }
         
-        // Write data resources (UE5.3+ format)
-        // Format: Version (uint32) + Count (int32) + entries
-        long dataResourceOffset = writer.BaseStream.Position;
-        writer.Write((uint)0); // DataResourceVersion = 0 (Initial)
-        writer.Write(_builder.DataResources.Count);
-        foreach (var res in _builder.DataResources)
+        // Write data resources (UE5.3+ format) - only if there are actual resources
+        // retoc skips this section entirely and writes DataResourceOffset = -1 when empty
+        long dataResourceOffset = -1;
+        if (_builder.DataResources.Count > 0)
         {
-            WriteDataResource(writer, res);
+            dataResourceOffset = writer.BaseStream.Position;
+            writer.Write((uint)0); // DataResourceVersion = 0 (Initial)
+            writer.Write(_builder.DataResources.Count);
+            foreach (var res in _builder.DataResources)
+            {
+                WriteDataResource(writer, res);
+            }
         }
         
         // Update header size

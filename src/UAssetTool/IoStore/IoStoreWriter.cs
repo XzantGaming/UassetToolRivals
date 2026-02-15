@@ -28,6 +28,25 @@ public class IoStoreWriter : IDisposable
     private readonly bool _enableCompression;
     private readonly bool _enableEncryption;
     private readonly byte[]? _aesKey;
+    private byte[] _encryptionKeyGuid = new byte[16];
+
+    /// <summary>
+    /// Set the encryption key GUID (preserved from original container during recompression).
+    /// </summary>
+    public void SetEncryptionKeyGuid(byte[] guid)
+    {
+        if (guid != null && guid.Length == 16)
+            _encryptionKeyGuid = guid;
+    }
+
+    /// <summary>
+    /// Set raw directory index bytes to pass through during recompression.
+    /// When set, WriteToc uses these bytes instead of rebuilding the directory index.
+    /// </summary>
+    public void SetRawDirectoryIndex(byte[] rawData)
+    {
+        _rawDirectoryIndex = rawData;
+    }
 
     private readonly List<FIoChunkId> _chunks = new();
     private readonly List<FIoOffsetAndLength> _chunkOffsetLengths = new();
@@ -36,6 +55,7 @@ public class IoStoreWriter : IDisposable
     private readonly Dictionary<string, uint> _directoryIndex = new();
     private readonly List<(FPackageId, StoreEntry)> _packageStoreEntries = new();
     private readonly HashSet<string> _compressionMethods = new();
+    private byte[]? _rawDirectoryIndex = null;
 
     private bool _disposed;
 
@@ -46,7 +66,9 @@ public class IoStoreWriter : IDisposable
         string mountPoint = "../../../",
         bool enableCompression = true,
         bool enableEncryption = false,
-        string? aesKeyHex = null)
+        string? aesKeyHex = null,
+        FIoContainerId? containerId = null,
+        uint compressionBlockSize = 0x20000)
     {
         _tocPath = tocPath;
         _tocVersion = tocVersion;
@@ -54,6 +76,7 @@ public class IoStoreWriter : IDisposable
         _mountPoint = mountPoint;
         _enableCompression = enableCompression;
         _enableEncryption = enableEncryption;
+        _compressionBlockSize = compressionBlockSize;
 
         // Parse AES key
         if (enableEncryption)
@@ -64,8 +87,14 @@ public class IoStoreWriter : IDisposable
                 _aesKey[i] = Convert.ToByte(keyHex.Substring(i * 2, 2), 16);
         }
 
-        string name = Path.GetFileNameWithoutExtension(tocPath);
-        _containerId = FIoContainerId.FromName(name);
+        // Use provided container ID or generate from filename
+        if (containerId.HasValue)
+            _containerId = containerId.Value;
+        else
+        {
+            string name = Path.GetFileNameWithoutExtension(tocPath);
+            _containerId = FIoContainerId.FromName(name);
+        }
 
         _tocStream = new FileStream(tocPath, FileMode.Create, FileAccess.Write);
         _casStream = new FileStream(Path.ChangeExtension(tocPath, ".ucas"), FileMode.Create, FileAccess.Write);
@@ -324,8 +353,8 @@ public class IoStoreWriter : IDisposable
         // Use leaveOpen: true to prevent BinaryWriter from disposing the stream
         using var writer = new BinaryWriter(_tocStream, System.Text.Encoding.UTF8, leaveOpen: true);
 
-        // Build directory index
-        byte[] directoryIndexData = BuildDirectoryIndex();
+        // Use raw directory index if provided (recompression pass-through), otherwise build from scratch
+        byte[] directoryIndexData = _rawDirectoryIndex ?? BuildDirectoryIndex();
 
         // Build compression method names list
         var compressionMethodsList = _compressionMethods.ToList();
@@ -348,6 +377,7 @@ public class IoStoreWriter : IDisposable
             DirectoryIndexSize = (uint)directoryIndexData.Length,
             TocChunkPerfectHashSeedsCount = 0,
             ContainerId = _containerId,
+            EncryptionKeyGuid = _encryptionKeyGuid,
             ContainerFlags = containerFlags,
             TocChunksWithoutPerfectHashCount = 0, // No overflow - chunks are indexed directly
         };

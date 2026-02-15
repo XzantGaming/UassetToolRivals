@@ -34,19 +34,29 @@ public static class IoStoreRecompressor
 
         Console.Error.WriteLine($"[IoStoreRecompressor] Recompressing: {Path.GetFileName(utocPath)}");
 
-        // Read all chunks into memory, then close the reader before writing
+        // Read all chunks into memory, preserving original TOC metadata
         var chunks = new List<(FIoChunkId ChunkId, string? Path, byte[] Data)>();
         FIoChunkId? containerHeaderChunkId = null;
         byte[]? containerHeaderData = null;
         EIoStoreTocVersion tocVersion;
         string mountPoint;
+        FIoContainerId originalContainerId;
+        byte[] originalEncryptionKeyGuid;
+        uint originalCompressionBlockSize;
+        byte[]? rawDirectoryIndex;
 
         using (var reader = new IoStoreReader(utocPath, aesKey))
         {
             var toc = reader.Toc;
             tocVersion = toc.Version;
             mountPoint = toc.MountPoint;
+            originalContainerId = toc.ContainerId;
+            originalEncryptionKeyGuid = toc.EncryptionKeyGuid;
+            originalCompressionBlockSize = toc.CompressionBlockSize;
+            rawDirectoryIndex = toc.RawDirectoryIndex;
             int chunkIndex = 0;
+
+            Console.Error.WriteLine($"[IoStoreRecompressor] Original: ContainerId=0x{originalContainerId.Value:X16}, BlockSize={originalCompressionBlockSize}");
 
             foreach (var chunkId in reader.GetChunks())
             {
@@ -76,18 +86,31 @@ public static class IoStoreRecompressor
 
         Console.Error.WriteLine($"[IoStoreRecompressor] Read {chunks.Count} chunks + container header, writing with Oodle compression...");
 
-        // Create new IoStore with Oodle compression
+        // Create new IoStore with Oodle compression, preserving original TOC metadata:
+        // - ContainerId: must match the container header's ID or the game can't resolve packages
+        // - CompressionBlockSize: must match original to avoid block alignment issues
+        // - EncryptionKeyGuid: preserved from original
         // Pass null for containerHeaderVersion so the writer does NOT generate a new container header
         // We pass through the original container header uncompressed instead
         using (var writer = new IoStoreWriter(
             tempUtocPath,
             tocVersion,
-            null, // Don't generate new container header
+            null, // Don't generate new container header - we pass through the original
             mountPoint,
             enableCompression: true,
             enableEncryption: false,
-            aesKeyHex: aesKeyHex))
+            aesKeyHex: aesKeyHex,
+            containerId: originalContainerId,
+            compressionBlockSize: originalCompressionBlockSize))
         {
+            // Preserve original encryption key GUID in the TOC header
+            writer.SetEncryptionKeyGuid(originalEncryptionKeyGuid);
+
+            // Preserve original directory index structure (hierarchical tree)
+            // instead of rebuilding it (which creates a flat structure)
+            if (rawDirectoryIndex != null)
+                writer.SetRawDirectoryIndex(rawDirectoryIndex);
+
             // Write all regular chunks (compressed)
             foreach (var (chunkId, path, data) in chunks)
             {

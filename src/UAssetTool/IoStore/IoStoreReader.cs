@@ -391,6 +391,12 @@ public class IoStoreToc
     public Dictionary<uint, string> FileMapRev { get; set; } = new();
     public string MountPoint { get; set; } = "";
     public byte[]? AesKey { get; set; }
+    public FIoContainerId ContainerId { get; set; }
+    public byte[] EncryptionKeyGuid { get; set; } = new byte[16];
+    /// <summary>
+    /// Raw directory index bytes from the original TOC, for pass-through during recompression.
+    /// </summary>
+    public byte[]? RawDirectoryIndex { get; set; }
     public bool IsEncrypted => ContainerFlags.HasFlag(EIoContainerFlags.Encrypted);
     public bool CanDecrypt => IsEncrypted && AesKey != null && AesKey.Length == 32;
 
@@ -419,7 +425,9 @@ public class IoStoreToc
         uint directoryIndexSize = reader.ReadUInt32();
         uint partitionCount = reader.ReadUInt32();
         ulong containerId = reader.ReadUInt64();
+        toc.ContainerId = new FIoContainerId(containerId);
         byte[] encryptionKeyGuid = reader.ReadBytes(16);
+        toc.EncryptionKeyGuid = encryptionKeyGuid;
         toc.ContainerFlags = (EIoContainerFlags)reader.ReadByte();
         byte reserved3 = reader.ReadByte();
         ushort reserved4 = reader.ReadUInt16();
@@ -508,6 +516,9 @@ public class IoStoreToc
                     // Read the raw directory index data
                     byte[] directoryData = reader.ReadBytes((int)directoryIndexSize);
                     
+                    // Preserve raw bytes for recompression pass-through
+                    // (before decryption — if encrypted, store the decrypted version)
+                    
                     // Decrypt if needed
                     if (toc.IsEncrypted && toc.CanDecrypt)
                     {
@@ -515,6 +526,9 @@ public class IoStoreToc
                         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
                             Console.Error.WriteLine($"[TOC] Decrypted directory index");
                     }
+                    
+                    // Store decrypted raw bytes for recompression pass-through
+                    toc.RawDirectoryIndex = (byte[])directoryData.Clone();
                     
                     // Parse the decrypted directory index
                     using var dirStream = new MemoryStream(directoryData);
