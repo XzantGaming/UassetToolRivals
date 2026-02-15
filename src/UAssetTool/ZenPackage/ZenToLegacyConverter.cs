@@ -296,14 +296,31 @@ public class ZenToLegacyConverter
             FPackageIndex templateIndex = ResolveWithFallbackAsPackageIndex(zenExport.TemplateIndex, "template_index");
             FPackageIndex outerIndex = ResolveWithFallbackAsPackageIndex(zenExport.OuterIndex, "outer_index");
             
-            string exportNameString = _zenPackage.GetName(zenExport.ObjectName);
-            
-            // Debug: Print export names to trace shifting
-            if (debugMode && exportIndex < 20)
+            // For export object names from the package NameMap, use the zen index directly
+            // since we already copied the NameMap. This avoids ParseNameWithNumber incorrectly
+            // splitting names like "MI_1033502_ElectricRifle_Weapon_01" into base + number.
+            int objectName;
+            int objectNameNumber;
+            if (zenExport.ObjectName.Type == EMappedNameType.Package && zenExport.ObjectName.Index < _zenPackage.NameMap.Count)
             {
-                Console.Error.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Name=\"{exportNameString}\"");
+                objectName = (int)zenExport.ObjectName.Index;
+                objectNameNumber = (int)zenExport.ObjectName.Number;
+                
+                if (debugMode && exportIndex < 20)
+                {
+                    Console.Error.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Number={zenExport.ObjectName.Number}, Name=\"{_zenPackage.NameMap[(int)zenExport.ObjectName.Index]}\"");
+                }
             }
-            var (objectName, objectNameNumber) = StoreOrFindNameWithNumber(exportNameString);
+            else
+            {
+                // Fallback for non-package names: resolve and store
+                string exportNameString = _zenPackage.GetName(zenExport.ObjectName);
+                if (debugMode && exportIndex < 20)
+                {
+                    Console.Error.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Name=\"{exportNameString}\" (resolved)");
+                }
+                (objectName, objectNameNumber) = StoreOrFindNameWithNumber(exportNameString);
+            }
             uint objectFlags = zenExport.ObjectFlags;
             
             long serialSize = (long)zenExport.CookedSerialSize;
@@ -716,7 +733,8 @@ public class ZenToLegacyConverter
         writer.Write(0);
         
         // AssetRegistryDataOffset
-        writer.Write(0);
+        long assetRegistryDataOffsetPos = writer.BaseStream.Position;
+        writer.Write(0); // Placeholder
         
         // BulkDataStartOffset - should be the end of last export (header size + total export data size)
         // This is set later after we know the actual sizes
@@ -777,7 +795,9 @@ public class ZenToLegacyConverter
             writer.Write(0); // Empty dependency count for this export
         }
         
-        // Asset registry data - just write count=0 for cooked packages
+        // Asset registry data - write count=0 for cooked packages
+        // retoc writes this section and sets AssetRegistryDataOffset to point here
+        long assetRegistryDataOffset = writer.BaseStream.Position;
         writer.Write(0); // asset_object_data_count
         
         // Write preload dependencies
@@ -826,6 +846,9 @@ public class ZenToLegacyConverter
         
         // SoftPackageReferencesOffset - leave as 0 for cooked packages
         // (don't need to fill in, already written as 0)
+        
+        writer.BaseStream.Seek(assetRegistryDataOffsetPos, SeekOrigin.Begin);
+        writer.Write((int)assetRegistryDataOffset);
         
         writer.BaseStream.Seek(preloadDepOffsetPos, SeekOrigin.Begin);
         writer.Write((int)preloadDepOffset);
