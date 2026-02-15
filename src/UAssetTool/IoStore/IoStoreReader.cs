@@ -430,7 +430,7 @@ public class IoStoreToc
         reader.ReadBytes(40); // reserved8: 5 x u64
         
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] partitionCount={partitionCount}, partitionSize={partitionSize}, compressionBlocks={tocCompressedBlockEntryCount}");
+            Console.Error.WriteLine($"[TOC] partitionCount={partitionCount}, partitionSize={partitionSize}, compressionBlocks={tocCompressedBlockEntryCount}");
         
         // We're now at the end of the header, chunk data follows
 
@@ -493,12 +493,12 @@ public class IoStoreToc
 
         // Read directory index if present
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] Pre-directory: size={directoryIndexSize}, encrypted={toc.IsEncrypted}, canDecrypt={toc.CanDecrypt}, flags={toc.ContainerFlags}, position={stream.Position}, streamLength={stream.Length}");
+            Console.Error.WriteLine($"[TOC] Pre-directory: size={directoryIndexSize}, encrypted={toc.IsEncrypted}, canDecrypt={toc.CanDecrypt}, flags={toc.ContainerFlags}, position={stream.Position}, streamLength={stream.Length}");
         
         if (directoryIndexSize > 0 && (!toc.IsEncrypted || toc.CanDecrypt))
         {
             if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                Console.WriteLine($"[TOC] Reading directory index...");
+                Console.Error.WriteLine($"[TOC] Reading directory index...");
             
             // Check if we have enough data
             if (stream.Position + directoryIndexSize <= stream.Length)
@@ -513,7 +513,7 @@ public class IoStoreToc
                     {
                         DecryptAes(directoryData, toc.AesKey!);
                         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                            Console.WriteLine($"[TOC] Decrypted directory index");
+                            Console.Error.WriteLine($"[TOC] Decrypted directory index");
                     }
                     
                     // Parse the decrypted directory index
@@ -521,17 +521,17 @@ public class IoStoreToc
                     using var dirReader = new BinaryReader(dirStream);
                     ReadDirectoryIndex(dirReader, toc, directoryIndexSize);
                     if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                        Console.WriteLine($"[TOC] Directory index parsed: {toc.FileMapRev.Count} file paths");
+                        Console.Error.WriteLine($"[TOC] Directory index parsed: {toc.FileMapRev.Count} file paths");
                 }
                 catch (Exception ex)
                 {
                     if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                        Console.WriteLine($"[TOC] Failed to parse directory index: {ex.Message}");
+                        Console.Error.WriteLine($"[TOC] Failed to parse directory index: {ex.Message}");
                 }
             }
             else if (Environment.GetEnvironmentVariable("DEBUG") == "1")
             {
-                Console.WriteLine($"[TOC] Directory index beyond stream end, skipping");
+                Console.Error.WriteLine($"[TOC] Directory index beyond stream end, skipping");
             }
         }
 
@@ -559,12 +559,12 @@ public class IoStoreToc
         // Read mount point (length-prefixed string like retoc)
         toc.MountPoint = ReadLengthPrefixedString(reader);
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] Mount point: {toc.MountPoint}");
+            Console.Error.WriteLine($"[TOC] Mount point: {toc.MountPoint}");
         
         // Read directory entries array (count then entries)
         int dirEntryCount = reader.ReadInt32();
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] Directory entries: {dirEntryCount}");
+            Console.Error.WriteLine($"[TOC] Directory entries: {dirEntryCount}");
         
         if (dirEntryCount < 0 || dirEntryCount > 1000000)
             throw new Exception($"Invalid directory entry count: {dirEntryCount}");
@@ -583,7 +583,7 @@ public class IoStoreToc
         // Read file entries array
         int fileEntryCount = reader.ReadInt32();
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] File entries: {fileEntryCount}");
+            Console.Error.WriteLine($"[TOC] File entries: {fileEntryCount}");
         
         if (fileEntryCount < 0 || fileEntryCount > 1000000)
             throw new Exception($"Invalid file entry count: {fileEntryCount}");
@@ -601,7 +601,7 @@ public class IoStoreToc
         // Read string table (count then length-prefixed strings)
         int stringCount = reader.ReadInt32();
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] Strings: {stringCount}");
+            Console.Error.WriteLine($"[TOC] Strings: {stringCount}");
         
         if (stringCount < 0 || stringCount > 1000000)
             throw new Exception($"Invalid string count: {stringCount}");
@@ -616,7 +616,7 @@ public class IoStoreToc
         BuildFilePaths(toc, dirEntries, fileEntries, strings, 0, toc.MountPoint);
         
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[TOC] Built {toc.FileMapRev.Count} file paths");
+            Console.Error.WriteLine($"[TOC] Built {toc.FileMapRev.Count} file paths");
     }
     
     /// <summary>

@@ -68,7 +68,7 @@ public static class ColorModifier
                 asset.Write(assetPath);
             }
             
-            Console.WriteLine($"Modified {modifiedCount} color values in {Path.GetFileName(assetPath)}");
+            Console.Error.WriteLine($"Modified {modifiedCount} color values in {Path.GetFileName(assetPath)}");
             return modifiedCount;
         }
         catch (Exception ex)

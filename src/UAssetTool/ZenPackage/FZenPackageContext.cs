@@ -72,7 +72,7 @@ public class FZenPackageContext : IDisposable
             ContainerHeaderVersion = EIoContainerHeaderVersion.Initial;
         
         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.WriteLine($"[Context] TOC version: {reader.Toc.Version}, Container header version: {ContainerHeaderVersion}");
+            Console.Error.WriteLine($"[Context] TOC version: {reader.Toc.Version}, Container header version: {ContainerHeaderVersion}");
         
         // Read ContainerHeader chunk to get global name map (for versions > Initial)
         if (ContainerHeaderVersion > EIoContainerHeaderVersion.Initial)
@@ -89,13 +89,13 @@ public class FZenPackageContext : IDisposable
                         {
                             _containerNameMaps[containerIndex] = nameMap;
                             if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                                Console.WriteLine($"[Context] Loaded {nameMap.Count} names from ContainerHeader");
+                                Console.Error.WriteLine($"[Context] Loaded {nameMap.Count} names from ContainerHeader");
                         }
                     }
                     catch (Exception ex)
                     {
                         if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                            Console.WriteLine($"[Context] Failed to parse ContainerHeader: {ex.Message}");
+                            Console.Error.WriteLine($"[Context] Failed to parse ContainerHeader: {ex.Message}");
                     }
                     break;
                 }
@@ -144,7 +144,7 @@ public class FZenPackageContext : IDisposable
         
         string priorityStr = overridePriority ? " [PRIORITY]" : "";
         string overrideStr = overriddenPackages > 0 ? $", {overriddenPackages} overridden" : "";
-        Console.WriteLine($"[Context] Loaded container{priorityStr}: {reader.ContainerName} ({newPackages} new packages{overrideStr}, {_packageIdToChunk.Count} total)");
+        Console.Error.WriteLine($"[Context] Loaded container{priorityStr}: {reader.ContainerName} ({newPackages} new packages{overrideStr}, {_packageIdToChunk.Count} total)");
     }
     
     /// <summary>
@@ -298,7 +298,7 @@ public class FZenPackageContext : IDisposable
         if (File.Exists(scriptObjectsPath))
         {
             ScriptObjects = ScriptObjectsDatabase.Load(scriptObjectsPath);
-            Console.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects");
+            Console.Error.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects");
         }
     }
 
@@ -321,7 +321,7 @@ public class FZenPackageContext : IDisposable
                 {
                     byte[] data = reader.ReadChunk(chunk);
                     ScriptObjects = ScriptObjectsDatabase.Load(data);
-                    Console.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects from container");
+                    Console.Error.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects from container");
                     return;
                 }
                 catch (Exception ex)
@@ -506,7 +506,7 @@ public class FZenPackageContext : IDisposable
             offset += data.Length;
         }
         
-        Console.WriteLine($"[Context] Combined {bulkChunks.Count} BulkData chunks into {totalSize} bytes");
+        Console.Error.WriteLine($"[Context] Combined {bulkChunks.Count} BulkData chunks into {totalSize} bytes");
         return result;
     }
 
@@ -606,7 +606,7 @@ public class FZenPackageContext : IDisposable
             progress?.Report((count * 100) / total);
         }
         
-        Console.WriteLine($"[Context] Preloaded {count} packages");
+        Console.Error.WriteLine($"[Context] Preloaded {count} packages");
     }
 
     /// <summary>

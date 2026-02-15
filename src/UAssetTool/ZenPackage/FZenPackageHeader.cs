@@ -300,7 +300,7 @@ public class FZenPackageHeader
             ulong hashVersion = reader.ReadUInt64(); // Changed to ulong - this is 8 bytes, not 4
             
             if (Environment.GetEnvironmentVariable("DEBUG") == "1" && (numNames <= 0 || numNames > 10000 || numStringBytes < 0))
-                Console.WriteLine($"[ZenPackage] NameMap SUSPICIOUS: numNames={numNames}, numStringBytes={numStringBytes}, hashVersion=0x{hashVersion:X16}, pos={nameMapPos}");
+                Console.Error.WriteLine($"[ZenPackage] NameMap SUSPICIOUS: numNames={numNames}, numStringBytes={numStringBytes}, hashVersion=0x{hashVersion:X16}, pos={nameMapPos}");
 
             // Skip hashes
             reader.BaseStream.Seek(numNames * 8, SeekOrigin.Current);
@@ -362,7 +362,7 @@ public class FZenPackageHeader
         
         if (debugMode)
         {
-            Console.WriteLine($"[ZenPackage] NameMap: {numNames} names, headersStart={headersStartPos}, stringsStart={stringsStartPos}, stringDataLen={stringData.Length}");
+            Console.Error.WriteLine($"[ZenPackage] NameMap: {numNames} names, headersStart={headersStartPos}, stringsStart={stringsStartPos}, stringDataLen={stringData.Length}");
         }
 
         // Parse strings - NO alignment padding in serialized format, strings are consecutive
@@ -385,7 +385,7 @@ public class FZenPackageHeader
                 else
                 {
                     if (debugMode)
-                        Console.WriteLine($"[ZenPackage] Name {i}: INVALID WIDE - offset={currentOffset}, byteLen={byteLen}, dataLen={stringData.Length}");
+                        Console.Error.WriteLine($"[ZenPackage] Name {i}: INVALID WIDE - offset={currentOffset}, byteLen={byteLen}, dataLen={stringData.Length}");
                     name = $"__invalid_wide_{i}__";
                 }
             }
@@ -399,14 +399,14 @@ public class FZenPackageHeader
                 else
                 {
                     if (debugMode)
-                        Console.WriteLine($"[ZenPackage] Name {i}: INVALID - offset={currentOffset}, length={length}, dataLen={stringData.Length}");
+                        Console.Error.WriteLine($"[ZenPackage] Name {i}: INVALID - offset={currentOffset}, length={length}, dataLen={stringData.Length}");
                     name = $"__invalid_{i}__";
                 }
             }
             
             if (debugMode && i < 20)
             {
-                Console.WriteLine($"[ZenPackage] Name {i}: \"{name}\" (len={length}, wide={isWide})");
+                Console.Error.WriteLine($"[ZenPackage] Name {i}: \"{name}\" (len={length}, wide={isWide})");
             }
             
             NameMap.Add(name);
@@ -414,7 +414,7 @@ public class FZenPackageHeader
         
         if (debugMode)
         {
-            Console.WriteLine($"[ZenPackage] NameMap complete: {NameMap.Count} names, finalOffset={currentOffset}");
+            Console.Error.WriteLine($"[ZenPackage] NameMap complete: {NameMap.Count} names, finalOffset={currentOffset}");
         }
     }
 
