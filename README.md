@@ -212,6 +212,28 @@ UAssetTool
 {"action": "convert_from_zen", "file_path": "...", "usmap_path": "..."}
 ```
 
+**IoStore/Mod Creation**
+```json
+{"action": "create_mod_iostore", "output_path": "path/to/output", "input_dir": "path/to/assets", "usmap_path": "...", "obfuscate": true}
+{"action": "clone_mod_iostore", "file_path": "path/to/mod.utoc", "output_path": "path/to/output"}
+{"action": "inspect_zen", "file_path": "path/to/zen_asset"}
+{"action": "cityhash", "file_path": "/Game/Marvel/Characters/1014/Meshes/SK_1014"}
+```
+
+**Asset Analysis**
+```json
+{"action": "dump", "file_path": "path/to/asset.uasset", "usmap_path": "..."}
+{"action": "skeletal_mesh_info", "file_path": "path/to/SK_mesh.uasset", "usmap_path": "..."}
+{"action": "to_json", "file_path": "path/to/asset.uasset", "output_path": "path/to/output.json"}
+{"action": "from_json", "file_path": "path/to/asset.json", "output_path": "path/to/output.uasset"}
+```
+
+**Niagara (Particle Effects)**
+```json
+{"action": "niagara_list", "input_dir": "path/to/ns_files", "usmap_path": "..."}
+{"action": "niagara_details", "file_path": "path/to/NS_Effect.uasset", "usmap_path": "..."}
+```
+
 ## IoStore Extraction
 
 Extract assets from UE5 IoStore containers (`.utoc`/`.ucas`) to legacy format:
@@ -305,6 +327,10 @@ UAssetTool create_mod_iostore "output/MyMod" "my_legacy_mod.pak"
 # Create without compression (faster, larger files)
 UAssetTool create_mod_iostore "output/MyMod" --no-compress \
     "Content/Marvel/Characters/1014/Meshes/SK_1014_1014001.uasset"
+
+# Create with obfuscation (protects mod from FModel extraction)
+UAssetTool create_mod_iostore "output/MyMod" --obfuscate \
+    "Content/Marvel/Characters/1014/Meshes/SK_1014_1014001.uasset"
 ```
 
 **Options:**
@@ -313,8 +339,7 @@ UAssetTool create_mod_iostore "output/MyMod" --no-compress \
 - `--game-path <prefix>` - Game path prefix (default: `Marvel/Content/`)
 - `--compress` - Enable Oodle compression (default: enabled)
 - `--no-compress` - Disable compression (faster creation)
-- `--encrypt` - Enable AES encryption
-- `--aes-key <hex>` - AES key in hex format
+- `--obfuscate` - Protect mod from extraction tools like FModel (encrypts with game's AES key)
 - `--pak-aes <hex>` - AES key for decrypting input .pak files
 - `--no-material-tags` - Disable MaterialTag injection (enabled by default)
 

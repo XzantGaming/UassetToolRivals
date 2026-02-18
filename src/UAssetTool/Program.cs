@@ -594,8 +594,7 @@ public partial class Program
             Console.Error.WriteLine("  --game-path <prefix>  - Game path prefix (default: Marvel/Content/)");
             Console.Error.WriteLine("  --compress            - Enable Oodle compression (default: enabled)");
             Console.Error.WriteLine("  --no-compress         - Disable compression");
-            Console.Error.WriteLine("  --encrypt             - Enable AES encryption");
-            Console.Error.WriteLine("  --aes-key <hex>       - AES key in hex format");
+            Console.Error.WriteLine("  --obfuscate           - Protect mod from extraction tools like FModel");
             Console.Error.WriteLine("  --pak-aes <hex>       - AES key for decrypting input .pak files");
             Console.Error.WriteLine("  --no-material-tags    - Disable MaterialTag injection (enabled by default)");
             return 1;
@@ -609,6 +608,8 @@ public partial class Program
         bool enableEncryption = false;
         string? aesKey = null;
         string? pakAesKey = null;
+        // Marvel Rivals AES key for obfuscation
+        const string MARVEL_RIVALS_AES_KEY = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
         var uassetFiles = new List<string>();
         var tempDirsToCleanup = new List<string>();
 
@@ -638,14 +639,10 @@ public partial class Program
             {
                 enableCompression = false;
             }
-            else if (args[i] == "--encrypt")
+            else if (args[i] == "--obfuscate")
             {
                 enableEncryption = true;
-            }
-            else if (args[i] == "--aes-key" && i + 1 < args.Length)
-            {
-                aesKey = args[++i];
-                enableEncryption = true;
+                aesKey = MARVEL_RIVALS_AES_KEY;
             }
             else if (args[i] == "--pak-aes" && i + 1 < args.Length)
             {
@@ -733,7 +730,7 @@ public partial class Program
             Console.Error.WriteLine($"[CreateModIoStore] Creating IoStore mod bundle: {outputBase}");
             Console.Error.WriteLine($"[CreateModIoStore]   Assets: {uassetFiles.Count}");
             Console.Error.WriteLine($"[CreateModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
-            Console.Error.WriteLine($"[CreateModIoStore]   Encryption: {(enableEncryption ? "AES-256" : "None")}");
+            Console.Error.WriteLine($"[CreateModIoStore]   Protection: {(enableEncryption ? "Obfuscated (FModel-proof)" : "None")}");
 
             // Create IoStore container
             using var ioStoreWriter = new IoStore.IoStoreWriter(
@@ -2306,7 +2303,18 @@ public partial class Program
                 "recompress_iostore" => RecompressIoStore(request.FilePath),
                 "extract_iostore" => ExtractIoStoreJson(request.FilePath, request.OutputPath, request.AesKey),
                 "extract_script_objects" => ExtractScriptObjectsJson(request.FilePath, request.OutputPath),
-                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey, request.Parallel),
+                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey, request.Parallel, request.Obfuscate),
+                
+                // Additional CLI-equivalent operations for parity
+                "dump" => DumpAssetJson(request.FilePath, request.UsmapPath),
+                "skeletal_mesh_info" => GetSkeletalMeshInfoJson(request.FilePath, request.UsmapPath),
+                "to_json" => ToJsonJson(request.FilePath, request.UsmapPath, request.OutputPath),
+                "from_json" => FromJsonJson(request.FilePath, request.OutputPath, request.UsmapPath),
+                "cityhash" => CityHashJson(request.FilePath),
+                "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
+                "inspect_zen" => InspectZenJson(request.FilePath),
+                "niagara_list" => NiagaraListJson(request.InputDir, request.UsmapPath),
+                "niagara_details" => NiagaraDetailsJson(request.FilePath, request.UsmapPath),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -5190,12 +5198,21 @@ public partial class Program
     /// This is the JSON API equivalent of retoc's action_to_zen.
     /// Converts .uasset/.uexp files to Zen format and creates .utoc/.ucas/.pak bundle.
     /// </summary>
-    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey, bool parallel)
+    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey, bool parallel, bool obfuscate)
     {
         if (string.IsNullOrEmpty(outputPath))
             return new UAssetResponse { Success = false, Message = "Output path is required" };
         if (string.IsNullOrEmpty(inputDir))
             return new UAssetResponse { Success = false, Message = "Input directory is required" };
+        
+        // Marvel Rivals AES key for obfuscation
+        const string MARVEL_RIVALS_AES_KEY = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+        
+        // If obfuscate is enabled, use the game's AES key
+        if (obfuscate)
+        {
+            aesKey = MARVEL_RIVALS_AES_KEY;
+        }
         
         if (!Directory.Exists(inputDir))
             return new UAssetResponse { Success = false, Message = $"Input directory not found: {inputDir}" };
@@ -5525,6 +5542,12 @@ public class UAssetRequest
     /// </summary>
     [JsonPropertyName("parallel")]
     public bool Parallel { get; set; } = false;
+    
+    /// <summary>
+    /// Enable obfuscation (encrypts with game's AES key to block extraction tools like FModel)
+    /// </summary>
+    [JsonPropertyName("obfuscate")]
+    public bool Obfuscate { get; set; } = false;
 }
 
 public class UAssetResponse
@@ -5804,6 +5827,247 @@ public partial class Program
         // Search for the string "bDisabled" or patterns that might indicate disabled sections
         // In cooked data, bools are typically single bytes
     }
+    
+    #region JSON Mode Parity Functions
+    
+    private static UAssetResponse DumpAssetJson(string? filePath, string? usmapPath)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        
+        try
+        {
+            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
+            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            {
+                asset.Mappings = new Usmap(usmapPath);
+            }
+            
+            var result = new Dictionary<string, object>
+            {
+                ["file_path"] = filePath,
+                ["package_flags"] = asset.PackageFlags.ToString(),
+                ["has_unversioned_properties"] = asset.HasUnversionedProperties,
+                ["name_count"] = asset.GetNameMapIndexList().Count,
+                ["import_count"] = asset.Imports.Count,
+                ["export_count"] = asset.Exports.Count,
+                ["exports"] = asset.Exports.Select((e, i) => new Dictionary<string, object>
+                {
+                    ["index"] = i,
+                    ["class_type"] = e.GetExportClassType()?.Value?.Value ?? "Unknown",
+                    ["object_name"] = e.ObjectName?.Value?.Value ?? "Unknown",
+                    ["serial_size"] = e.SerialSize,
+                    ["serial_offset"] = e.SerialOffset
+                }).ToList()
+            };
+            
+            return new UAssetResponse 
+            { 
+                Success = true, 
+                Message = "Asset dumped successfully",
+                Data = result
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to dump asset: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse GetSkeletalMeshInfoJson(string? filePath, string? usmapPath)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        
+        try
+        {
+            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
+            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            {
+                asset.Mappings = new Usmap(usmapPath);
+            }
+            
+            var skExport = asset.Exports.OfType<UAssetAPI.ExportTypes.SkeletalMeshExport>().FirstOrDefault();
+            if (skExport == null)
+                return new UAssetResponse { Success = false, Message = "No SkeletalMesh export found" };
+            
+            var result = new Dictionary<string, object>
+            {
+                ["material_count"] = skExport.Materials?.Count ?? 0,
+                ["bone_count"] = skExport.ReferenceSkeleton?.BoneCount ?? 0,
+                ["materials"] = skExport.Materials?.Select((m, i) => new Dictionary<string, object>
+                {
+                    ["index"] = i,
+                    ["slot_name"] = m.MaterialSlotName?.Value?.Value ?? "Unknown",
+                    ["material_index"] = m.MaterialInterface?.Index ?? 0
+                }).ToList() ?? new List<Dictionary<string, object>>()
+            };
+            
+            return new UAssetResponse { Success = true, Data = result };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to get SkeletalMesh info: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse ToJsonJson(string? filePath, string? usmapPath, string? outputPath)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        
+        try
+        {
+            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
+            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            {
+                asset.Mappings = new Usmap(usmapPath);
+            }
+            
+            string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
+            
+            if (!string.IsNullOrEmpty(outputPath))
+            {
+                File.WriteAllText(outputPath, jsonOutput);
+                return new UAssetResponse { Success = true, Message = $"JSON saved to {outputPath}" };
+            }
+            
+            return new UAssetResponse { Success = true, Message = jsonOutput };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to convert to JSON: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse FromJsonJson(string? jsonPath, string? outputPath, string? usmapPath)
+    {
+        if (string.IsNullOrEmpty(jsonPath))
+            return new UAssetResponse { Success = false, Message = "file_path (JSON path) is required" };
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "output_path is required" };
+        
+        try
+        {
+            string jsonContent = File.ReadAllText(jsonPath);
+            var asset = UAsset.DeserializeJson(jsonContent);
+            
+            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            {
+                asset.Mappings = new Usmap(usmapPath);
+            }
+            
+            asset.Write(outputPath);
+            return new UAssetResponse { Success = true, Message = $"Asset saved to {outputPath}" };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to convert from JSON: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse CityHashJson(string? pathString)
+    {
+        if (string.IsNullOrEmpty(pathString))
+            return new UAssetResponse { Success = false, Message = "file_path (path string to hash) is required" };
+        
+        ulong hash = IoStore.CityHash.CityHash64(pathString.ToLowerInvariant());
+        return new UAssetResponse 
+        { 
+            Success = true, 
+            Data = new Dictionary<string, object>
+            {
+                ["input"] = pathString,
+                ["hash_decimal"] = hash,
+                ["hash_hex"] = $"0x{hash:X16}"
+            }
+        };
+    }
+    
+    private static UAssetResponse CloneModIoStoreJson(string? utocPath, string? outputPath)
+    {
+        if (string.IsNullOrEmpty(utocPath))
+            return new UAssetResponse { Success = false, Message = "file_path (utoc path) is required" };
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "output_path is required" };
+        
+        try
+        {
+            // Use the existing CLI implementation
+            string[] args = new[] { "clone_mod_iostore", utocPath, outputPath };
+            int result = CliCloneModIoStore(args);
+            
+            if (result == 0)
+                return new UAssetResponse { Success = true, Message = $"Cloned to {outputPath}" };
+            else
+                return new UAssetResponse { Success = false, Message = "Clone failed" };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to clone: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse InspectZenJson(string? filePath)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        
+        try
+        {
+            byte[] data = File.ReadAllBytes(filePath);
+            var zenHeader = ZenPackage.FZenPackageHeader.Deserialize(data, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+            
+            var result = new Dictionary<string, object>
+            {
+                ["name_map_count"] = zenHeader.NameMap?.Count ?? 0,
+                ["import_map_count"] = zenHeader.ImportMap?.Count ?? 0,
+                ["export_map_count"] = zenHeader.ExportMap?.Count ?? 0,
+                ["export_bundle_count"] = zenHeader.ExportBundleHeaders?.Count ?? 0,
+                ["header_size"] = zenHeader.Summary?.HeaderSize ?? 0
+            };
+            
+            return new UAssetResponse { Success = true, Data = result };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to inspect Zen package: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse NiagaraListJson(string? directory, string? usmapPath)
+    {
+        if (string.IsNullOrEmpty(directory))
+            return new UAssetResponse { Success = false, Message = "input_dir is required" };
+        
+        try
+        {
+            var result = NiagaraService.ListNiagaraFiles(directory, usmapPath);
+            return new UAssetResponse { Success = true, Data = result };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to list Niagara files: {ex.Message}" };
+        }
+    }
+    
+    private static UAssetResponse NiagaraDetailsJson(string? filePath, string? usmapPath)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        
+        try
+        {
+            var result = NiagaraService.GetNiagaraDetails(filePath, usmapPath, fullData: true);
+            return new UAssetResponse { Success = true, Data = result };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Failed to get Niagara details: {ex.Message}" };
+        }
+    }
+    
+    #endregion
 }
 
 #endregion

@@ -153,7 +153,7 @@ namespace UAssetAPI
             HashSet<int> zeroProps = new HashSet<int>();
             foreach (PropertyData entry in data)
             {
-                if (!asset.Mappings.TryGetProperty<UsmapProperty>(entry.Name, entry.Ancestry, entry.ArrayIndex, asset, out _, out int idx)) throw new FormatException("No valid property \"" + entry.Name.ToString() + "\" in class " + entry.Ancestry.Parent.ToString());
+                if (!asset.Mappings.TryGetProperty<UsmapProperty>(entry.Name, entry.Ancestry, entry.ArrayIndex, asset, out var propInfo, out int idx)) throw new FormatException("No valid property \"" + entry.Name.ToString() + "\" in class " + entry.Ancestry.Parent.ToString());
                 propMap[idx] = entry;
                 if (entry.CanBeZero(asset) && entry.IsZero) zeroProps.Add(idx);
 

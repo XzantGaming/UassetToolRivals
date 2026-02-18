@@ -270,6 +270,49 @@ namespace UAssetAPI.Unversioned
             return propertiesMap.ContainsKey(keyTuple) ? propertiesMap[keyTuple] : null;
         }
 
+        /// <summary>
+        /// Removes a property by key and shifts subsequent property indices down.
+        /// Used for patching schemas where the USMAP has properties not present in the game's runtime.
+        /// </summary>
+        public bool RemovePropertyAndShift(int keyToRemove, bool isCaseInsensitive)
+        {
+            if (!properties.TryRemove(keyToRemove, out var removed)) return false;
+
+            // Shift all properties with key > keyToRemove down by 1
+            var newProps = new ConcurrentDictionary<int, UsmapProperty>();
+            foreach (var kvp in properties)
+            {
+                int newKey = kvp.Key > keyToRemove ? kvp.Key - 1 : kvp.Key;
+                if (kvp.Value.SchemaIndex > removed.SchemaIndex)
+                    kvp.Value.SchemaIndex--;
+                newProps[newKey] = kvp.Value;
+            }
+            properties = newProps;
+            if (PropCount > 0) PropCount--;
+            ConstructPropertiesMap(isCaseInsensitive);
+            return true;
+        }
+
+        /// <summary>
+        /// Re-adds a previously removed property at the specified key and shifts subsequent indices up.
+        /// </summary>
+        public void RestorePropertyAndShift(int key, UsmapProperty prop, ushort origPropCount, bool isCaseInsensitive)
+        {
+            // Shift all properties with key >= key up by 1
+            var newProps = new ConcurrentDictionary<int, UsmapProperty>();
+            foreach (var kvp in properties)
+            {
+                int newKey = kvp.Key >= key ? kvp.Key + 1 : kvp.Key;
+                if (kvp.Value.SchemaIndex >= prop.SchemaIndex)
+                    kvp.Value.SchemaIndex++;
+                newProps[newKey] = kvp.Value;
+            }
+            newProps[key] = prop;
+            properties = newProps;
+            PropCount = origPropCount;
+            ConstructPropertiesMap(isCaseInsensitive);
+        }
+
         public void ConstructPropertiesMap(bool isCaseInsensitive)
         {
             propertiesMap = new ConcurrentDictionary<Tuple<string, int>, UsmapProperty>(new PropertyMapComparer { Comparer = isCaseInsensitive ? StringComparer.InvariantCultureIgnoreCase : StringComparer.InvariantCulture });
@@ -766,22 +809,38 @@ namespace UAssetAPI.Unversioned
         public bool TryGetProperty<T>(FName propertyName, AncestryInfo ancestry, int dupIndex, UAsset asset, out T propDat, out int idx) where T : UsmapProperty
         {
             propDat = null;
-
             idx = 0;
+
+            // UE5 unversioned serialization uses GLOBAL indices across the entire class hierarchy.
+            // Parent class properties come FIRST (lower indices), derived class properties come AFTER.
+            // We must: 1) collect the full hierarchy, 2) compute the base offset for each level,
+            // 3) find the property and return baseOffset + localSchemaIndex.
+
             var schemaName = ancestry.Parent.Value.Value;
-            UsmapSchema relevantSchema = this.GetSchemaFromName(schemaName, asset);
-            while (schemaName != null && relevantSchema != null)
+
+            // Collect the hierarchy from derived → base
+            var hierarchy = new List<(UsmapSchema schema, string name)>();
+            var walkName = schemaName;
+            var walkSchema = this.GetSchemaFromName(walkName, asset);
+            while (walkName != null && walkSchema != null)
             {
-                propDat = relevantSchema.GetProperty(propertyName.Value.Value, dupIndex) as T;
+                hierarchy.Add((walkSchema, walkName));
+                walkName = walkSchema.SuperType;
+                walkSchema = this.GetSchemaFromName(walkName, asset);
+            }
+
+            // Walk from base → derived (reverse order) to compute correct base offsets
+            // Base class props get the lowest indices
+            for (int i = hierarchy.Count - 1; i >= 0; i--)
+            {
+                var (schema, _) = hierarchy[i];
+                propDat = schema.GetProperty(propertyName.Value.Value, dupIndex) as T;
                 if (propDat != null)
                 {
                     idx += propDat.SchemaIndex;
                     return true;
                 }
-
-                idx += relevantSchema.PropCount;
-                schemaName = relevantSchema.SuperType;
-                relevantSchema = this.GetSchemaFromName(schemaName, asset);
+                idx += schema.PropCount;
             }
 
             return false;

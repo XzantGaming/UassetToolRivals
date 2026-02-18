@@ -758,6 +758,78 @@ foreach (var entry in packages)
 
 ---
 
+## IoStore Obfuscation (--obfuscate)
+
+### Overview
+
+**Location:** `Program.cs` - `CliCreateModIoStore()`, `IoStoreWriter.cs`
+
+The `--obfuscate` flag enables mod protection by encrypting the IoStore with the game's AES key while setting a mismatched `EncryptionKeyGuid`. This prevents extraction tools like FModel from decrypting the mod while the game can still load it.
+
+### How It Works
+
+1. **Encryption with Game's AES Key**: The mod data is encrypted using Marvel Rivals' AES-256 key
+2. **Zeroed EncryptionKeyGuid**: The UTOC header's `EncryptionKeyGuid` is set to all zeros instead of the game's actual GUID
+3. **Encrypted Flag Set**: The `EIoContainerFlags.Encrypted` bit is set in the container flags
+
+### Why It Works
+
+**FModel/Extraction Tools:**
+- Check `EncryptionKeyGuid` in UTOC header to find matching AES key from their key database
+- All-zeros GUID doesn't match any known key → decryption fails
+- Tools report "encrypted" but can't decrypt
+
+**Game Engine:**
+- Ignores `EncryptionKeyGuid` field
+- Tries its hardcoded AES key directly on encrypted data
+- Decryption succeeds → mod loads normally
+
+### UTOC Header Structure (Encryption Fields)
+
+```
+Offset  Size  Field
+──────  ────  ─────────────────────────────
++0x40   16    EncryptionKeyGuid (set to zeros for obfuscation)
++0x50   1     ContainerFlags (bit 1 = Encrypted)
+```
+
+### Usage
+
+**CLI:**
+```bash
+UAssetTool create_mod_iostore output input_assets --obfuscate
+```
+
+**JSON Mode:**
+```json
+{"action": "create_mod_iostore", "output_path": "...", "input_dir": "...", "obfuscate": true}
+```
+
+### Implementation
+
+```csharp
+// In IoStoreWriter constructor
+private byte[] _encryptionKeyGuid = new byte[16];  // All zeros by default
+
+// When --obfuscate is used:
+enableEncryption = true;
+aesKey = MARVEL_RIVALS_AES_KEY;  // Game's actual key
+// _encryptionKeyGuid stays as zeros → GUID mismatch
+
+// In Complete():
+if (_enableEncryption)
+    containerFlags |= EIoContainerFlags.Encrypted;
+header.EncryptionKeyGuid = _encryptionKeyGuid;  // Zeros, not game's GUID
+```
+
+### Limitations
+
+- Only works for games where the engine ignores `EncryptionKeyGuid` (like Marvel Rivals)
+- Does not protect against reverse-engineering by someone with the AES key who manually decrypts
+- Provides obfuscation, not true DRM
+
+---
+
 ## Mod Extraction (--mod argument)
 
 ### Overview
