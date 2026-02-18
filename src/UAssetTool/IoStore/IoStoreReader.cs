@@ -531,12 +531,25 @@ public class IoStoreToc
                         using var dirReader = new BinaryReader(dirStream);
                         ReadDirectoryIndex(dirReader, toc, directoryIndexSize);
                         
-                        if (toc.FileMapRev.Count > 0)
+                        // Validate: mount point should look like a valid UE path (starts with ../ or /)
+                        // This prevents false positives when parsing encrypted garbage
+                        bool validMountPoint = !string.IsNullOrEmpty(toc.MountPoint) && 
+                            (toc.MountPoint.StartsWith("../") || toc.MountPoint.StartsWith("/"));
+                        
+                        if (toc.FileMapRev.Count > 0 && validMountPoint)
                         {
                             toc.RawDirectoryIndex = (byte[])originalData.Clone();
                             parsed = true;
                             if (Environment.GetEnvironmentVariable("DEBUG") == "1")
                                 Console.Error.WriteLine($"[TOC] Raw directory index parsed: {toc.FileMapRev.Count} file paths");
+                        }
+                        else if (toc.FileMapRev.Count > 0)
+                        {
+                            // Parsed something but mount point looks like garbage - clear and try decrypt
+                            toc.FileMapRev.Clear();
+                            toc.MountPoint = "";
+                            if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+                                Console.Error.WriteLine($"[TOC] Raw parse produced invalid mount point, trying decrypt...");
                         }
                     }
                     catch
