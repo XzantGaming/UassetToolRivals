@@ -50,11 +50,18 @@ public class FZenPackageContext : IDisposable
     /// <summary>
     /// Load an IoStore container with priority - packages in this container will override
     /// any previously loaded packages with the same ID. Used for mod containers.
-    /// Mod containers are loaded WITHOUT encryption (no AES key).
+    /// Auto-detects if the container is encrypted (obfuscated) and uses AES key if needed.
     /// </summary>
     public void LoadContainerWithPriority(string utocPath)
     {
-        LoadContainerInternal(utocPath, overridePriority: true, useEncryption: false);
+        // First try without encryption (normal mods)
+        // If the container is encrypted (obfuscated), the IoStoreReader will detect it
+        // and we need to reload with the AES key
+        var testReader = new IoStoreReader(utocPath, null);
+        bool needsEncryption = testReader.Toc.IsEncrypted;
+        testReader.Dispose();
+        
+        LoadContainerInternal(utocPath, overridePriority: true, useEncryption: needsEncryption);
     }
     
     private void LoadContainerInternal(string utocPath, bool overridePriority, bool useEncryption = true)
