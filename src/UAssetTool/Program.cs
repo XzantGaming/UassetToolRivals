@@ -5894,7 +5894,7 @@ public partial class Program
             var result = new Dictionary<string, object>
             {
                 ["material_count"] = skExport.Materials?.Count ?? 0,
-                ["bone_count"] = skExport.ReferenceSkeleton?.FinalRefBoneInfo?.Count ?? 0,
+                ["bone_count"] = skExport.ReferenceSkeleton?.BoneCount ?? 0,
                 ["materials"] = skExport.Materials?.Select((m, i) => new Dictionary<string, object>
                 {
                     ["index"] = i,
@@ -5971,7 +5971,7 @@ public partial class Program
         if (string.IsNullOrEmpty(pathString))
             return new UAssetResponse { Success = false, Message = "file_path (path string to hash) is required" };
         
-        ulong hash = CityHash.CityHash64(System.Text.Encoding.ASCII.GetBytes(pathString.ToLowerInvariant()));
+        ulong hash = IoStore.CityHash.CityHash64(pathString.ToLowerInvariant());
         return new UAssetResponse 
         { 
             Success = true, 
@@ -6016,15 +6016,15 @@ public partial class Program
         try
         {
             byte[] data = File.ReadAllBytes(filePath);
-            var zenPackage = ZenPackage.FZenPackage.Read(data, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+            var zenHeader = ZenPackage.FZenPackageHeader.Deserialize(data, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
             
             var result = new Dictionary<string, object>
             {
-                ["name_map_count"] = zenPackage.NameMap.Count,
-                ["import_map_count"] = zenPackage.ImportMap.Count,
-                ["export_map_count"] = zenPackage.ExportMap.Count,
-                ["export_bundle_count"] = zenPackage.ExportBundleHeaders.Count,
-                ["package_name"] = zenPackage.PackageName ?? "Unknown"
+                ["name_map_count"] = zenHeader.NameMap?.Count ?? 0,
+                ["import_map_count"] = zenHeader.ImportMap?.Count ?? 0,
+                ["export_map_count"] = zenHeader.ExportMap?.Count ?? 0,
+                ["export_bundle_count"] = zenHeader.ExportBundleHeaders?.Count ?? 0,
+                ["header_size"] = zenHeader.Summary?.HeaderSize ?? 0
             };
             
             return new UAssetResponse { Success = true, Data = result };
@@ -6058,7 +6058,7 @@ public partial class Program
         
         try
         {
-            var result = NiagaraService.GetNiagaraDetails(filePath, usmapPath, fullValues: true);
+            var result = NiagaraService.GetNiagaraDetails(filePath, usmapPath, fullData: true);
             return new UAssetResponse { Success = true, Data = result };
         }
         catch (Exception ex)
