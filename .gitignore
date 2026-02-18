@@ -2,6 +2,8 @@
 bin/
 obj/
 publish/
+publish_selfcontained/
+publish_*/
 src/UAssetAPI/git_commit.txt
 
 # IDE
