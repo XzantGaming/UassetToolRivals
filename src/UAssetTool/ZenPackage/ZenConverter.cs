@@ -658,12 +658,29 @@ public class ZenConverter
             packageName = "/" + assetName;
         }
         
-        // Check if package name is already in name map, if not add it
-        int packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
-        if (packageNameIndex < 0)
+        // The Zen summary Name field indexes into the NameMap using the SHORT asset name.
+        // Game-extracted assets store only the short name (e.g. "MI_102993_Trail_13_301")
+        // in the NameMap, NOT the full path. The full path is used for ImportedPackageNames only.
+        // Adding the full path as a new NameMap entry causes extra names on round-trips.
+        //
+        // Strategy: prefer the short asset name if it's already in the NameMap.
+        // Only fall back to adding the full path if the short name isn't present.
+        int packageNameIndex = zenPackage.NameMap.IndexOf(assetName);
+        if (packageNameIndex >= 0)
         {
-            packageNameIndex = zenPackage.NameMap.Count;
-            zenPackage.NameMap.Add(packageName);
+            // Short name found — use it as the Zen summary name (matches game format)
+            // Keep packageName as the full path for ImportedPackageNames resolution
+        }
+        else
+        {
+            // Short name not in NameMap — check if full path is already there
+            packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
+            if (packageNameIndex < 0)
+            {
+                // Neither present — add the full path (new asset with no prior NameMap entry)
+                packageNameIndex = zenPackage.NameMap.Count;
+                zenPackage.NameMap.Add(packageName);
+            }
         }
         
         zenPackage.PackageName = packageName;

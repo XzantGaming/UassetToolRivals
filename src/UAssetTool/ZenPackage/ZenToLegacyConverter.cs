@@ -1405,17 +1405,25 @@ public class ZenToLegacyConverter
     private (string baseName, int number) ParseNameWithNumber(string fullName)
     {
         // Check if the name ends with _N where N is a number
+        // IMPORTANT: Must match UAssetAPI FName.FromStringFragments logic:
+        // Do NOT split if the suffix has leading zeros (e.g. _002, _01) — those are
+        // part of the literal name, not FName instance numbers. Only split _0 (single zero)
+        // or suffixes that don't start with '0'.
         int lastUnderscore = fullName.LastIndexOf('_');
         if (lastUnderscore > 0 && lastUnderscore < fullName.Length - 1)
         {
             string suffix = fullName.Substring(lastUnderscore + 1);
-            if (int.TryParse(suffix, out int num))
+            // Skip if zero-padded (length > 1 and starts with '0') — e.g. _002, _01
+            if (suffix.Length == 1 || suffix[0] != '0')
             {
-                // Found numeric suffix - return base name and number+1 (FName format)
-                return (fullName.Substring(0, lastUnderscore), num + 1);
+                if (int.TryParse(suffix, out int num))
+                {
+                    // Found numeric suffix - return base name and number+1 (FName format)
+                    return (fullName.Substring(0, lastUnderscore), num + 1);
+                }
             }
         }
-        // No numeric suffix
+        // No numeric suffix (or zero-padded suffix — keep as literal name)
         return (fullName, 0);
     }
     
