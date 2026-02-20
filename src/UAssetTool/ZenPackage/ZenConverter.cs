@@ -658,43 +658,75 @@ public class ZenConverter
             packageName = "/" + assetName;
         }
         
-        // The Zen summary Name field indexes into the NameMap using the SHORT asset name.
-        // Game-extracted assets store only the short name (e.g. "MI_102993_Trail_13_301")
-        // in the NameMap, NOT the full path. The full path is used for ImportedPackageNames only.
-        // Adding the full path as a new NameMap entry causes extra names on round-trips.
+        // The Zen summary Name field indexes into the NameMap.
+        // Game-extracted assets store the FName BASE name (without numeric suffix) in the NameMap,
+        // e.g. "MI_102993_Trail_13" for asset "MI_102993_Trail_13_301" (where _301 is FName Number).
+        // We must NOT add the full package path as a new NameMap entry — that causes extra names
+        // on round-trips.
         //
-        // Strategy: prefer the short asset name if it's already in the NameMap.
-        // Only fall back to adding the full path if the short name isn't present.
+        // Strategy: check in order:
+        // 1. Full asset name (e.g. "MI_Sword_6_602_601") — for names without FName number split
+        // 2. FName base name (e.g. "MI_102993_Trail_13") — for names with numeric suffix
+        // 3. Full package path — if already present
+        // 4. Only add full path as last resort
         int packageNameIndex = zenPackage.NameMap.IndexOf(assetName);
+        uint packageNameNumber = 0;
         if (packageNameIndex >= 0)
         {
-            // Short name found — use it as the Zen summary name (matches game format)
-            // Keep packageName as the full path for ImportedPackageNames resolution
+            // Full asset name found — use it with Number=0
         }
         else
         {
-            // Short name not in NameMap — check if full path is already there
-            packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
-            if (packageNameIndex < 0)
+            // Try FName base name: strip trailing _N numeric suffix (matching FName.FromStringFragments)
+            string fnameBase = assetName;
+            int fnameNumber = 0;
+            int lastUnderscore = assetName.LastIndexOf('_');
+            if (lastUnderscore > 0 && lastUnderscore < assetName.Length - 1)
             {
-                // Neither present — add the full path (new asset with no prior NameMap entry)
-                packageNameIndex = zenPackage.NameMap.Count;
-                zenPackage.NameMap.Add(packageName);
+                string suffix = assetName.Substring(lastUnderscore + 1);
+                if (suffix.Length == 1 || suffix[0] != '0') // same zero-padding rule as FName
+                {
+                    if (int.TryParse(suffix, out int suffixVal))
+                    {
+                        fnameBase = assetName.Substring(0, lastUnderscore);
+                        fnameNumber = suffixVal + 1; // FName Number = suffix + 1
+                    }
+                }
+            }
+            
+            packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
+            if (packageNameIndex >= 0)
+            {
+                // FName base found — use it with the computed Number
+                packageNameNumber = (uint)fnameNumber;
+            }
+            else
+            {
+                // Check if full path is already there
+                packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
+                if (packageNameIndex < 0)
+                {
+                    // Neither present — add the full path (new asset with no prior NameMap entry)
+                    packageNameIndex = zenPackage.NameMap.Count;
+                    zenPackage.NameMap.Add(packageName);
+                }
             }
         }
         
         zenPackage.PackageName = packageName;
         zenPackage.PackageNameIndex = packageNameIndex;
+        zenPackage.PackageNameNumber = packageNameNumber;
         
         // Verbose logging disabled for parallel performance
     }
 
     private static void SetPackageSummary(UAsset asset, FZenPackage zenPackage)
     {
-        // Set package name index from the name map
-        // Name.Number must be 0 - using a non-zero number causes FModel/CUE4Parse to append 
-        // the number suffix to the package path when looking up store entries, breaking resolution
-        zenPackage.Summary.Name = new FMappedName((uint)zenPackage.PackageNameIndex, 0);
+        // Set package name index and FName number from the name map
+        // When the NameMap contains the FName base (e.g. "MI_102993_Trail_13"), Number must be
+        // set to suffix+1 (e.g. 302 for _301) to reconstruct the correct package name.
+        // When the NameMap contains the full name, Number is 0.
+        zenPackage.Summary.Name = new FMappedName((uint)zenPackage.PackageNameIndex, zenPackage.PackageNameNumber);
         
         // Copy package flags from legacy asset
         // PKG_Cooked (0x00000200) + PKG_FilterEditorOnly (0x80000000) + PKG_UnversionedProperties (0x00002000)
@@ -905,14 +937,12 @@ public class ZenConverter
             current = asset.Imports[outerIdx];
         }
         // The root import's ObjectName is the package path
-        // FName Number produces _1, _2, etc. but game files use _01, _02 format
-        // Convert FName number to game's format with leading zero
+        // FName Number > 0 means suffix _{Number-1} (matching UE5 FName::ToString, no zero-padding)
         string basePath = current.ObjectName?.Value?.Value ?? "";
         int number = current.ObjectName?.Number ?? 0;
         if (number > 0)
         {
-            // Number=2 means suffix _1 in FName, but game uses _01
-            return basePath + "_" + (number - 1).ToString("D2");
+            return basePath + "_" + (number - 1);
         }
         return basePath;
     }
@@ -928,12 +958,12 @@ public class ZenConverter
         
         while (current.OuterIndex.Index != 0)
         {
-            // Convert FName number to game's _01, _02 format
+            // Convert FName number to _0, _1, _2 format (matching UE5 FName::ToString)
             string baseName = current.ObjectName?.Value?.Value ?? "";
             int number = current.ObjectName?.Number ?? 0;
             if (number > 0)
             {
-                parts.Add(baseName + "_" + (number - 1).ToString("D2"));
+                parts.Add(baseName + "_" + (number - 1));
             }
             else
             {
@@ -2151,6 +2181,7 @@ public class FZenPackage
     public List<FDependencyBundleEntry> DependencyBundleEntries { get; set; }
     public string PackageName { get; set; } = "";
     public int PackageNameIndex { get; set; }
+    public uint PackageNameNumber { get; set; } // FName Number for summary Name (e.g. 302 for _301)
     
     // For UE5.0+ package imports
     public List<ulong> ImportedPackages { get; set; }
