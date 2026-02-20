@@ -52,7 +52,6 @@ public partial class Program
                 "batch_detect" => CliBatchDetect(args),
                 "dump" => CliDump(args),
                 "to_zen" => CliToZen(args),
-                "to_iostore" => CliToIoStore(args),
                 "inspect_zen" => CliInspectZen(args),
                 "create_pak" => CliCreatePak(args),
                 "create_companion_pak" => CliCreateCompanionPak(args),
@@ -112,8 +111,7 @@ public partial class Program
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
         Console.WriteLine("    to_zen <uasset> [usmap] [--no-material-tags] - Convert legacy to Zen format");
-        Console.WriteLine("    to_iostore <output> <zen_files...>       - Create IoStore from Zen packages");
-        Console.WriteLine("    create_pak <output.pak> <files...>       - Create encrypted PAK file");
+            Console.WriteLine("    create_pak <output.pak> <files...>       - Create encrypted PAK file");
         Console.WriteLine("    create_companion_pak <output.pak> <files...> - Create companion PAK for IoStore");
         Console.WriteLine("    create_iostore_bundle <output> <files...> - Create complete IoStore bundle");
         Console.WriteLine();
@@ -221,96 +219,6 @@ public partial class Program
         }
     }
     
-    private static int CliToIoStore(string[] args)
-    {
-        if (args.Length < 3)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool to_iostore <output_path> <zen_file1> [zen_file2] ... [--game-path <path>]");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Arguments:");
-            Console.Error.WriteLine("  output_path    - Output path for .utoc/.ucas files (without extension)");
-            Console.Error.WriteLine("  zen_files      - One or more .uzenasset files to pack");
-            Console.Error.WriteLine("  --game-path    - Game path prefix (default: Marvel/Content/)");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Example:");
-            Console.Error.WriteLine("  UAssetTool to_iostore MyMod_P file1.uzenasset file2.uzenasset");
-            return 1;
-        }
-
-        string outputPath = args[1];
-        string gamePathPrefix = "Marvel/Content/";
-        var zenFiles = new List<string>();
-
-        // Parse arguments
-        for (int i = 2; i < args.Length; i++)
-        {
-            if (args[i] == "--game-path" && i + 1 < args.Length)
-            {
-                gamePathPrefix = args[++i];
-            }
-            else if (File.Exists(args[i]))
-            {
-                zenFiles.Add(args[i]);
-            }
-            else
-            {
-                Console.Error.WriteLine($"Warning: File not found: {args[i]}");
-            }
-        }
-
-        if (zenFiles.Count == 0)
-        {
-            Console.Error.WriteLine("Error: No valid .uzenasset files provided");
-            return 1;
-        }
-
-        try
-        {
-            string containerName = Path.GetFileNameWithoutExtension(outputPath);
-            string utocPath = outputPath + ".utoc";
-            Console.Error.WriteLine($"[CliToIoStore] Creating IoStore container: {containerName}");
-            Console.Error.WriteLine($"[CliToIoStore] Output: {utocPath} / {outputPath}.ucas");
-            Console.Error.WriteLine($"[CliToIoStore] Zen files: {zenFiles.Count}");
-
-            using var writer = new IoStore.IoStoreWriter(
-                utocPath,
-                IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
-                IoStore.EIoContainerHeaderVersion.NoExportInfo,
-                "../../../");
-
-            foreach (var zenFile in zenFiles)
-            {
-                // Derive game path from filename
-                string fileName = Path.GetFileNameWithoutExtension(zenFile);
-                if (fileName.EndsWith(".uzenasset", StringComparison.OrdinalIgnoreCase))
-                    fileName = fileName[..^10];
-                
-                string gamePath = "../../../" + gamePathPrefix + fileName;
-                
-                // Read zen file and write as chunk
-                byte[] zenData = File.ReadAllBytes(zenFile);
-                var packageId = IoStore.FPackageId.FromName("/" + gamePathPrefix + fileName);
-                var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
-                var storeEntry = new IoStore.StoreEntry { ExportCount = 1, ExportBundleCount = 1 };
-                writer.WritePackageChunk(chunkId, gamePath, zenData, storeEntry);
-            }
-
-            writer.Complete();
-
-            Console.WriteLine($"SUCCESS: Created IoStore container at {utocPath}");
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"ERROR: {ex.Message}");
-            if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            {
-                Console.Error.WriteLine(ex.StackTrace);
-            }
-            return 1;
-        }
-    }
-
     private static int CliCreatePak(string[] args)
     {
         if (args.Length < 3)
@@ -732,7 +640,49 @@ public partial class Program
             Console.Error.WriteLine($"[CreateModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
             Console.Error.WriteLine($"[CreateModIoStore]   Protection: {(enableEncryption ? "Obfuscated (FModel-proof)" : "None")}");
 
-            // Create IoStore container
+            // Phase 1: Parallel conversion to Zen format (CPU-intensive)
+            // This is the bottleneck - UAsset parsing, NameMap building, export reordering, hashing
+            int threadCount = Math.Max(1, (Environment.ProcessorCount * 3) / 4); // 75% of cores
+            Console.Error.WriteLine($"[CreateModIoStore]   Threads: {threadCount}");
+
+            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, string? error)>();
+            int processedCount = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            Parallel.ForEach(uassetFiles, new ParallelOptions { MaxDegreeOfParallelism = threadCount }, uassetPath =>
+            {
+                string assetName = Path.GetFileNameWithoutExtension(uassetPath);
+                try
+                {
+                    byte[] zenData;
+                    string packagePath;
+                    ZenPackage.FZenPackage zenPackage;
+
+                    (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
+                        uassetPath, usmapPath, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+
+                    byte[]? ubulkData = null;
+                    string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
+                    if (File.Exists(ubulkPath)) ubulkData = File.ReadAllBytes(ubulkPath);
+
+                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, null));
+
+                    int count = Interlocked.Increment(ref processedCount);
+                    if (count % 50 == 0 || count == uassetFiles.Count)
+                    {
+                        Console.Error.WriteLine($"[CreateModIoStore] Converted {count}/{uassetFiles.Count}...");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    conversionResults.Add((assetName, uassetPath, null, "", null, null, ex.Message));
+                    Interlocked.Increment(ref processedCount);
+                }
+            });
+
+            Console.Error.WriteLine($"[CreateModIoStore] Parallel conversion done in {sw.Elapsed.TotalSeconds:F1}s. Writing IoStore...");
+
+            // Phase 2: Sequential write to IoStore (fast I/O, not parallelizable)
             using var ioStoreWriter = new IoStore.IoStoreWriter(
                 utocPath,
                 IoStore.EIoStoreTocVersion.PerfectHashWithOverflow,
@@ -743,106 +693,82 @@ public partial class Program
                 aesKey);
 
             var filePaths = new List<string>();
+            int convertedCount = 0;
+            var errors = new List<string>();
 
-            foreach (var uassetPath in uassetFiles)
+            foreach (var result in conversionResults)
             {
-                string assetName = Path.GetFileNameWithoutExtension(uassetPath);
-                Console.Error.WriteLine($"  Converting: {assetName}");
-
-                // Convert legacy asset to Zen format and get the package path and FZenPackage
-                // Use specialized AnimBlueprintZenConverter for AnimBlueprint/PhysicsAsset types
-                byte[] zenData;
-                string packagePath;
-                ZenPackage.FZenPackage zenPackage;
-                bool useAnimBlueprintConverter = ZenPackage.AnimBlueprintZenConverter.IsAnimBlueprintAsset(uassetPath, usmapPath);
-                try
+                if (result.error != null || result.zenData == null)
                 {
-                    if (useAnimBlueprintConverter)
+                    if (result.error != null)
                     {
-                        Console.Error.WriteLine($"    Using AnimBlueprint converter for: {assetName}");
-                        (zenData, packagePath, zenPackage) = ZenPackage.AnimBlueprintZenConverter.ConvertLegacyToZenFull(
-                            uassetPath,
-                            usmapPath,
-                            ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                        errors.Add($"{result.assetName}: {result.error}");
+                        Console.Error.WriteLine($"  ERROR: {result.assetName}: {result.error}");
                     }
-                    else
-                    {
-                        (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                            uassetPath,
-                            usmapPath,
-                            ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"    ERROR converting {assetName}: {ex.Message}");
                     continue;
                 }
 
-                Console.Error.WriteLine($"    Zen size: {zenData.Length} bytes");
-                Console.Error.WriteLine($"    Package path: {packagePath}");
+                try
+                {
+                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, _) = result;
 
-                // Create package ID using the /Game/... format to match the package name in Zen
-                // The package name in Zen is stored as /Game/Marvel/Characters/...
-                // We need to convert Marvel/Content/Marvel/Characters/... back to /Game/Marvel/Characters/...
-                string gamePackagePath;
-                if (packagePath.StartsWith("Marvel/Content/"))
-                {
-                    // Convert Marvel/Content/X to /Game/X
-                    gamePackagePath = "/Game/" + packagePath.Substring("Marvel/Content/".Length);
-                }
-                else
-                {
-                    gamePackagePath = "/" + packagePath;
-                }
-                Console.Error.WriteLine($"    Game package path (for ID): {gamePackagePath}");
-                var packageId = IoStore.FPackageId.FromName(gamePackagePath);
-                var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
+                    // Create package ID using the /Game/... format
+                    string gamePackagePath;
+                    if (packagePath.StartsWith("Marvel/Content/"))
+                    {
+                        gamePackagePath = "/Game/" + packagePath.Substring("Marvel/Content/".Length);
+                    }
+                    else
+                    {
+                        gamePackagePath = "/" + packagePath;
+                    }
 
-                // Create store entry with imported packages from the Zen package
-                var storeEntry = new IoStore.StoreEntry
-                {
-                    ExportCount = zenPackage.ExportMap.Count,
-                    ExportBundleCount = 1,
-                    LoadOrder = 0
-                };
-                
-                // Add imported packages to store entry so game can resolve them
-                foreach (ulong importedPkgId in zenPackage.ImportedPackages)
-                {
-                    storeEntry.ImportedPackages.Add(new IoStore.FPackageId(importedPkgId));
-                }
-                if (storeEntry.ImportedPackages.Count > 0)
-                {
-                    Console.Error.WriteLine($"    StoreEntry has {storeEntry.ImportedPackages.Count} imported packages");
-                }
+                    var packageId = IoStore.FPackageId.FromName(gamePackagePath);
+                    var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
 
-                // Write to IoStore using the actual package path (with .uasset extension for directory index)
-                string fullPath = mountPoint + packagePath + ".uasset";
-                ioStoreWriter.WritePackageChunk(chunkId, fullPath, zenData, storeEntry);
-                
-                // Add both .uasset and .uexp to chunknames using the actual package path
-                filePaths.Add(packagePath + ".uasset");
-                filePaths.Add(packagePath + ".uexp");
-                
-                // If .ubulk exists, write it as a separate BulkData chunk
-                string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
-                if (File.Exists(ubulkPath))
-                {
-                    byte[] ubulkData = File.ReadAllBytes(ubulkPath);
-                    var bulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.BulkData);
-                    string bulkFullPath = mountPoint + packagePath + ".ubulk";
-                    ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
-                    filePaths.Add(packagePath + ".ubulk");
-                    Console.Error.WriteLine($"    Added BulkData chunk: {ubulkData.Length} bytes");
-                }
+                    // Create store entry with imported packages from the Zen package
+                    var storeEntry = new IoStore.StoreEntry
+                    {
+                        ExportCount = zenPackage.ExportMap.Count,
+                        ExportBundleCount = 1,
+                        LoadOrder = 0
+                    };
 
-                Console.Error.WriteLine($"    Added to IoStore: {gamePackagePath}");
+                    foreach (ulong importedPkgId in zenPackage.ImportedPackages)
+                    {
+                        storeEntry.ImportedPackages.Add(new IoStore.FPackageId(importedPkgId));
+                    }
+
+                    // Write to IoStore
+                    string fullPath = mountPoint + packagePath + ".uasset";
+                    ioStoreWriter.WritePackageChunk(chunkId, fullPath, zenData, storeEntry);
+
+                    filePaths.Add(packagePath + ".uasset");
+                    filePaths.Add(packagePath + ".uexp");
+
+                    // Handle .ubulk if exists (already loaded during parallel phase)
+                    if (ubulkData != null)
+                    {
+                        var bulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.BulkData);
+                        string bulkFullPath = mountPoint + packagePath + ".ubulk";
+                        ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
+                        filePaths.Add(packagePath + ".ubulk");
+                    }
+
+                    convertedCount++;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{result.assetName}: {ex.Message}");
+                    Console.Error.WriteLine($"  ERROR writing {result.assetName}: {ex.Message}");
+                }
             }
 
             if (filePaths.Count == 0)
             {
                 Console.Error.WriteLine("Error: No assets were successfully converted");
+                if (errors.Count > 0)
+                    Console.Error.WriteLine($"Errors: {string.Join("; ", errors)}");
                 return 1;
             }
 
