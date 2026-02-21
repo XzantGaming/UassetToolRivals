@@ -22,8 +22,14 @@ public class ZenConverter
     private static readonly object _scriptObjectsLock = new();
     
     // Static usmap cache - loaded once per path and reused (HUGE performance win)
+    // Used for skipParsing: true loads where UAsset doesn't mutate the Usmap.
     private static readonly Dictionary<string, UAssetAPI.Unversioned.Usmap> _usmapCache = new();
     private static readonly object _usmapLock = new();
+    
+    // Per-thread usmap cache for skipParsing: false loads.
+    // Full parsing can mutate Usmap.Schemas (PullSchemasFromAnotherAsset, UserDefinedStructExport),
+    // so each thread needs its own instance to avoid concurrent dictionary corruption.
+    [ThreadStatic] private static Dictionary<string, UAssetAPI.Unversioned.Usmap>? _threadUsmapCache;
     
     // When true, reads MaterialTagAssetUserData from SkeletalMesh packages
     // and injects per-slot FGameplayTagContainer data into FSkeletalMaterial during Zen conversion.
@@ -128,10 +134,12 @@ public class ZenConverter
             }
         }
         
-        // Load the legacy asset
-        // When material tags are enabled, we need full export parsing for SkeletalMesh detection.
-        // Otherwise, skip parsing to avoid schema errors for Blueprint assets.
-        var asset = LoadAsset(uassetPath, usmapPath, skipParsing: !_enableMaterialTags);
+        // Load the legacy asset - always skipParsing: true first for safe header-only read.
+        // Export class type is available from the header, so we can detect SkeletalMesh etc.
+        // Full parsing (skipParsing: false) is only done for SkeletalMesh when material tags need injection.
+        // This avoids unnecessary full parsing of textures/materials which can fail intermittently
+        // due to shared Usmap state when running in Parallel.ForEach.
+        var asset = LoadAsset(uassetPath, usmapPath, skipParsing: true);
         asset.UseSeparateBulkDataFiles = true;
 
         // Log whether asset uses versioned or unversioned properties
@@ -186,18 +194,29 @@ public class ZenConverter
         long headerSize = asset.Exports.Min(e => e.SerialOffset);
 
         // Check if this is a SkeletalMesh - needed for material parsing and tag injection
+        // Export class type is available from header even with skipParsing: true
         bool isSkeletalMesh = asset.Exports.Any(e => 
             e.GetExportClassType()?.Value?.Value == "SkeletalMesh" ||
             e.GetExportClassType()?.Value?.Value?.Contains("SkeletalMesh") == true);
 
         UAssetAPI.ExportTypes.SkeletalMeshExport? skeletalExport = null;
-        if (isSkeletalMesh)
+        if (isSkeletalMesh && _enableMaterialTags)
         {
+            // Reload with full parsing for SkeletalMesh material tag injection.
+            // Only SkeletalMesh assets need this; textures/materials/blueprints stay skipParsing: true.
+            asset = LoadAsset(uassetPath, usmapPath, skipParsing: false);
+            asset.UseSeparateBulkDataFiles = true;
+            // Recalculate headerSize after reload (full-parsed asset may differ)
+            headerSize = asset.Exports.Min(e => e.SerialOffset);
             skeletalExport = asset.Exports.FirstOrDefault(e => e is UAssetAPI.ExportTypes.SkeletalMeshExport)
                 as UAssetAPI.ExportTypes.SkeletalMeshExport;
             skeletalExport?.EnsureExtraDataParsed();
             if (skeletalExport?.Materials == null || skeletalExport.Materials.Count == 0)
                 skeletalExport = null;
+        }
+        else if (isSkeletalMesh)
+        {
+            // Material tags disabled but still SkeletalMesh - no full parse needed
         }
 
         // MaterialTags: read tags and inject into materials.
@@ -1573,13 +1592,28 @@ public class ZenConverter
         
         if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
         {
-            // Use cached usmap to avoid parsing the same file 863+ times
-            lock (_usmapLock)
+            if (skipParsing)
             {
-                if (!_usmapCache.TryGetValue(usmapPath, out mappings))
+                // skipParsing: true — UAsset won't mutate the Usmap, sharing is safe
+                lock (_usmapLock)
+                {
+                    if (!_usmapCache.TryGetValue(usmapPath, out mappings))
+                    {
+                        mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
+                        _usmapCache[usmapPath] = mappings;
+                    }
+                }
+            }
+            else
+            {
+                // skipParsing: false — UAsset may mutate Usmap.Schemas during parsing
+                // (PullSchemasFromAnotherAsset, UserDefinedStructExport, etc.)
+                // Use per-thread cache to avoid concurrent dictionary corruption.
+                _threadUsmapCache ??= new Dictionary<string, UAssetAPI.Unversioned.Usmap>();
+                if (!_threadUsmapCache.TryGetValue(usmapPath, out mappings))
                 {
                     mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
-                    _usmapCache[usmapPath] = mappings;
+                    _threadUsmapCache[usmapPath] = mappings;
                 }
             }
         }
