@@ -5334,6 +5334,10 @@ public partial class Program
             
             if (converted == 0)
             {
+                // Clean up empty files left by IoStoreWriter constructor
+                ioStoreWriter.Dispose();
+                try { File.Delete(utocPath); } catch { }
+                try { File.Delete(Path.ChangeExtension(utocPath, ".ucas")); } catch { }
                 return new UAssetResponse { Success = false, Message = $"No assets were converted. Errors: {string.Join("; ", errors)}" };
             }
             
