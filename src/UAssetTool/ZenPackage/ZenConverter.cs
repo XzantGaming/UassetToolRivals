@@ -724,13 +724,19 @@ public class ZenConverter
                 }
             }
             
-            packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
-            if (packageNameIndex >= 0)
+            // Only use fnameBase if we actually detected a numeric suffix (fnameNumber > 0)
+            // Otherwise fnameBase is just a partial match that would cause wrong package name reconstruction
+            if (fnameNumber > 0)
             {
-                // FName base found — use it with the computed Number
-                packageNameNumber = (uint)fnameNumber;
+                packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
+                if (packageNameIndex >= 0)
+                {
+                    // FName base found — use it with the computed Number
+                    packageNameNumber = (uint)fnameNumber;
+                }
             }
-            else
+            
+            if (packageNameIndex < 0)
             {
                 // Check if full path is already there
                 packageNameIndex = zenPackage.NameMap.IndexOf(packageName);

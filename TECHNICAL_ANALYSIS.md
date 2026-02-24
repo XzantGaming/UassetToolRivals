@@ -290,20 +290,118 @@ Empty container = 4 bytes (count = 0)
 
 ## StaticMesh Structure
 
-**Implementation:** `UAssetAPI/ExportTypes/StaticMeshExport.cs`
+**Implementation:** `UAssetAPI/ExportTypes/StaticMeshExport.cs`, `ZenPackage/ZenConverter.cs`
 
 StaticMesh uses a different material structure than SkeletalMesh. For Marvel Rivals, the struct is 36 bytes without FGameplayTagContainer padding.
+
+### FStaticMaterial Structure
 
 ```
 Offset  Size  Field
 ──────  ────  ─────────────────────────────
 +0      4     MaterialInterface (FPackageIndex)
 +4      8     MaterialSlotName (FName)
-+12     4     OverlayMaterialInterface (FPackageIndex)
-+16     20    FMeshUVChannelInfo
++12     24    FMeshUVChannelInfo (serialized)
+              - bInitialized (int32)
+              - bOverrideDensities (int32)
+              - LocalUVDensities[4] (16 bytes)
 ──────  ────  ─────────────────────────────
 Total:  36 bytes
 ```
+
+**Note:** `ImportedMaterialSlotName` exists in-memory but is NOT serialized in cooked data.
+
+### StaticMesh Binary Tail Structure
+
+Working backwards from `PACKAGE_FILE_TAG` (0x9E2A83C1):
+
+```
+┌─────────────────────────────────────────┐
+│ PACKAGE_FILE_TAG (4 bytes)              │  ← End of export data
+├─────────────────────────────────────────┤
+│ StaticMaterials TArray                  │
+│ - int32 count                           │
+│ - FStaticMaterial × count (36 bytes ea) │
+├─────────────────────────────────────────┤
+│ bHasSpeedTreeWind (int32, always 0)     │
+├─────────────────────────────────────────┤
+│ ScreenSize[8] (128 bytes Marvel format) │  ← 8 × 16 bytes
+│ - bCooked (int32)                       │
+│ - Default (float)                       │
+│ - PerPlatformCount (int32)              │
+│ - PlatformValue (float)                 │
+├─────────────────────────────────────────┤
+│ bLODsShareStaticLighting (int32)        │
+├─────────────────────────────────────────┤
+│ FBoxSphereBounds (56 bytes LWC)         │
+│ - Origin (3 × double)                   │
+│ - BoxExtent (3 × double)                │
+│ - SphereRadius (double)                 │
+├─────────────────────────────────────────┤
+│ LODResources + DistanceFieldVolumeData  │
+├─────────────────────────────────────────┤
+│ FStripDataFlags (2 bytes)               │  ← Start of Extras
+└─────────────────────────────────────────┘
+```
+
+### ScreenSize Format Difference
+
+| Format | Entry Size | Total Size | Structure |
+|--------|------------|------------|-----------|
+| Standard UE5 | 8 bytes | 64 bytes | bCooked (int32) + Default (float) |
+| Marvel Rivals | 16 bytes | 128 bytes | bCooked + Default + PerPlatformCount + PlatformValue |
+
+**Fix:** `PatchStaticMeshScreenSize()` expands 64→128 bytes by inserting 8 bytes (zeros) after each 8-byte entry.
+
+### StaticMesh Conversion Pipeline
+
+When converting modder-cooked StaticMesh assets via `create_mod_iostore`:
+
+1. **Versioned Properties** — Kept as-is (no unversioned conversion)
+2. **ScreenSize Expansion** — 64→128 bytes (binary patch)
+3. **NavCollision** — Left untouched (game handles variable sizes)
+
+### Why Unversioned Conversion is Disabled
+
+UAssetAPI's usmap schema produces **different global property indices** than the game's runtime class hierarchy:
+
+| Source | Property Indices |
+|--------|------------------|
+| Game runtime | 2, 3, 5 |
+| UAssetAPI usmap | 17, 18, 19, 28 |
+
+This mismatch causes `Bad export index` crashes because the game misreads property data when the unversioned header encodes wrong indices. The game's StaticMesh parent hierarchy contributes only 2 properties before StaticMesh's own, while UAssetAPI's usmap resolution thinks it contributes 17.
+
+**Solution:** Keep the modder's original versioned (tagged) properties. The game's async loader can handle versioned properties as long as the binary Extras (FStaticMeshRenderData) are correctly formatted.
+
+### Export Layout
+
+Typical StaticMesh package structure:
+
+```
+Export 0: BodySetup (collision geometry)
+Export 1: NavCollision (navigation collision)
+Export 2: StaticMesh (main mesh data)
+PACKAGE_FILE_TAG (0x9E2A83C1)
+```
+
+### Modder Requirements
+
+When cooking StaticMesh assets in UE5 Editor for Marvel Rivals:
+
+- **Disable "Generate Mesh Distance Fields"** — Marvel uses custom `FMarvelDistanceFieldVolumeData` format
+- **Disable Nanite** — Not supported
+- **Single LOD only** — LOD 0 only
+- **Use High Precision Tangent Basis**: OFF
+- **Use Full Precision UVs**: OFF
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `StaticMeshExport.cs` | Main export class |
+| `ZenConverter.cs` | `PatchStaticMeshScreenSize()` for 64→128 byte expansion |
+| `MeshMaterials.cs` | `FStaticMaterial`, `FMeshUVChannelInfo` structs |
 
 ---
 
