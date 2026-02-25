@@ -3002,7 +3002,7 @@ namespace UAssetAPI
         /// <returns>A serialized JSON string that represents the asset.</returns>
         public string SerializeJson(Formatting jsonFormatting)
         {
-            Info = "Serialized with UAssetAPI " + typeof(PropertyData).Assembly.GetName().Version;
+            Info = "Serialized with UAssetAPI " + typeof(PropertyData).Assembly.GetName().Version + (string.IsNullOrEmpty(UAPUtils.CurrentCommit) ? "" : (" (" + UAPUtils.CurrentCommit + ")"));
             return JsonConvert.SerializeObject(this, jsonFormatting, jsonSettings);
         }
 

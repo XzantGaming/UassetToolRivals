@@ -24,36 +24,6 @@ public class IoStoreReader : IDisposable
     public IoStoreToc Toc => _toc;
     
     /// <summary>
-    /// Check if an IoStore container is encrypted (has Encrypted flag set in container flags)
-    /// </summary>
-    public static bool IsEncrypted(string utocPath)
-    {
-        using var stream = new FileStream(utocPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var reader = new BinaryReader(stream);
-
-        // Read header to get container flags
-        reader.ReadBytes(16); // magic
-        reader.ReadByte(); // version
-        reader.ReadByte(); // reserved0
-        reader.ReadUInt16(); // reserved1
-        reader.ReadUInt32(); // tocHeaderSize
-        reader.ReadUInt32(); // tocEntryCount
-        reader.ReadUInt32(); // tocCompressedBlockEntryCount
-        reader.ReadUInt32(); // tocCompressedBlockEntrySize
-        reader.ReadUInt32(); // compressionMethodNameCount
-        reader.ReadUInt32(); // compressionMethodNameLength
-        reader.ReadUInt32(); // compressionBlockSize
-        reader.ReadUInt32(); // directoryIndexSize
-        reader.ReadUInt32(); // partitionCount
-        reader.ReadUInt64(); // containerId
-        reader.ReadBytes(16); // encryptionKeyGuid
-        byte containerFlags = reader.ReadByte();
-
-        // Check if Encrypted flag (bit 1) is set
-        return (containerFlags & (byte)EIoContainerFlags.Encrypted) != 0;
-    }
-
-    /// <summary>
     /// Check if an IoStore container is compressed (has any compression blocks with non-zero compression method)
     /// Equivalent to retoc::is_iostore_compressed()
     /// </summary>
@@ -114,6 +84,37 @@ public class IoStoreReader : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Check if an IoStore container is encrypted (obfuscated).
+    /// Reads the containerFlags byte from the UTOC header.
+    /// </summary>
+    public static bool IsEncrypted(string utocPath)
+    {
+        using var stream = new FileStream(utocPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var reader = new BinaryReader(stream);
+
+        // Read header to get container flags
+        reader.ReadBytes(16); // magic
+        reader.ReadByte(); // version
+        reader.ReadByte(); // reserved0
+        reader.ReadUInt16(); // reserved1
+        reader.ReadUInt32(); // tocHeaderSize
+        reader.ReadUInt32(); // tocEntryCount
+        reader.ReadUInt32(); // tocCompressedBlockEntryCount
+        reader.ReadUInt32(); // tocCompressedBlockEntrySize
+        reader.ReadUInt32(); // compressionMethodNameCount
+        reader.ReadUInt32(); // compressionMethodNameLength
+        reader.ReadUInt32(); // compressionBlockSize
+        reader.ReadUInt32(); // directoryIndexSize
+        reader.ReadUInt32(); // partitionCount
+        reader.ReadUInt64(); // containerId
+        reader.ReadBytes(16); // encryptionKeyGuid
+        byte containerFlags = reader.ReadByte();
+
+        // EIoContainerFlags::Encrypted = 0x01
+        return (containerFlags & 0x01) != 0;
     }
 
     /// <summary>

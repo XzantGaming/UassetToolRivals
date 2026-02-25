@@ -59,6 +59,15 @@
         </ItemGroup>
     </When>
   </Choose>
+  <Target Name="BeforeBuildMigrated" BeforeTargets="PreBuildEvent">
+    <Exec ContinueOnError="true" ConsoleToMsBuild="true" Command="git rev-parse --short HEAD">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCommit" />
+    </Exec>
+    <WriteLinesToFile File="$(ProjectDir)git_commit.txt" Overwrite="true" Lines="$(GitCommit)" />
+  </Target>
+  <Target Name="AfterBuildMigrated" AfterTargets="Build" Condition="'$(PublishDir)' == ''">
+    <Delete Files="$(ProjectDir)git_commit.txt" />
+  </Target>
   <ItemGroup>
     <None Remove="repak_bind.dll" />
   </ItemGroup>
@@ -74,6 +83,9 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="git_commit.txt">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </EmbeddedResource>
     <EmbeddedResource Include="repak_bind.dll">
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </EmbeddedResource>

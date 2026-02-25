@@ -21,16 +21,6 @@ public class ZenConverter
     private static ScriptObjectsDatabase? _scriptObjectsDb;
     private static readonly object _scriptObjectsLock = new();
     
-    // Static usmap cache - loaded once per path and reused (HUGE performance win)
-    // Used for skipParsing: true loads where UAsset doesn't mutate the Usmap.
-    private static readonly Dictionary<string, UAssetAPI.Unversioned.Usmap> _usmapCache = new();
-    private static readonly object _usmapLock = new();
-    
-    // Per-thread usmap cache for skipParsing: false loads.
-    // Full parsing can mutate Usmap.Schemas (PullSchemasFromAnotherAsset, UserDefinedStructExport),
-    // so each thread needs its own instance to avoid concurrent dictionary corruption.
-    [ThreadStatic] private static Dictionary<string, UAssetAPI.Unversioned.Usmap>? _threadUsmapCache;
-    
     // When true, reads MaterialTagAssetUserData from SkeletalMesh packages
     // and injects per-slot FGameplayTagContainer data into FSkeletalMaterial during Zen conversion.
     // This does NOT override the original empty-tag padding logic — it runs as an additional step.
@@ -88,10 +78,9 @@ public class ZenConverter
     /// </summary>
     public static (byte[] ZenData, string PackagePath) ConvertLegacyToZenWithPath(
         string uassetPath,
-        string? usmapPath = null,
         EIoContainerHeaderVersion containerVersion = EIoContainerHeaderVersion.NoExportInfo)
     {
-        var zenData = ConvertLegacyToZenInternal(uassetPath, usmapPath, containerVersion, out string packagePath, out _);
+        var zenData = ConvertLegacyToZenInternal(uassetPath, containerVersion, out string packagePath, out _);
         return (zenData, packagePath);
     }
     
@@ -100,10 +89,9 @@ public class ZenConverter
     /// </summary>
     public static (byte[] ZenData, string PackagePath, FZenPackage ZenPackage) ConvertLegacyToZenFull(
         string uassetPath,
-        string? usmapPath = null,
         EIoContainerHeaderVersion containerVersion = EIoContainerHeaderVersion.NoExportInfo)
     {
-        var zenData = ConvertLegacyToZenInternal(uassetPath, usmapPath, containerVersion, out string packagePath, out FZenPackage zenPackage);
+        var zenData = ConvertLegacyToZenInternal(uassetPath, containerVersion, out string packagePath, out FZenPackage zenPackage);
         return (zenData, packagePath, zenPackage);
     }
     
@@ -112,15 +100,13 @@ public class ZenConverter
     /// </summary>
     public static byte[] ConvertLegacyToZen(
         string uassetPath,
-        string? usmapPath = null,
         EIoContainerHeaderVersion containerVersion = EIoContainerHeaderVersion.NoExportInfo)
     {
-        return ConvertLegacyToZenInternal(uassetPath, usmapPath, containerVersion, out _, out _);
+        return ConvertLegacyToZenInternal(uassetPath, containerVersion, out _, out _);
     }
 
     private static byte[] ConvertLegacyToZenInternal(
         string uassetPath,
-        string? usmapPath,
         EIoContainerHeaderVersion containerVersion,
         out string packagePath,
         out FZenPackage zenPackageOut)
@@ -139,7 +125,7 @@ public class ZenConverter
         // Full parsing (skipParsing: false) is only done for SkeletalMesh when material tags need injection.
         // This avoids unnecessary full parsing of textures/materials which can fail intermittently
         // due to shared Usmap state when running in Parallel.ForEach.
-        var asset = LoadAsset(uassetPath, usmapPath, skipParsing: true);
+        var asset = LoadAsset(uassetPath, skipParsing: true);
         asset.UseSeparateBulkDataFiles = true;
 
         // Log whether asset uses versioned or unversioned properties
@@ -204,7 +190,7 @@ public class ZenConverter
         {
             // Reload with full parsing for SkeletalMesh material tag injection.
             // Only SkeletalMesh assets need this; textures/materials/blueprints stay skipParsing: true.
-            asset = LoadAsset(uassetPath, usmapPath, skipParsing: false);
+            asset = LoadAsset(uassetPath, skipParsing: false);
             asset.UseSeparateBulkDataFiles = true;
             // Recalculate headerSize after reload (full-parsed asset may differ)
             headerSize = asset.Exports.Min(e => e.SerialOffset);
@@ -426,7 +412,7 @@ public class ZenConverter
         }
         
         // Last export gets its original SerialSize plus any padding added by binary patching
-        // (e.g. StaticMesh ScreenSize expansion, SkeletalMesh FGameplayTagContainer padding)
+        // (e.g. StaticMesh ScreenSize expansion)
         // For re-serialized data (WriteData path), SerialSize is already updated by UAssetAPI.
         if (sortedByOffset.Count > 0)
         {
@@ -457,6 +443,7 @@ public class ZenConverter
             
             // Get pre-calculated size (padding already included for last export)
             long actualSize = exportSizes[export];
+            // Verbose logging disabled for parallel performance
 
             // Remap indices from legacy FPackageIndex to Zen FPackageObjectIndex
             // Look up the import map which was already built with correct script import hashes
@@ -695,51 +682,54 @@ public class ZenConverter
         // on round-trips.
         //
         // Strategy: check in order:
-        // 1. Full asset name (e.g. "MI_Sword_6_602_601") — for names without FName number split
-        // 2. FName base name (e.g. "MI_102993_Trail_13") — for names with numeric suffix
-        // 3. Full package path — if already present
+        // 1. Full package path — safest, avoids false matches against property names
+        // 2. Full asset name (e.g. "MI_Sword_6_602_601") — for round-trip names without FName number split
+        // 3. FName base name (e.g. "MI_102993_Trail_13") — for round-trip names with numeric suffix
         // 4. Only add full path as last resort
-        int packageNameIndex = zenPackage.NameMap.IndexOf(assetName);
+        int packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
         uint packageNameNumber = 0;
         if (packageNameIndex >= 0)
         {
-            // Full asset name found — use it with Number=0
+            // Full package path found — use it with Number=0 (safest)
         }
         else
         {
-            // Try FName base name: strip trailing _N numeric suffix (matching FName.FromStringFragments)
-            string fnameBase = assetName;
-            int fnameNumber = 0;
-            int lastUnderscore = assetName.LastIndexOf('_');
-            if (lastUnderscore > 0 && lastUnderscore < assetName.Length - 1)
+            // Full path not in NameMap — try asset name (round-trip scenario)
+            packageNameIndex = zenPackage.NameMap.IndexOf(assetName);
+            if (packageNameIndex >= 0)
             {
-                string suffix = assetName.Substring(lastUnderscore + 1);
-                if (suffix.Length == 1 || suffix[0] != '0') // same zero-padding rule as FName
+                // Full asset name found — use it with Number=0
+            }
+            else
+            {
+                // Try FName base name: strip trailing _N numeric suffix (matching FName.FromStringFragments)
+                string fnameBase = assetName;
+                int fnameNumber = 0;
+                int lastUnderscore = assetName.LastIndexOf('_');
+                if (lastUnderscore > 0 && lastUnderscore < assetName.Length - 1)
                 {
-                    if (int.TryParse(suffix, out int suffixVal))
+                    string suffix = assetName.Substring(lastUnderscore + 1);
+                    if (suffix.Length == 1 || suffix[0] != '0') // same zero-padding rule as FName
                     {
-                        fnameBase = assetName.Substring(0, lastUnderscore);
-                        fnameNumber = suffixVal + 1; // FName Number = suffix + 1
+                        if (int.TryParse(suffix, out int suffixVal))
+                        {
+                            fnameBase = assetName.Substring(0, lastUnderscore);
+                            fnameNumber = suffixVal + 1; // FName Number = suffix + 1
+                        }
                     }
                 }
-            }
-            
-            // Only use fnameBase if we actually detected a numeric suffix (fnameNumber > 0)
-            // Otherwise fnameBase is just a partial match that would cause wrong package name reconstruction
-            if (fnameNumber > 0)
-            {
-                packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
-                if (packageNameIndex >= 0)
+                
+                // Only use fnameBase if we actually detected a numeric suffix (fnameNumber > 0)
+                if (fnameNumber > 0)
                 {
-                    // FName base found — use it with the computed Number
-                    packageNameNumber = (uint)fnameNumber;
+                    packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
+                    if (packageNameIndex >= 0)
+                    {
+                        // FName base found — use it with the computed Number
+                        packageNameNumber = (uint)fnameNumber;
+                    }
                 }
-            }
-            
-            if (packageNameIndex < 0)
-            {
-                // Check if full path is already there
-                packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
+                
                 if (packageNameIndex < 0)
                 {
                     // Neither present — add the full path (new asset with no prior NameMap entry)
@@ -1561,47 +1551,16 @@ public class ZenConverter
         // Verbose logging disabled for parallel performance
     }
 
-    private static UAsset LoadAsset(string filePath, string? usmapPath, bool skipParsing = true)
+    private static UAsset LoadAsset(string filePath, bool skipParsing = true)
     {
-        UAssetAPI.Unversioned.Usmap? mappings = null;
-        
-        if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
-        {
-            if (skipParsing)
-            {
-                // skipParsing: true — UAsset won't mutate the Usmap, sharing is safe
-                lock (_usmapLock)
-                {
-                    if (!_usmapCache.TryGetValue(usmapPath, out mappings))
-                    {
-                        mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
-                        _usmapCache[usmapPath] = mappings;
-                    }
-                }
-            }
-            else
-            {
-                // skipParsing: false — UAsset may mutate Usmap.Schemas during parsing
-                // (PullSchemasFromAnotherAsset, UserDefinedStructExport, etc.)
-                // Use per-thread cache to avoid concurrent dictionary corruption.
-                _threadUsmapCache ??= new Dictionary<string, UAssetAPI.Unversioned.Usmap>();
-                if (!_threadUsmapCache.TryGetValue(usmapPath, out mappings))
-                {
-                    mappings = new UAssetAPI.Unversioned.Usmap(usmapPath);
-                    _threadUsmapCache[usmapPath] = mappings;
-                }
-            }
-        }
-
-        // When skipParsing is true, skip export parsing and schema pulling - ZenConverter only needs
-        // header data (imports, exports, names) and raw export bytes. This avoids
-        // "Failed to find a valid property for schema index" errors for Blueprint assets
-        // where parent BPs aren't on disk.
-        // When material tags are enabled, we need full parsing for SkeletalMesh exports.
+        // No usmap needed for Zen conversion:
+        // - skipParsing: true → exports read as raw bytes (textures, materials, blueprints, StaticMesh)
+        // - skipParsing: false → SkeletalMesh material tag injection uses binary Extras parsing,
+        //   not unversioned property deserialization, so usmap is not required.
         var flags = skipParsing 
             ? (CustomSerializationFlags.SkipParsingExports | CustomSerializationFlags.SkipPreloadDependencyLoading)
             : CustomSerializationFlags.None;
-        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings, flags);
+        var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, null, flags);
         asset.UseSeparateBulkDataFiles = true;
         return asset;
     }
@@ -2034,7 +1993,6 @@ public class ZenConverter
             else if (defaultVal > 0 && defaultVal < 100)
             {
                 // Active LOD with screen size > 0 — use sentinel as safe default
-                // (game meshes use distance values here, but sentinel works for compatibility)
                 Array.Copy(BitConverter.GetBytes(SENTINEL_VALUE), 0, newData, dstOff, 4);
             }
             else

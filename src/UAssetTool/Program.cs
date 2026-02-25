@@ -111,8 +111,8 @@ public partial class Program
         Console.WriteLine();
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
-        Console.WriteLine("    to_zen <uasset> [usmap] [--no-material-tags] - Convert legacy to Zen format");
-            Console.WriteLine("    create_pak <output.pak> <files...>       - Create encrypted PAK file");
+        Console.WriteLine("    to_zen <uasset> [--no-material-tags] - Convert legacy to Zen format");
+        Console.WriteLine("    create_pak <output.pak> <files...>       - Create encrypted PAK file");
         Console.WriteLine("    create_companion_pak <output.pak> <files...> - Create companion PAK for IoStore");
         Console.WriteLine("    create_iostore_bundle <output> <files...> - Create complete IoStore bundle");
         Console.WriteLine();
@@ -145,19 +145,16 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [usmap_path] [--no-material-tags]");
+            Console.Error.WriteLine("Usage: UAssetTool to_zen <uasset_path> [--no-material-tags]");
             return 1;
         }
 
         string uassetPath = args[1];
-        string? usmapPath = null;
         
         for (int i = 2; i < args.Length; i++)
         {
             if (args[i] == "--no-material-tags")
                 ZenPackage.ZenConverter.SetMaterialTagsEnabled(false);
-            else if (usmapPath == null && !args[i].StartsWith("--"))
-                usmapPath = args[i];
         }
 
         if (!File.Exists(uassetPath))
@@ -170,7 +167,7 @@ public partial class Program
         {
             Console.Error.WriteLine($"[CliToZen] Converting {uassetPath} to Zen format...");
             
-            byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath, usmapPath);
+            byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath);
             
             string outputPath = Path.ChangeExtension(uassetPath, ".uzenasset");
             File.WriteAllBytes(outputPath, zenData);
@@ -498,7 +495,6 @@ public partial class Program
             Console.Error.WriteLine("  This is the complete pipeline for Marvel Rivals mod creation.");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --usmap <path>        - Path to .usmap file for property parsing");
             Console.Error.WriteLine("  --mount-point <path>  - Mount point (default: ../../../)");
             Console.Error.WriteLine("  --game-path <prefix>  - Game path prefix (default: Marvel/Content/)");
             Console.Error.WriteLine("  --compress            - Enable Oodle compression (default: enabled)");
@@ -512,7 +508,6 @@ public partial class Program
         string outputBase = args[1];
         string mountPoint = "../../../";
         string gamePathPrefix = "Marvel/Content/";
-        string? usmapPath = null;
         bool enableCompression = true;
         bool enableEncryption = false;
         string? aesKey = null;
@@ -527,10 +522,6 @@ public partial class Program
             if (args[i] == "--no-material-tags")
             {
                 ZenPackage.ZenConverter.SetMaterialTagsEnabled(false);
-            }
-            else if (args[i] == "--usmap" && i + 1 < args.Length)
-            {
-                usmapPath = args[++i];
             }
             else if (args[i] == "--mount-point" && i + 1 < args.Length)
             {
@@ -660,7 +651,7 @@ public partial class Program
                     ZenPackage.FZenPackage zenPackage;
 
                     (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath, usmapPath, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
 
                     byte[]? ubulkData = null;
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
@@ -2251,13 +2242,13 @@ public partial class Program
                 
                 // IoStore operations
                 "list_iostore_files" => ListIoStoreFiles(request.FilePath, request.AesKey),
-                "create_iostore" => CreateIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.Compress, request.AesKey),
+                "create_iostore" => CreateIoStoreJson(request.OutputPath, request.InputDir, request.Compress, request.AesKey),
                 "is_iostore_compressed" => IsIoStoreCompressed(request.FilePath),
                 "is_iostore_encrypted" => IsIoStoreEncrypted(request.FilePath),
                 "recompress_iostore" => RecompressIoStore(request.FilePath),
                 "extract_iostore" => ExtractIoStoreJson(request.FilePath, request.OutputPath, request.AesKey),
                 "extract_script_objects" => ExtractScriptObjectsJson(request.FilePath, request.OutputPath),
-                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.UsmapPath, request.MountPoint, request.Compress, request.AesKey, request.Parallel, request.Obfuscate),
+                "create_mod_iostore" => CreateModIoStoreJson(request.OutputPath, request.InputDir, request.MountPoint, request.Compress, request.AesKey, request.Parallel, request.Obfuscate),
                 
                 // Additional CLI-equivalent operations for parity
                 "dump" => DumpAssetJson(request.FilePath, request.UsmapPath),
@@ -4070,7 +4061,7 @@ public partial class Program
 
         try
         {
-            byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(filePath, usmapPath);
+            byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(filePath);
             
             string outputPath = Path.ChangeExtension(filePath, ".uzenasset");
             File.WriteAllBytes(outputPath, zenData);
@@ -5179,7 +5170,7 @@ public partial class Program
     /// This is the JSON API equivalent of retoc's action_to_zen.
     /// Converts .uasset/.uexp files to Zen format and creates .utoc/.ucas/.pak bundle.
     /// </summary>
-    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, string? mountPoint, bool compress, string? aesKey, bool parallel, bool obfuscate)
+    private static UAssetResponse CreateModIoStoreJson(string? outputPath, string? inputDir, string? mountPoint, bool compress, string? aesKey, bool parallel, bool obfuscate)
     {
         if (string.IsNullOrEmpty(outputPath))
             return new UAssetResponse { Success = false, Message = "Output path is required" };
@@ -5229,7 +5220,7 @@ public partial class Program
                 try
                 {
                     var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath, usmapPath, ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
+                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
                     
                     byte[]? ubulkData = null;
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
@@ -5370,7 +5361,7 @@ public partial class Program
     /// <summary>
     /// Create an IoStore bundle from a directory of legacy assets
     /// </summary>
-    private static UAssetResponse CreateIoStoreJson(string? outputPath, string? inputDir, string? usmapPath, bool compress, string? aesKey)
+    private static UAssetResponse CreateIoStoreJson(string? outputPath, string? inputDir, bool compress, string? aesKey)
     {
         if (string.IsNullOrEmpty(outputPath))
             return new UAssetResponse { Success = false, Message = "Output path is required" };
@@ -5408,7 +5399,7 @@ public partial class Program
             {
                 try
                 {
-                    byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath, usmapPath);
+                    byte[] zenData = ZenPackage.ZenConverter.ConvertLegacyToZen(uassetPath);
                     
                     // Get relative path for the package
                     string relativePath = Path.GetRelativePath(inputDir, uassetPath);
