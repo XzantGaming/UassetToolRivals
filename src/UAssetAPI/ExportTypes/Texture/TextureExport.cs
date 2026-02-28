@@ -766,7 +766,14 @@ namespace UAssetAPI.ExportTypes.Texture
 
             FName parentName = GetClassTypeForAncestry(writer.Asset, out FName parentModulePath);
 
-            MainSerializer.GenerateUnversionedHeader(ref Data, parentName, parentModulePath, writer.Asset)?.Write(writer);
+            if (OriginalUnversionedHeader != null && writer.Asset.HasUnversionedProperties)
+            {
+                OriginalUnversionedHeader.Write(writer);
+            }
+            else
+            {
+                MainSerializer.GenerateUnversionedHeader(ref Data, parentName, parentModulePath, writer.Asset)?.Write(writer);
+            }
 
             if (!writer.Asset.HasUnversionedProperties && writer.Asset.ObjectVersionUE5 >= ObjectVersionUE5.PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION)
             {

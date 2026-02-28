@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using UAssetAPI.CustomVersions;
@@ -97,12 +97,16 @@ public class StructPropertyData : PropertyData<List<PropertyData>>
         Value = new List<PropertyData> { data };
     }
 
+    [Newtonsoft.Json.JsonIgnore]
+    internal FUnversionedHeader _originalStructHeader;
+
     private void ReadNTPL(AssetBinaryReader reader, bool resetValue = true)
     {
         List<PropertyData> resultingList = resetValue ? new List<PropertyData>() : Value;
         PropertyData data = null;
 
         var unversionedHeader = new FUnversionedHeader(reader);
+        _originalStructHeader = unversionedHeader;
         if (!reader.Asset.HasUnversionedProperties && reader.Asset.ObjectVersionUE5 >= ObjectVersionUE5.PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION)
         {
             SerializationControl = (EClassSerializationControlExtension)reader.ReadByte();
@@ -209,7 +213,14 @@ public class StructPropertyData : PropertyData<List<PropertyData>>
         int here = (int)writer.BaseStream.Position;
 
         List<PropertyData> allDat = Value;
-        MainSerializer.GenerateUnversionedHeader(ref allDat, StructType, FName.DefineDummy(writer.Asset, writer.Asset.InternalAssetPath + ((Ancestry?.Ancestors?.Count ?? 0) == 0 ? string.Empty : ("." + Ancestry.Parent))), writer.Asset)?.Write(writer);
+        if (_originalStructHeader != null && writer.Asset.HasUnversionedProperties)
+        {
+            _originalStructHeader.Write(writer);
+        }
+        else
+        {
+            MainSerializer.GenerateUnversionedHeader(ref allDat, StructType, FName.DefineDummy(writer.Asset, writer.Asset.InternalAssetPath + ((Ancestry?.Ancestors?.Count ?? 0) == 0 ? string.Empty : ("." + Ancestry.Parent))), writer.Asset)?.Write(writer);
+        }
         foreach (var t in allDat)
         {
             MainSerializer.Write(t, writer, true);

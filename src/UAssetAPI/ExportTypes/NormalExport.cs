@@ -35,6 +35,13 @@ namespace UAssetAPI.ExportTypes
         public EOverriddenPropertyOperation Operation;
 
         /// <summary>
+        /// Original unversioned header stored during Read(), replayed during Write() when
+        /// GenerateUnversionedHeader cannot resolve all properties against the usmap schema.
+        /// Serialized to JSON so from_json roundtrips preserve it.
+        /// </summary>
+        public FUnversionedHeader OriginalUnversionedHeader;
+
+        /// <summary>
         /// Gets or sets the value associated with the specified key. This operation loops linearly, so it may not be suitable for high-performance environments.
         /// </summary>
         /// <param name="key">The key associated with the value to get or set.</param>
@@ -132,6 +139,7 @@ namespace UAssetAPI.ExportTypes
             PropertyData bit;
 
             var unversionedHeader = new FUnversionedHeader(reader);
+            OriginalUnversionedHeader = unversionedHeader;
             if (!reader.Asset.HasUnversionedProperties && reader.Asset.ObjectVersionUE5 >= ObjectVersionUE5.PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION)
             {
                 SerializationControl = (EClassSerializationControlExtension)reader.ReadByte();
@@ -173,7 +181,16 @@ namespace UAssetAPI.ExportTypes
 
             FName parentName = GetClassTypeForAncestry(writer.Asset, out FName parentModulePath);
 
-            MainSerializer.GenerateUnversionedHeader(ref Data, parentName, parentModulePath, writer.Asset)?.Write(writer);
+            // Prefer the original header read from binary — it is guaranteed correct.
+            // Only regenerate when no original exists (e.g. asset built from JSON without stored header).
+            if (OriginalUnversionedHeader != null && writer.Asset.HasUnversionedProperties)
+            {
+                OriginalUnversionedHeader.Write(writer);
+            }
+            else
+            {
+                MainSerializer.GenerateUnversionedHeader(ref Data, parentName, parentModulePath, writer.Asset)?.Write(writer);
+            }
 
             if (!writer.Asset.HasUnversionedProperties && writer.Asset.ObjectVersionUE5 >= ObjectVersionUE5.PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION)
             {

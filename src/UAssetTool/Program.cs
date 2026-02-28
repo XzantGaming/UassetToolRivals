@@ -1068,6 +1068,7 @@ public partial class Program
             Console.Error.WriteLine("  --script-objects <path>  Path to ScriptObjects.bin for import resolution");
             Console.Error.WriteLine("  --global <path>          Path to global.utoc for script objects");
             Console.Error.WriteLine("  --container <path>       Additional container to load for cross-package imports");
+            Console.Error.WriteLine("  --aes <hex>              AES key for decryption (can specify multiple times)");
             Console.Error.WriteLine("  --filter <patterns...>   Only extract packages matching patterns (space-separated)");
             Console.Error.WriteLine("  --with-deps              Also extract imported/referenced packages");
             Console.Error.WriteLine("  --mod <path>             Path to modded .utoc file or directory containing .utoc files.");
@@ -1090,11 +1091,14 @@ public partial class Program
         List<string> additionalContainers = new();
         List<string> filterPatterns = new();
         List<string> modPaths = new(); // Mod utoc files or directories
+        List<string> aesKeys = new();
         bool extractDependencies = false;
 
         for (int i = 3; i < args.Length; i++)
         {
-            if (args[i] == "--script-objects" && i + 1 < args.Length)
+            if ((args[i] == "--aes" || args[i] == "--aes-key") && i + 1 < args.Length)
+                aesKeys.Add(args[++i]);
+            else if (args[i] == "--script-objects" && i + 1 < args.Length)
                 scriptObjectsPath = args[++i];
             else if (args[i] == "--global" && i + 1 < args.Length)
                 globalUtocPath = args[++i];
@@ -1132,8 +1136,16 @@ public partial class Program
             // Create package context for proper import resolution
             using var context = new ZenPackage.FZenPackageContext();
             
-            // Set Marvel Rivals AES key for encrypted containers
-            context.SetAesKey("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74");
+            // Set AES keys - use provided keys or default Marvel Rivals key
+            if (aesKeys.Count > 0)
+            {
+                foreach (var key in aesKeys)
+                    context.AddAesKey(key);
+            }
+            else
+            {
+                context.SetAesKey("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74");
+            }
             
             Console.WriteLine($"Loading game containers from: {paksPath}");
             
@@ -1150,7 +1162,6 @@ public partial class Program
             // Include optional chunks when extracting dependencies
             var utocFiles = Directory.GetFiles(paksPath, "*.utoc", SearchOption.TopDirectoryOnly)
                 .Where(f => !f.EndsWith("global.utoc", StringComparison.OrdinalIgnoreCase))
-                .Where(f => extractDependencies || !f.Contains("optional", StringComparison.OrdinalIgnoreCase))
                 .OrderBy(f => f)
                 .ToList();
             
@@ -1417,9 +1428,10 @@ public partial class Program
                             relPath = "/Game" + relPath.Substring(contentIdx + "/Content".Length);
                     }
                     
-                    // Remove /Game/ prefix to get relative path (e.g., Content/Marvel/...)
+                    // Map /Game/ back to Marvel/Content/ to match the on-disk path structure
+                    // /Game/Marvel/VFX/... -> Marvel/Content/Marvel/VFX/...
                     if (relPath.StartsWith("/Game/"))
-                        relPath = relPath.Substring(6); // Remove "/Game/"
+                        relPath = "Marvel/Content/" + relPath.Substring(6);
                     else if (relPath.StartsWith("/"))
                         relPath = relPath.Substring(1); // Remove leading slash
                     

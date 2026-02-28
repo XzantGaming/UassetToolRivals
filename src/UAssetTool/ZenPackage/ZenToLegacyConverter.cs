@@ -902,10 +902,10 @@ public class ZenToLegacyConverter
     }
     
     /// <summary>
-    /// Rebuild export data by iterating through export bundle headers and entries,
-    /// copying each export's data from its bundle position to its sequential position.
-    /// This is critical because Zen format organizes exports in bundles where the order
-    /// can differ from the export map order. Matches retoc's rebuild_asset_export_data_internal.
+    /// Rebuild export data by iterating through export bundle entries in order,
+    /// tracking a running position through the raw data. Only Serialize commands
+    /// contribute data; Create commands are skipped (zero bytes in stream).
+    /// Matches retoc's rebuild_asset_export_data_internal.
     /// </summary>
     private byte[] RebuildExportDataFromBundles()
     {
@@ -928,22 +928,31 @@ public class ZenToLegacyConverter
         int totalFileSize = (int)totalExportSerialSize + 4;
         byte[] result = new byte[totalFileSize];
         
-        // Use CookedSerialOffset from each export map entry directly.
-        // CookedSerialOffset is relative to the start of export data (after zen header).
-        // Each export's data in the .uexp is placed at its sequential position
-        // (determined by SerialOffset - legacyHeaderSize).
-        for (int i = 0; i < _zenPackage.ExportMap.Count && i < _builder.Exports.Count; i++)
+        // Iterate through export bundle entries in order, tracking position in raw data.
+        // Only Serialize commands have data in the stream; Create commands are zero-size.
+        long currentSourceOffset = zenHeaderSize;
+        
+        foreach (var bundleEntry in _zenPackage.ExportBundleEntries)
         {
-            var zenExport = _zenPackage.ExportMap[i];
-            long sourceOffset = zenHeaderSize + (long)zenExport.CookedSerialOffset;
-            int exportSerialSize = (int)_builder.Exports[i].SerialSize;
-            long targetOffset = _builder.Exports[i].SerialOffset - legacyHeaderSize;
+            int exportIndex = (int)bundleEntry.LocalExportIndex;
             
-            if (sourceOffset >= 0 && sourceOffset + exportSerialSize <= _rawPackageData.Length &&
+            if (exportIndex < 0 || exportIndex >= _builder.Exports.Count)
+                continue;
+            
+            // Only Serialize commands contain actual export data
+            if (bundleEntry.CommandType != EExportCommandType.Serialize)
+                continue;
+            
+            int exportSerialSize = (int)_builder.Exports[exportIndex].SerialSize;
+            long targetOffset = _builder.Exports[exportIndex].SerialOffset - legacyHeaderSize;
+            
+            if (currentSourceOffset >= 0 && currentSourceOffset + exportSerialSize <= _rawPackageData.Length &&
                 targetOffset >= 0 && targetOffset + exportSerialSize <= totalExportSerialSize)
             {
-                Array.Copy(_rawPackageData, sourceOffset, result, (int)targetOffset, exportSerialSize);
+                Array.Copy(_rawPackageData, currentSourceOffset, result, (int)targetOffset, exportSerialSize);
             }
+            
+            currentSourceOffset += exportSerialSize;
         }
         
         // Write PACKAGE_FILE_TAG footer
@@ -1365,22 +1374,26 @@ public class ZenToLegacyConverter
             outerIndex = -(FindOrAddResolvedImport(import.Outer) + 1);
         }
         
-        // Store names with number suffix handling
-        var (classPackageIdx, classPackageNum) = StoreOrFindNameWithNumber(import.ClassPackage);
-        var (classNameIdx, classNameNum) = StoreOrFindNameWithNumber(import.ClassName);
-        var (objectNameIdx, objectNameNum) = StoreOrFindNameWithNumber(import.ObjectName);
+        // Store names directly without re-parsing numeric suffixes.
+        // Names like "MI_104841_Butterfly_1_001" must be stored as-is — the "_001"
+        // is part of the actual asset name, NOT an FName Number suffix.
+        // GetName() already bakes the FMappedName.Number into the string when present,
+        // so we store the full resolved name with Number=0 (matching retoc behavior).
+        int classPackageIdx = StoreOrFindName(import.ClassPackage);
+        int classNameIdx = StoreOrFindName(import.ClassName);
+        int objectNameIdx = StoreOrFindName(import.ObjectName);
         
         // Create import entry
         int newIndex = _builder.Imports.Count;
         _builder.Imports.Add(new LegacyObjectImport
         {
             ClassPackage = classPackageIdx,
-            ClassPackageNumber = classPackageNum,
+            ClassPackageNumber = 0,
             ClassName = classNameIdx,
-            ClassNameNumber = classNameNum,
+            ClassNameNumber = 0,
             OuterIndex = new FPackageIndex(outerIndex),
             ObjectName = objectNameIdx,
-            ObjectNameNumber = objectNameNum,
+            ObjectNameNumber = 0,
             IsOptional = false
         });
         

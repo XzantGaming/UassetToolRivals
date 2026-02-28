@@ -187,6 +187,25 @@ public class IoStoreReader : IDisposable
     }
 
     /// <summary>
+    /// Create an IoStoreReader with multiple AES keys to try.
+    /// The first key that successfully decrypts the directory index will be used.
+    /// </summary>
+    public IoStoreReader(string utocPath, List<byte[]> aesKeys)
+    {
+        _utocPath = utocPath;
+        _ucasPath = Path.ChangeExtension(utocPath, ".ucas");
+        _containerName = Path.GetFileNameWithoutExtension(utocPath);
+
+        if (!File.Exists(_utocPath))
+            throw new FileNotFoundException($"TOC file not found: {_utocPath}");
+        if (!File.Exists(_ucasPath))
+            throw new FileNotFoundException($"CAS file not found: {_ucasPath}");
+
+        _toc = IoStoreToc.Read(_utocPath, aesKeys);
+        _aesKey = _toc.AesKey; // Use whichever key worked
+    }
+
+    /// <summary>
     /// Read a chunk by its chunk ID
     /// </summary>
     public byte[] ReadChunk(FIoChunkId chunkId)
@@ -430,6 +449,33 @@ public class IoStoreToc
     public byte[]? RawDirectoryIndex { get; set; }
     public bool IsEncrypted => ContainerFlags.HasFlag(EIoContainerFlags.Encrypted);
     public bool CanDecrypt => IsEncrypted && AesKey != null && AesKey.Length == 32;
+
+    /// <summary>
+    /// Read TOC with multiple AES keys - tries each key for directory index decryption.
+    /// The key that successfully decrypts is stored in AesKey.
+    /// </summary>
+    public static IoStoreToc Read(string utocPath, List<byte[]> aesKeys)
+    {
+        // Try each key, return the first one that produces a valid directory index
+        IoStoreToc? bestToc = null;
+        foreach (var key in aesKeys)
+        {
+            try
+            {
+                var toc = Read(utocPath, key);
+                if (toc.FileMapRev.Count > 0)
+                    return toc; // This key worked
+                // Keep the first successful parse even if no files (unencrypted container)
+                bestToc ??= toc;
+            }
+            catch
+            {
+                // This key didn't work, try next
+            }
+        }
+        // If no key produced file paths, return the best we got or try without key
+        return bestToc ?? Read(utocPath, (byte[]?)null);
+    }
 
     public static IoStoreToc Read(string utocPath, byte[]? aesKey = null)
     {

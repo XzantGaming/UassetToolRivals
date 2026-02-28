@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UAssetTool.IoStore;
 
 namespace UAssetTool.ZenPackage;
@@ -28,15 +29,37 @@ public class FZenPackageContext : IDisposable
     public int ContainerCount => _containers.Count;
 
     private byte[]? _aesKey;
+    private readonly List<byte[]> _aesKeys = new();
     
     /// <summary>
-    /// Set the AES key for decrypting encrypted containers
+    /// Set the AES key for decrypting encrypted containers.
+    /// Also adds it to the multi-key list.
     /// </summary>
     public void SetAesKey(string hexKey)
     {
         if (string.IsNullOrEmpty(hexKey))
             return;
+        hexKey = hexKey.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hexKey[2..] : hexKey;
         _aesKey = Convert.FromHexString(hexKey);
+        // Add to multi-key list if not already present
+        if (!_aesKeys.Any(k => k.SequenceEqual(_aesKey)))
+            _aesKeys.Add(_aesKey);
+    }
+    
+    /// <summary>
+    /// Add an additional AES key for decrypting encrypted containers.
+    /// Multiple keys are tried when opening each container.
+    /// </summary>
+    public void AddAesKey(string hexKey)
+    {
+        if (string.IsNullOrEmpty(hexKey))
+            return;
+        hexKey = hexKey.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hexKey[2..] : hexKey;
+        var keyBytes = Convert.FromHexString(hexKey);
+        if (!_aesKeys.Any(k => k.SequenceEqual(keyBytes)))
+            _aesKeys.Add(keyBytes);
+        // Set primary key if not yet set
+        _aesKey ??= keyBytes;
     }
     
     /// <summary>
@@ -59,7 +82,11 @@ public class FZenPackageContext : IDisposable
     
     private void LoadContainerInternal(string utocPath, bool overridePriority, bool useEncryption = true)
     {
-        var reader = new IoStoreReader(utocPath, useEncryption ? _aesKey : null);
+        IoStoreReader reader;
+        if (useEncryption && _aesKeys.Count > 1)
+            reader = new IoStoreReader(utocPath, _aesKeys);
+        else
+            reader = new IoStoreReader(utocPath, useEncryption ? _aesKey : null);
         int containerIndex = _containers.Count;
         _containers.Add(reader);
         
@@ -115,10 +142,11 @@ public class FZenPackageContext : IDisposable
             
             bool exists = _packageIdToChunk.ContainsKey(packageId);
             
-            // Add package if it doesn't exist, or override if priority mode
-            if (!exists || overridePriority)
+            // Always allow later containers to override earlier ones
+            // In IoStore, later-loaded containers have higher priority (matching game engine)
+            if (!exists || true)
             {
-                if (exists && overridePriority)
+                if (exists)
                 {
                     // Clear cached data for overridden package
                     _packageCache.TryRemove(packageId, out _);
