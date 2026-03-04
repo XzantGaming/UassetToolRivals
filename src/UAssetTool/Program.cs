@@ -69,11 +69,11 @@ public partial class Program
                 "dump_zen_from_game" => CliDumpZenFromGame(args),
                 "clone_mod_iostore" => CliCloneModIoStore(args),
                 "extract_pak" => CliExtractPak(args),
-                "modify_colors" => CliModifyColors(args),
-                "niagara_list" => CliNiagaraList(args),
+                "niagara_analyze" => CliNiagaraAnalyze(args),
                 "niagara_details" => CliNiagaraDetails(args),
+                "niagara_details_stream" => CliNiagaraDetailsStream(args),
                 "niagara_edit" => CliNiagaraEdit(args),
-                "scan_childbp_isenemy" => CliScanChildBPIsEnemy(args),
+                "niagara_edit_batch" => CliNiagaraEditBatch(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
@@ -128,14 +128,7 @@ public partial class Program
         Console.WriteLine("    cityhash <path_string>                   - Calculate CityHash64 for a path");
         Console.WriteLine("    clone_mod_iostore <utoc> <output>        - Clone/repackage a mod IoStore");
         Console.WriteLine();
-        Console.WriteLine("  NiagaraSystem (Particle Effects):");
-        Console.WriteLine("    niagara_list <directory> [usmap]         - List NS files with color info");
-        Console.WriteLine("    niagara_details <asset> [usmap] [--full] - Get color curve details");
-        Console.WriteLine("    niagara_edit <asset> <R> <G> <B> [A] [options] - Edit particle colors");
-        Console.WriteLine("    modify_colors <directory> <usmap> [R G B A]    - Batch modify colors");
-        Console.WriteLine();
-        Console.WriteLine("  Blueprint Analysis:");
-        Console.WriteLine("    scan_childbp_isenemy <paks_dir> [--aes <key>]  - Scan for IsEnemy parameter usage");
+        Console.WriteLine("  Other:");
         Console.WriteLine();
         Console.WriteLine("Interactive mode: Run without arguments to use JSON stdin/stdout");
         return 0;
@@ -1807,342 +1800,1832 @@ public partial class Program
         return failCount > 0 ? 1 : 0;
     }
     
-    private static int CliModifyColors(string[] args)
+    private static int CliNiagaraEdit(string[] args)
     {
-        if (args.Length < 3)
+        if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool modify_colors <directory_or_file> <usmap_path> [r g b a]");
-            Console.Error.WriteLine("Default color: bright green (0, 10, 0, 1)");
+            Console.Error.WriteLine("Usage: UAssetTool niagara_edit <path> <usmap_path> <r> <g> <b> [a] [options]");
+            Console.Error.WriteLine("  Edits ShaderLUT color curves in NiagaraSystem assets.");
+            Console.Error.WriteLine("  If <path> is a directory, batch-processes all NS_*.uasset files.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Single file options:");
+            Console.Error.WriteLine("  --export <index>    Only edit a specific export by index");
+            Console.Error.WriteLine("  --channels <rgba>   Which channels to modify (default: rgb)");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Batch directory options (alternating player/enemy colors):");
+            Console.Error.WriteLine("  --player <r> <g> <b> [a]  Player color (odd ColorCurve exports)");
+            Console.Error.WriteLine("  --enemy  <r> <g> <b> [a]  Enemy color (even ColorCurve exports)");
+            Console.Error.WriteLine("  --output <dir>             Write modified files to output dir (preserves originals)");
             return 1;
         }
 
-        string path = args[1];
-        string usmapPath = args[2];
-        
-        // Default to bright green (HDR value for visibility)
-        float r = 0f, g = 10f, b = 0f, a = 1f;
-        if (args.Length >= 6)
+        // --- JSON mode: if args[1] starts with '{', parse as JSON request from Tauri frontend ---
+        if (args[1].TrimStart().StartsWith("{"))
         {
-            float.TryParse(args[3], out r);
-            float.TryParse(args[4], out g);
-            float.TryParse(args[5], out b);
-        }
-        if (args.Length >= 7)
-        {
-            float.TryParse(args[6], out a);
+            return CliNiagaraEditJson(args);
         }
 
-        Console.WriteLine($"Modifying colors to R={r}, G={g}, B={b}, A={a}");
+        string assetPath = args[1];
+        string? usmapPath = null;
+        float r = 0, g = 0, b = 0, a = 1;
+        int? targetExport = null;
+        string channels = "rgb";
+        bool hasColor = false;
 
-        int totalModified = 0;
-        
-        if (Directory.Exists(path))
+        // Batch mode colors
+        float pR = 0, pG = 5, pB = 0, pA = 1; // player green
+        float eR = 0, eG = 0, eB = 5, eA = 1; // enemy dark blue
+        bool hasPlayer = false, hasEnemy = false;
+        string? outputDir = null;
+
+        // Parse args
+        var positional = new List<string>();
+        for (int i = 2; i < args.Length; i++)
         {
-            var files = Directory.GetFiles(path, "*.uasset", SearchOption.AllDirectories);
-            foreach (var file in files)
+            if (args[i] == "--export" && i + 1 < args.Length)
             {
-                int count = ColorModifier.ModifyColors(file, usmapPath, r, g, b, a);
-                if (count > 0) totalModified += count;
+                if (int.TryParse(args[++i], out int idx)) targetExport = idx;
+            }
+            else if (args[i] == "--channels" && i + 1 < args.Length)
+            {
+                channels = args[++i].ToLowerInvariant();
+            }
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
+            {
+                usmapPath = args[++i];
+            }
+            else if (args[i] == "--output" && i + 1 < args.Length)
+            {
+                outputDir = args[++i];
+            }
+            else if (args[i] == "--player" && i + 3 < args.Length)
+            {
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pR);
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pG);
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pB);
+                hasPlayer = true;
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("--") && float.TryParse(args[i + 1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float pa))
+                { pA = pa; i++; }
+            }
+            else if (args[i] == "--enemy" && i + 3 < args.Length)
+            {
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out eR);
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out eG);
+                float.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out eB);
+                hasEnemy = true;
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("--") && float.TryParse(args[i + 1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float ea))
+                { eA = ea; i++; }
+            }
+            else
+            {
+                positional.Add(args[i]);
             }
         }
-        else if (File.Exists(path))
+
+        // Directory batch mode — full parse, one file at a time (correct + low RAM)
+        // Same proven path as single-file edit, just in a loop with cleanup
+        if (Directory.Exists(assetPath))
         {
-            totalModified = ColorModifier.ModifyColors(path, usmapPath, r, g, b, a);
+            if (!hasPlayer && !hasEnemy)
+            {
+                Console.Error.WriteLine("Batch mode: using default Player=green(0,5,0) Enemy=blue(0,0,5)");
+                hasPlayer = true; hasEnemy = true;
+            }
+
+            // Parse usmap from positional if present
+            if (positional.Count >= 1 && usmapPath == null) usmapPath = positional[0];
+
+            var nsFiles = Directory.GetFiles(assetPath, "NS_*.uasset", SearchOption.AllDirectories);
+            Console.Error.WriteLine($"Found {nsFiles.Length} NS_*.uasset files");
+
+            // Try all NS files — binary pre-filter is unreliable across different extraction tools
+            var candidates = nsFiles.ToList();
+            Console.Error.WriteLine($"  Processing all {candidates.Count} candidates");
+
+            // Load usmap once — shared across all files (read-only after load)
+            Usmap? mappings = LoadMappings(usmapPath);
+
+            int totalModifiedFiles = 0;
+            int totalPatchedLUTs = 0;
+            int totalErrors = 0;
+            int totalSkipped = 0;
+
+            for (int fi = 0; fi < candidates.Count; fi++)
+            {
+                string file = candidates[fi];
+                string name = Path.GetFileNameWithoutExtension(file);
+                try
+                {
+                    // Full parse with usmap — exact same path as single-file edit
+                    var batchAsset = LoadAssetWithMappings(file, mappings);
+
+                    int colorCurveIdx = 0;
+                    bool modified = false;
+
+                    for (int ei = 0; ei < batchAsset.Exports.Count; ei++)
+                    {
+                        string cls = batchAsset.Exports[ei].GetExportClassType()?.Value?.Value ?? "";
+                        if (cls != "NiagaraDataInterfaceColorCurve") continue;
+                        if (batchAsset.Exports[ei] is not NormalExport ne || ne.Data == null) { colorCurveIdx++; continue; }
+
+                        // Alternate: even index = player, odd = enemy
+                        float cr, cg, cb, ca;
+                        if (colorCurveIdx % 2 == 0) { cr = pR; cg = pG; cb = pB; ca = pA; }
+                        else { cr = eR; cg = eG; cb = eB; ca = eA; }
+
+                        foreach (var prop in ne.Data)
+                        {
+                            if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                            if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                            for (int j = 0; j + 3 < arrayProp.Value.Length; j += 4)
+                            {
+                                if (arrayProp.Value[j] is FloatPropertyData rp) rp.Value = cr;
+                                if (arrayProp.Value[j + 1] is FloatPropertyData gp) gp.Value = cg;
+                                if (arrayProp.Value[j + 2] is FloatPropertyData bp) bp.Value = cb;
+                                if (arrayProp.Value[j + 3] is FloatPropertyData ap) ap.Value = ca;
+                            }
+                            modified = true;
+                            totalPatchedLUTs++;
+                            break;
+                        }
+
+                        // Also patch RGBA float quads in Extras (binary curve data the game reads at runtime)
+                        if (ne.Extras != null && ne.Extras.Length >= 16)
+                        {
+                            byte[] extras = ne.Extras;
+                            int extrasPatched = 0;
+                            for (int eb = 0; eb + 15 < extras.Length; eb += 4)
+                            {
+                                float fA = BitConverter.ToSingle(extras, eb + 12);
+                                if (fA < 0.99f || fA > 1.01f) continue;
+                                float fR = BitConverter.ToSingle(extras, eb);
+                                float fG = BitConverter.ToSingle(extras, eb + 4);
+                                float fB = BitConverter.ToSingle(extras, eb + 8);
+                                if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                                if (fR == 0 && fG == 0 && fB == 0) continue;
+                                Array.Copy(BitConverter.GetBytes(cr), 0, extras, eb, 4);
+                                Array.Copy(BitConverter.GetBytes(cg), 0, extras, eb + 4, 4);
+                                Array.Copy(BitConverter.GetBytes(cb), 0, extras, eb + 8, 4);
+                                Array.Copy(BitConverter.GetBytes(ca), 0, extras, eb + 12, 4);
+                                extrasPatched++;
+                                eb += 12;
+                            }
+                            if (extrasPatched > 0)
+                                Console.Error.WriteLine($"    Export {ei}: patched {extrasPatched} RGBA quads in Extras");
+                        }
+                        colorCurveIdx++;
+                    }
+
+                    if (modified)
+                    {
+                        string writePath;
+                        if (outputDir != null)
+                        {
+                            string relPath = Path.GetRelativePath(assetPath, file);
+                            string outPath = Path.Combine(outputDir, relPath);
+                            string? outSubDir = Path.GetDirectoryName(outPath);
+                            if (outSubDir != null) Directory.CreateDirectory(outSubDir);
+                            string srcUexp = Path.ChangeExtension(file, ".uexp");
+                            string dstUexp = Path.ChangeExtension(outPath, ".uexp");
+                            if (File.Exists(srcUexp)) File.Copy(srcUexp, dstUexp, true);
+                            File.Copy(file, outPath, true);
+                            batchAsset.Write(outPath);
+                            writePath = outPath;
+                        }
+                        else
+                        {
+                            batchAsset.Write(batchAsset.FilePath);
+                            writePath = batchAsset.FilePath;
+                        }
+
+                        // Second pass: binary patch the written .uexp to replace RGBA quads
+                        // in Extras areas (curve data the game reads at runtime to regenerate ShaderLUT)
+                        string uexpPath = Path.ChangeExtension(writePath, ".uexp");
+                        if (File.Exists(uexpPath))
+                        {
+                            byte[] uexpBytes = File.ReadAllBytes(uexpPath);
+                            int totalExtrasPatched = 0;
+                            for (int bp = 0; bp + 15 < uexpBytes.Length; bp += 4)
+                            {
+                                float fA = BitConverter.ToSingle(uexpBytes, bp + 12);
+                                if (fA < 0.99f || fA > 1.01f) continue;
+                                float fR = BitConverter.ToSingle(uexpBytes, bp);
+                                float fG = BitConverter.ToSingle(uexpBytes, bp + 4);
+                                float fB = BitConverter.ToSingle(uexpBytes, bp + 8);
+                                if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                                if (fR == 0 && fG == 0 && fB == 0) continue;
+                                // Already patched by Write() (ShaderLUT area) — skip if already our target color
+                                bool alreadyPatched = false;
+                                // Check against both player and enemy colors
+                                if ((fR == pR && fG == pG && fB == pB) || (fR == eR && fG == eG && fB == eB))
+                                    alreadyPatched = true;
+                                if (alreadyPatched) { bp += 12; continue; }
+                                // Determine which color to use based on position in the file
+                                // We can't easily tell which export this belongs to, so use a simple heuristic:
+                                // first half of RGBA quads = player, second half = enemy (matches alternating pattern)
+                                // Actually just replace ALL with the same alternating logic isn't possible here.
+                                // Instead, just replace with the nearest color based on the original value pattern.
+                                // For now: replace all non-patched RGBA quads where R==G==B (grey/white) with player color
+                                // and where R!=G or G!=B with enemy color (heuristic, may need refinement)
+                                float useR, useG, useB, useA;
+                                if (Math.Abs(fR - fG) < 0.01f && Math.Abs(fG - fB) < 0.01f)
+                                {
+                                    // Grey/white — use player color
+                                    useR = pR; useG = pG; useB = pB; useA = pA;
+                                }
+                                else
+                                {
+                                    // Non-grey — use enemy color
+                                    useR = eR; useG = eG; useB = eB; useA = eA;
+                                }
+                                Array.Copy(BitConverter.GetBytes(useR), 0, uexpBytes, bp, 4);
+                                Array.Copy(BitConverter.GetBytes(useG), 0, uexpBytes, bp + 4, 4);
+                                Array.Copy(BitConverter.GetBytes(useB), 0, uexpBytes, bp + 8, 4);
+                                Array.Copy(BitConverter.GetBytes(useA), 0, uexpBytes, bp + 12, 4);
+                                totalExtrasPatched++;
+                                bp += 12;
+                            }
+                            if (totalExtrasPatched > 0)
+                            {
+                                File.WriteAllBytes(uexpPath, uexpBytes);
+                                Console.Error.WriteLine($"    {name}: binary-patched {totalExtrasPatched} RGBA quads in .uexp");
+                            }
+                        }
+                        totalModifiedFiles++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  ERROR {name}: {ex.Message}");
+                    totalErrors++;
+                }
+
+                // Aggressive cleanup every 10 files to keep RAM under control
+                if ((fi + 1) % 10 == 0)
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+
+                if ((fi + 1) % 50 == 0)
+                    Console.Error.WriteLine($"  Processed {fi + 1}/{candidates.Count} ({totalModifiedFiles} modified, {totalErrors} errors)...");
+            }
+
+            Console.Error.WriteLine($"  Done: {candidates.Count} files, {totalModifiedFiles} modified, {totalPatchedLUTs} LUTs patched, {totalSkipped} skipped, {totalErrors} errors");
+            var batchResult = new { success = true, totalFiles = candidates.Count, totalModifiedFiles, totalPatchedLUTs, totalSkipped, totalErrors };
+            Console.WriteLine(JsonSerializer.Serialize(batchResult, new JsonSerializerOptions { WriteIndented = true }));
+            return 0;
         }
-        else
+
+        // Single file mode
+        // positional: [usmap] r g b [a]
+        if (positional.Count >= 4)
         {
-            Console.Error.WriteLine($"Path not found: {path}");
+            usmapPath = positional[0];
+            float.TryParse(positional[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out r);
+            float.TryParse(positional[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out g);
+            float.TryParse(positional[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out b);
+            hasColor = true;
+            if (positional.Count >= 5)
+                float.TryParse(positional[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out a);
+        }
+        else if (positional.Count >= 3)
+        {
+            float.TryParse(positional[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out r);
+            float.TryParse(positional[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out g);
+            float.TryParse(positional[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out b);
+            hasColor = true;
+            if (positional.Count >= 4)
+                float.TryParse(positional[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out a);
+        }
+
+        if (!hasColor)
+        {
+            Console.Error.WriteLine("Error: Must provide R G B color values");
             return 1;
         }
 
-        Console.WriteLine($"Total color values modified: {totalModified}");
+        bool modR = channels.Contains('r');
+        bool modG = channels.Contains('g');
+        bool modB = channels.Contains('b');
+        bool modA = channels.Contains('a');
+
+        var asset = LoadAsset(assetPath, usmapPath);
+
+        int modifiedColors = 0;
+        int modifiedExports = 0;
+
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            if (targetExport.HasValue && targetExport.Value != ei) continue;
+
+            var export = asset.Exports[ei];
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+            if (!className.Contains("ColorCurve")) continue;
+
+            if (export is not NormalExport normalExport || normalExport.Data == null) continue;
+
+            // Find ShaderLUT array property
+            foreach (var prop in normalExport.Data)
+            {
+                if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                // Modify RGBA groups (every 4 floats)
+                for (int j = 0; j + 3 < arrayProp.Value.Length; j += 4)
+                {
+                    if (arrayProp.Value[j] is FloatPropertyData rp && modR) rp.Value = r;
+                    if (arrayProp.Value[j + 1] is FloatPropertyData gp && modG) gp.Value = g;
+                    if (arrayProp.Value[j + 2] is FloatPropertyData bp && modB) bp.Value = b;
+                    if (arrayProp.Value[j + 3] is FloatPropertyData ap && modA) ap.Value = a;
+                    modifiedColors++;
+                }
+
+                modifiedExports++;
+                break;
+            }
+
+            // Also patch RGBA float quads in Extras (binary curve data the game reads at runtime)
+            if (normalExport.Extras != null && normalExport.Extras.Length >= 16)
+            {
+                byte[] extras = normalExport.Extras;
+                int extrasPatched = 0;
+                for (int eb = 0; eb + 15 < extras.Length; eb += 4)
+                {
+                    float fA = BitConverter.ToSingle(extras, eb + 12);
+                    if (fA < 0.99f || fA > 1.01f) continue;
+                    float fR = BitConverter.ToSingle(extras, eb);
+                    float fG = BitConverter.ToSingle(extras, eb + 4);
+                    float fB = BitConverter.ToSingle(extras, eb + 8);
+                    if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                    if (fR == 0 && fG == 0 && fB == 0) continue;
+                    if (modR) Array.Copy(BitConverter.GetBytes(r), 0, extras, eb, 4);
+                    if (modG) Array.Copy(BitConverter.GetBytes(g), 0, extras, eb + 4, 4);
+                    if (modB) Array.Copy(BitConverter.GetBytes(b), 0, extras, eb + 8, 4);
+                    if (modA) Array.Copy(BitConverter.GetBytes(a), 0, extras, eb + 12, 4);
+                    extrasPatched++;
+                    eb += 12;
+                }
+                if (extrasPatched > 0)
+                    Console.Error.WriteLine($"  Export {ei}: patched {extrasPatched} RGBA quads in Extras");
+            }
+        }
+
+        if (modifiedColors > 0)
+        {
+            asset.Write(asset.FilePath);
+        }
+
+        var result = new { success = true, path = assetPath, modifiedExports, modifiedColors };
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
         return 0;
     }
-    
-    private static int CliNiagaraList(string[] args)
+
+    /// <summary>
+    /// JSON-mode niagara_edit: parses a JSON request object from the Tauri frontend.
+    /// Supports batch colors (per-index RGBA) and overwrite mode (flat fill).
+    /// </summary>
+    private static int CliNiagaraEditJson(string[] args)
     {
-        if (args.Length < 2)
+        string json = args[1];
+        // Support @filepath: read JSON from file instead of CLI arg (avoids OS error 206)
+        if (json.StartsWith("@")) { json = File.ReadAllText(json.Substring(1)); }
+        string? usmapPath = (args.Length >= 3 && !args[2].StartsWith("{") && !args[2].StartsWith("@")) ? args[2] : null;
+
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (Exception ex) { Console.Error.WriteLine($"Error: Invalid JSON: {ex.Message}"); return 1; }
+
+        var root = doc.RootElement;
+
+        string assetPath = root.GetProperty("assetPath").GetString() ?? "";
+        if (string.IsNullOrEmpty(assetPath)) { Console.Error.WriteLine("Error: assetPath is required"); return 1; }
+
+        int? exportIndex = root.TryGetProperty("exportIndex", out var eiProp) && eiProp.ValueKind == JsonValueKind.Number ? eiProp.GetInt32() : null;
+        string? exportNameFilter = root.TryGetProperty("exportNameFilter", out var enfProp) && enfProp.ValueKind == JsonValueKind.String ? enfProp.GetString() : null;
+
+        bool modR = root.TryGetProperty("modifyR", out var mr) && mr.ValueKind == JsonValueKind.True;
+        bool modG = root.TryGetProperty("modifyG", out var mg) && mg.ValueKind == JsonValueKind.True;
+        bool modB = root.TryGetProperty("modifyB", out var mb) && mb.ValueKind == JsonValueKind.True;
+        bool modA = root.TryGetProperty("modifyA", out var ma) && ma.ValueKind == JsonValueKind.True;
+
+        // Batch colors array (per-index RGBA)
+        List<(int index, float r, float g, float b, float a)>? batchColors = null;
+        if (root.TryGetProperty("colors", out var colorsProp) && colorsProp.ValueKind == JsonValueKind.Array)
         {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_list <directory> [usmap_path]");
-            Console.Error.WriteLine("Output: JSON with list of NS files and their metadata");
+            batchColors = new();
+            foreach (var c in colorsProp.EnumerateArray())
+            {
+                int idx = c.GetProperty("index").GetInt32();
+                float cr = (float)c.GetProperty("r").GetDouble();
+                float cg = (float)c.GetProperty("g").GetDouble();
+                float cb = (float)c.GetProperty("b").GetDouble();
+                float ca = (float)c.GetProperty("a").GetDouble();
+                batchColors.Add((idx, cr, cg, cb, ca));
+            }
+        }
+
+        // Overwrite mode (flat fill with range)
+        float fillR = 0, fillG = 0, fillB = 0, fillA = 1;
+        bool hasOverwrite = false;
+        int colorIndexStart = 0, colorIndexEnd = int.MaxValue;
+        if (root.TryGetProperty("r", out var rProp) && rProp.ValueKind == JsonValueKind.Number && batchColors == null)
+        {
+            fillR = (float)rProp.GetDouble();
+            fillG = root.TryGetProperty("g", out var gProp) ? (float)gProp.GetDouble() : 0;
+            fillB = root.TryGetProperty("b", out var bProp) ? (float)bProp.GetDouble() : 0;
+            fillA = root.TryGetProperty("a", out var aProp) ? (float)aProp.GetDouble() : 1;
+            hasOverwrite = true;
+        }
+        if (root.TryGetProperty("colorIndexStart", out var cisProp)) colorIndexStart = cisProp.GetInt32();
+        if (root.TryGetProperty("colorIndexEnd", out var cieProp)) colorIndexEnd = cieProp.GetInt32();
+
+        if (batchColors == null && !hasOverwrite)
+        {
+            Console.Error.WriteLine("Error: Must provide either 'colors' array or 'r','g','b' values");
             return 1;
         }
 
-        string directory = args[1];
-        string? usmapPath = args.Length > 2 ? args[2] : null;
+        // Free memory before loading large assets to reduce OOM risk
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
 
-        string json = NiagaraService.ListNiagaraFiles(directory, usmapPath);
-        Console.WriteLine(json);
+        UAsset asset;
+        try { asset = LoadAsset(assetPath, usmapPath); }
+        catch (OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"Error: Out of memory loading asset: {assetPath}");
+            return 1;
+        }
+
+        int modifiedColors = 0;
+        int modifiedExports = 0;
+
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            if (exportIndex.HasValue && exportIndex.Value != ei) continue;
+
+            var export = asset.Exports[ei];
+            string exportName = export.ObjectName?.Value?.Value ?? "";
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+
+            // Filter by export name if specified
+            if (exportNameFilter != null && !exportName.Equals(exportNameFilter, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!className.Contains("ColorCurve") && !className.Contains("NiagaraDataInterface"))
+                continue;
+
+            if (export is not NormalExport normalExport || normalExport.Data == null) continue;
+
+            foreach (var prop in normalExport.Data)
+            {
+                if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                int colorCount = arrayProp.Value.Length / 4;
+
+                if (batchColors != null)
+                {
+                    // Batch mode: apply each color to its specific index
+                    foreach (var (idx, cr, cg, cb, ca) in batchColors)
+                    {
+                        int j = idx * 4;
+                        if (j + 3 >= arrayProp.Value.Length) continue;
+                        if (modR && arrayProp.Value[j] is FloatPropertyData rp) rp.Value = cr;
+                        if (modG && arrayProp.Value[j + 1] is FloatPropertyData gp) gp.Value = cg;
+                        if (modB && arrayProp.Value[j + 2] is FloatPropertyData bp) bp.Value = cb;
+                        if (modA && arrayProp.Value[j + 3] is FloatPropertyData ap) ap.Value = ca;
+                        modifiedColors++;
+                    }
+                }
+                else
+                {
+                    // Overwrite mode: fill range with a single color
+                    for (int ci = colorIndexStart; ci < Math.Min(colorIndexEnd, colorCount); ci++)
+                    {
+                        int j = ci * 4;
+                        if (j + 3 >= arrayProp.Value.Length) continue;
+                        if (modR && arrayProp.Value[j] is FloatPropertyData rp) rp.Value = fillR;
+                        if (modG && arrayProp.Value[j + 1] is FloatPropertyData gp) gp.Value = fillG;
+                        if (modB && arrayProp.Value[j + 2] is FloatPropertyData bp) bp.Value = fillB;
+                        if (modA && arrayProp.Value[j + 3] is FloatPropertyData ap) ap.Value = fillA;
+                        modifiedColors++;
+                    }
+                }
+
+                modifiedExports++;
+                break;
+            }
+
+            // Also patch RGBA float quads in Extras (binary curve data the game reads at runtime)
+            if (normalExport.Extras != null && normalExport.Extras.Length >= 16)
+            {
+                byte[] extras = normalExport.Extras;
+                int extrasPatched = 0;
+
+                if (batchColors != null && batchColors.Count > 0)
+                {
+                    // For batch mode, use the first color as the representative for Extras
+                    var (_, er, eg, eb, ea) = batchColors[0];
+                    for (int ebi = 0; ebi + 15 < extras.Length; ebi += 4)
+                    {
+                        float fA = BitConverter.ToSingle(extras, ebi + 12);
+                        if (fA < 0.99f || fA > 1.01f) continue;
+                        float fR = BitConverter.ToSingle(extras, ebi);
+                        float fG = BitConverter.ToSingle(extras, ebi + 4);
+                        float fB = BitConverter.ToSingle(extras, ebi + 8);
+                        if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                        if (fR == 0 && fG == 0 && fB == 0) continue;
+                        if (modR) Array.Copy(BitConverter.GetBytes(er), 0, extras, ebi, 4);
+                        if (modG) Array.Copy(BitConverter.GetBytes(eg), 0, extras, ebi + 4, 4);
+                        if (modB) Array.Copy(BitConverter.GetBytes(eb), 0, extras, ebi + 8, 4);
+                        if (modA) Array.Copy(BitConverter.GetBytes(ea), 0, extras, ebi + 12, 4);
+                        extrasPatched++;
+                        ebi += 12;
+                    }
+                }
+                else if (hasOverwrite)
+                {
+                    for (int ebi = 0; ebi + 15 < extras.Length; ebi += 4)
+                    {
+                        float fA = BitConverter.ToSingle(extras, ebi + 12);
+                        if (fA < 0.99f || fA > 1.01f) continue;
+                        float fR = BitConverter.ToSingle(extras, ebi);
+                        float fG = BitConverter.ToSingle(extras, ebi + 4);
+                        float fB = BitConverter.ToSingle(extras, ebi + 8);
+                        if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                        if (fR == 0 && fG == 0 && fB == 0) continue;
+                        if (modR) Array.Copy(BitConverter.GetBytes(fillR), 0, extras, ebi, 4);
+                        if (modG) Array.Copy(BitConverter.GetBytes(fillG), 0, extras, ebi + 4, 4);
+                        if (modB) Array.Copy(BitConverter.GetBytes(fillB), 0, extras, ebi + 8, 4);
+                        if (modA) Array.Copy(BitConverter.GetBytes(fillA), 0, extras, ebi + 12, 4);
+                        extrasPatched++;
+                        ebi += 12;
+                    }
+                }
+
+                if (extrasPatched > 0)
+                    Console.Error.WriteLine($"  Export {ei}: patched {extrasPatched} RGBA quads in Extras");
+            }
+        }
+
+        if (modifiedColors > 0)
+        {
+            asset.Write(asset.FilePath);
+        }
+
+        var result = new { success = true, path = assetPath, modifiedExports, modifiedColors };
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
         return 0;
     }
 
-    private static int CliNiagaraDetails(string[] args)
+    /// <summary>
+    /// Batch multi-export niagara_edit: loads the asset ONCE, applies edits to multiple exports,
+    /// then writes ONCE. JSON format:
+    /// { "assetPath": "...", "edits": [ { "exportIndex": N, "colors": [...], "modifyR": true, ... }, ... ] }
+    /// This is safe for parallel cross-file saving since each file is only written once.
+    /// </summary>
+    private static int CliNiagaraEditBatch(string[] args)
+    {
+        if (args.Length < 2) { Console.Error.WriteLine("Usage: UAssetTool niagara_edit_batch <json|@filepath> [usmap_path]"); return 1; }
+
+        string json = args[1];
+        // Support @filepath: read JSON from file instead of CLI arg (avoids OS error 206)
+        if (json.StartsWith("@")) { json = File.ReadAllText(json.Substring(1)); }
+        string? usmapPath = (args.Length >= 3 && !args[2].StartsWith("{") && !args[2].StartsWith("@")) ? args[2] : null;
+
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (Exception ex) { Console.Error.WriteLine($"Error: Invalid JSON: {ex.Message}"); return 1; }
+
+        var root = doc.RootElement;
+
+        string assetPath = root.GetProperty("assetPath").GetString() ?? "";
+        if (string.IsNullOrEmpty(assetPath)) { Console.Error.WriteLine("Error: assetPath is required"); return 1; }
+
+        if (!root.TryGetProperty("edits", out var editsProp) || editsProp.ValueKind != JsonValueKind.Array)
+        {
+            Console.Error.WriteLine("Error: 'edits' array is required");
+            return 1;
+        }
+
+        // Free memory before loading large assets to reduce OOM risk
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        UAsset asset;
+        try { asset = LoadAsset(assetPath, usmapPath); }
+        catch (OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"Error: Out of memory loading asset: {assetPath}");
+            return 1;
+        }
+
+        int totalModifiedColors = 0;
+        int totalModifiedExports = 0;
+        int editCount = 0;
+
+        foreach (var edit in editsProp.EnumerateArray())
+        {
+            editCount++;
+            int? exportIndex = edit.TryGetProperty("exportIndex", out var eiProp) && eiProp.ValueKind == JsonValueKind.Number ? eiProp.GetInt32() : null;
+            string? exportNameFilter = edit.TryGetProperty("exportNameFilter", out var enfProp) && enfProp.ValueKind == JsonValueKind.String ? enfProp.GetString() : null;
+
+            bool modR = edit.TryGetProperty("modifyR", out var mr) && mr.ValueKind == JsonValueKind.True;
+            bool modG = edit.TryGetProperty("modifyG", out var mg) && mg.ValueKind == JsonValueKind.True;
+            bool modB = edit.TryGetProperty("modifyB", out var mb) && mb.ValueKind == JsonValueKind.True;
+            bool modA = edit.TryGetProperty("modifyA", out var ma) && ma.ValueKind == JsonValueKind.True;
+
+            // Batch colors array (per-index RGBA)
+            List<(int index, float r, float g, float b, float a)>? batchColors = null;
+            if (edit.TryGetProperty("colors", out var colorsProp) && colorsProp.ValueKind == JsonValueKind.Array)
+            {
+                batchColors = new();
+                foreach (var c in colorsProp.EnumerateArray())
+                {
+                    int idx = c.GetProperty("index").GetInt32();
+                    float cr = (float)c.GetProperty("r").GetDouble();
+                    float cg = (float)c.GetProperty("g").GetDouble();
+                    float cb = (float)c.GetProperty("b").GetDouble();
+                    float ca = (float)c.GetProperty("a").GetDouble();
+                    batchColors.Add((idx, cr, cg, cb, ca));
+                }
+            }
+
+            // Overwrite mode (flat fill with range)
+            float fillR = 0, fillG = 0, fillB = 0, fillA = 1;
+            bool hasOverwrite = false;
+            int colorIndexStart = 0, colorIndexEnd = int.MaxValue;
+            if (edit.TryGetProperty("r", out var rProp) && rProp.ValueKind == JsonValueKind.Number && batchColors == null)
+            {
+                fillR = (float)rProp.GetDouble();
+                fillG = edit.TryGetProperty("g", out var gProp) ? (float)gProp.GetDouble() : 0;
+                fillB = edit.TryGetProperty("b", out var bProp) ? (float)bProp.GetDouble() : 0;
+                fillA = edit.TryGetProperty("a", out var aProp) ? (float)aProp.GetDouble() : 1;
+                hasOverwrite = true;
+            }
+            if (edit.TryGetProperty("colorIndexStart", out var cisProp)) colorIndexStart = cisProp.GetInt32();
+            if (edit.TryGetProperty("colorIndexEnd", out var cieProp)) colorIndexEnd = cieProp.GetInt32();
+
+            if (batchColors == null && !hasOverwrite)
+            {
+                Console.Error.WriteLine($"Warning: edit #{editCount} has no 'colors' or 'r','g','b' — skipping");
+                continue;
+            }
+
+            // Apply this edit to matching exports
+            for (int ei = 0; ei < asset.Exports.Count; ei++)
+            {
+                if (exportIndex.HasValue && exportIndex.Value != ei) continue;
+
+                var export = asset.Exports[ei];
+                string exportName = export.ObjectName?.Value?.Value ?? "";
+                string className = export.GetExportClassType()?.Value?.Value ?? "";
+
+                if (exportNameFilter != null && !exportName.Equals(exportNameFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!className.Contains("ColorCurve") && !className.Contains("NiagaraDataInterface"))
+                    continue;
+
+                if (export is not NormalExport normalExport || normalExport.Data == null) continue;
+
+                foreach (var prop in normalExport.Data)
+                {
+                    if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                    if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                    int colorCount = arrayProp.Value.Length / 4;
+
+                    if (batchColors != null)
+                    {
+                        foreach (var (idx, cr, cg, cb, ca) in batchColors)
+                        {
+                            int j = idx * 4;
+                            if (j + 3 >= arrayProp.Value.Length) continue;
+                            if (modR && arrayProp.Value[j] is FloatPropertyData rp) rp.Value = cr;
+                            if (modG && arrayProp.Value[j + 1] is FloatPropertyData gp) gp.Value = cg;
+                            if (modB && arrayProp.Value[j + 2] is FloatPropertyData bp) bp.Value = cb;
+                            if (modA && arrayProp.Value[j + 3] is FloatPropertyData ap) ap.Value = ca;
+                            totalModifiedColors++;
+                        }
+                    }
+                    else
+                    {
+                        for (int ci = colorIndexStart; ci < Math.Min(colorIndexEnd, colorCount); ci++)
+                        {
+                            int j = ci * 4;
+                            if (j + 3 >= arrayProp.Value.Length) continue;
+                            if (modR && arrayProp.Value[j] is FloatPropertyData rp) rp.Value = fillR;
+                            if (modG && arrayProp.Value[j + 1] is FloatPropertyData gp) gp.Value = fillG;
+                            if (modB && arrayProp.Value[j + 2] is FloatPropertyData bp) bp.Value = fillB;
+                            if (modA && arrayProp.Value[j + 3] is FloatPropertyData ap) ap.Value = fillA;
+                            totalModifiedColors++;
+                        }
+                    }
+
+                    totalModifiedExports++;
+                    break;
+                }
+
+                // Patch Extras binary data
+                if (normalExport.Extras != null && normalExport.Extras.Length >= 16)
+                {
+                    byte[] extras = normalExport.Extras;
+                    int extrasPatched = 0;
+
+                    if (batchColors != null && batchColors.Count > 0)
+                    {
+                        var (_, er, eg, eb, ea) = batchColors[0];
+                        for (int ebi = 0; ebi + 15 < extras.Length; ebi += 4)
+                        {
+                            float fA = BitConverter.ToSingle(extras, ebi + 12);
+                            if (fA < 0.99f || fA > 1.01f) continue;
+                            float fR = BitConverter.ToSingle(extras, ebi);
+                            float fG = BitConverter.ToSingle(extras, ebi + 4);
+                            float fB = BitConverter.ToSingle(extras, ebi + 8);
+                            if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                            if (fR == 0 && fG == 0 && fB == 0) continue;
+                            if (modR) Array.Copy(BitConverter.GetBytes(er), 0, extras, ebi, 4);
+                            if (modG) Array.Copy(BitConverter.GetBytes(eg), 0, extras, ebi + 4, 4);
+                            if (modB) Array.Copy(BitConverter.GetBytes(eb), 0, extras, ebi + 8, 4);
+                            if (modA) Array.Copy(BitConverter.GetBytes(ea), 0, extras, ebi + 12, 4);
+                            extrasPatched++;
+                            ebi += 12;
+                        }
+                    }
+                    else if (hasOverwrite)
+                    {
+                        for (int ebi = 0; ebi + 15 < extras.Length; ebi += 4)
+                        {
+                            float fA = BitConverter.ToSingle(extras, ebi + 12);
+                            if (fA < 0.99f || fA > 1.01f) continue;
+                            float fR = BitConverter.ToSingle(extras, ebi);
+                            float fG = BitConverter.ToSingle(extras, ebi + 4);
+                            float fB = BitConverter.ToSingle(extras, ebi + 8);
+                            if (fR < 0 || fR > 100 || fG < 0 || fG > 100 || fB < 0 || fB > 100) continue;
+                            if (fR == 0 && fG == 0 && fB == 0) continue;
+                            if (modR) Array.Copy(BitConverter.GetBytes(fillR), 0, extras, ebi, 4);
+                            if (modG) Array.Copy(BitConverter.GetBytes(fillG), 0, extras, ebi + 4, 4);
+                            if (modB) Array.Copy(BitConverter.GetBytes(fillB), 0, extras, ebi + 8, 4);
+                            if (modA) Array.Copy(BitConverter.GetBytes(fillA), 0, extras, ebi + 12, 4);
+                            extrasPatched++;
+                            ebi += 12;
+                        }
+                    }
+
+                    if (extrasPatched > 0)
+                        Console.Error.WriteLine($"  Export {ei}: patched {extrasPatched} RGBA quads in Extras");
+                }
+            }
+        }
+
+        // Single write for ALL edits
+        if (totalModifiedColors > 0)
+        {
+            asset.Write(asset.FilePath);
+        }
+
+        var result = new { success = true, path = assetPath, editCount, modifiedExports = totalModifiedExports, modifiedColors = totalModifiedColors };
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    private static int CliNiagaraAnalyze(string[] args)
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path] [--full] [--classify]");
-            Console.Error.WriteLine("Output: JSON with detailed color curve info for a specific NS file");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --full      Return all values instead of just samples (first, middle, last)");
-            Console.Error.WriteLine("  --classify  Include classification analysis for color curves (experimental)");
+            Console.Error.WriteLine("Usage: UAssetTool niagara_analyze <path> [usmap_path] [--export <index>] [--summary]");
+            Console.Error.WriteLine("  Dumps full property structure of a NiagaraSystem asset.");
+            Console.Error.WriteLine("  If <path> is a directory, processes all NS_*.uasset files.");
+            Console.Error.WriteLine("  --summary  Compact one-line-per-file report (for directories).");
             return 1;
         }
 
         string assetPath = args[1];
         string? usmapPath = null;
-        bool fullData = false;
-        bool includeClassification = false;
+        int? targetExport = null;
+        bool summaryMode = false;
 
-        // Parse remaining args
         for (int i = 2; i < args.Length; i++)
         {
-            if (args[i] == "--full")
-                fullData = true;
-            else if (args[i] == "--classify")
-                includeClassification = true;
+            if (args[i] == "--export" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out int idx)) targetExport = idx;
+            }
+            else if (args[i] == "--summary")
+                summaryMode = true;
             else if (usmapPath == null && !args[i].StartsWith("--"))
                 usmapPath = args[i];
         }
 
-        string json = NiagaraService.GetNiagaraDetails(assetPath, usmapPath, fullData, includeClassification);
-        Console.WriteLine(json);
-        return 0;
-    }
-
-    private static int CliNiagaraEdit(string[] args)
-    {
-        if (args.Length < 2)
+        // Directory batch mode — lightweight binary scan, no full asset parsing
+        if (Directory.Exists(assetPath))
         {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_edit <json_request> [usmap_path]");
-            Console.Error.WriteLine("       UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [options...] [usmap_path]");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("JSON request format: {\"assetPath\":\"...\",\"r\":0,\"g\":10,\"b\":0,\"a\":1}");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Selective targeting options (JSON):");
-            Console.Error.WriteLine("  exportIndex: int       - Only edit specific export by index");
-            Console.Error.WriteLine("  exportNameFilter: str  - Only edit exports matching this pattern (case-insensitive)");
-            Console.Error.WriteLine("  colorIndex: int        - Only edit specific color by index");
-            Console.Error.WriteLine("  colorIndexStart: int   - Start of color index range (inclusive)");
-            Console.Error.WriteLine("  colorIndexEnd: int     - End of color index range (inclusive)");
-            Console.Error.WriteLine("  modifyR: bool          - Whether to modify R channel (default: true)");
-            Console.Error.WriteLine("  modifyG: bool          - Whether to modify G channel (default: true)");
-            Console.Error.WriteLine("  modifyB: bool          - Whether to modify B channel (default: true)");
-            Console.Error.WriteLine("  modifyA: bool          - Whether to modify A channel (default: true)");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("CLI options (simple mode):");
-            Console.Error.WriteLine("  --export-name <pattern>  - Filter by export name");
-            Console.Error.WriteLine("  --export-index <n>       - Target specific export index");
-            Console.Error.WriteLine("  --color-range <start> <end> - Only modify colors in range");
-            Console.Error.WriteLine("  --channels <rgba>        - Which channels to modify (e.g., 'rgb', 'rg', 'a')");
-            return 1;
-        }
+            var files = Directory.GetFiles(assetPath, "NS_*.uasset", SearchOption.AllDirectories);
+            Console.Error.WriteLine($"Found {files.Length} NS_*.uasset files");
 
-        // Check if first arg is JSON or a file path
-        string firstArg = args[1];
-        string? usmapPath = null;
+            var summaryRows = new List<object>();
+            // Precompute search bytes for class names we care about
+            byte[] colorCurveBytes = System.Text.Encoding.ASCII.GetBytes("NiagaraDataInterfaceColorCurve");
+            byte[] scalarCurveBytes = System.Text.Encoding.ASCII.GetBytes("NiagaraDataInterfaceCurve");
+            byte[] vectorCurveBytes = System.Text.Encoding.ASCII.GetBytes("NiagaraDataInterfaceVectorCurve");
+            byte[] vector2dCurveBytes = System.Text.Encoding.ASCII.GetBytes("NiagaraDataInterfaceVector2DCurve");
+            byte[] shaderLutBytes = System.Text.Encoding.ASCII.GetBytes("ShaderLUT");
 
-        if (firstArg.TrimStart().StartsWith("{"))
-        {
-            // JSON request mode
-            usmapPath = args.Length > 2 ? args[2] : null;
-            string json = NiagaraService.EditNiagaraColors(firstArg, usmapPath);
-            Console.WriteLine(json);
-            return 0;
-        }
-        else
-        {
-            // Simple mode: asset_path r g b [a] [options...] [usmap]
-            if (args.Length < 5)
+            for (int fi = 0; fi < files.Length; fi++)
             {
-                Console.Error.WriteLine("Usage: UAssetTool niagara_edit <asset_path> <r> <g> <b> [a] [options...] [usmap_path]");
-                return 1;
-            }
-
-            string assetPath = args[1];
-            if (!float.TryParse(args[2], out float r) ||
-                !float.TryParse(args[3], out float g) ||
-                !float.TryParse(args[4], out float b))
-            {
-                Console.Error.WriteLine("Error: Invalid color values");
-                return 1;
-            }
-
-            float a = 1.0f;
-            int nextArg = 5;
-            if (args.Length > 5 && float.TryParse(args[5], out float parsedA))
-            {
-                a = parsedA;
-                nextArg = 6;
-            }
-
-            var request = new NiagaraService.ColorEditRequest
-            {
-                AssetPath = assetPath,
-                R = r,
-                G = g,
-                B = b,
-                A = a
-            };
-
-            // Parse optional arguments
-            for (int i = nextArg; i < args.Length; i++)
-            {
-                string arg = args[i];
-                
-                if (arg == "--export-name" && i + 1 < args.Length)
-                {
-                    request.ExportNameFilter = args[++i];
-                }
-                else if (arg == "--export-index" && i + 1 < args.Length)
-                {
-                    if (int.TryParse(args[++i], out int exportIdx))
-                        request.ExportIndex = exportIdx;
-                }
-                else if (arg == "--color-range" && i + 2 < args.Length)
-                {
-                    if (int.TryParse(args[++i], out int start))
-                        request.ColorIndexStart = start;
-                    if (int.TryParse(args[++i], out int end))
-                        request.ColorIndexEnd = end;
-                }
-                else if (arg == "--color-index" && i + 1 < args.Length)
-                {
-                    if (int.TryParse(args[++i], out int colorIdx))
-                        request.ColorIndex = colorIdx;
-                }
-                else if (arg == "--channels" && i + 1 < args.Length)
-                {
-                    string channels = args[++i].ToLowerInvariant();
-                    request.ModifyR = channels.Contains('r');
-                    request.ModifyG = channels.Contains('g');
-                    request.ModifyB = channels.Contains('b');
-                    request.ModifyA = channels.Contains('a');
-                }
-                else if (!arg.StartsWith("--") && usmapPath == null)
-                {
-                    // Assume it's the usmap path if it doesn't start with --
-                    usmapPath = arg;
-                }
-            }
-
-            string json = NiagaraService.EditNiagaraColors(request, usmapPath);
-            Console.WriteLine(json);
-            return 0;
-        }
-    }
-
-    private static int CliScanChildBPIsEnemy(string[] args)
-    {
-        if (args.Length < 2)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool scan_childbp_isenemy <paks_directory> [--aes <key>]");
-            Console.Error.WriteLine("       UAssetTool scan_childbp_isenemy <extracted_directory> --extracted");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Scans ChildBP assets to find which NS files receive IsEnemy parameter.");
-            Console.Error.WriteLine("ChildBP assets contain UserParameterRedirects that pass IsEnemy to Niagara systems.");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --aes <key>     AES decryption key for encrypted paks (hex string)");
-            Console.Error.WriteLine("  --extracted     Scan from extracted directory instead of IoStore");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Examples:");
-            Console.Error.WriteLine("  scan_childbp_isenemy \"C:/Game/Paks\" --aes 0x0C263D8C...");
-            Console.Error.WriteLine("  scan_childbp_isenemy \"C:/extracted_childbp\" --extracted");
-            return 1;
-        }
-
-        string path = args[1];
-        string? aesKey = null;
-        bool useExtracted = false;
-
-        for (int i = 2; i < args.Length; i++)
-        {
-            if (args[i] == "--aes" && i + 1 < args.Length)
-                aesKey = args[++i];
-            else if (args[i] == "--extracted")
-                useExtracted = true;
-        }
-
-        if (useExtracted)
-        {
-            // Use extracted directory mode
-            string json = NiagaraService.ScanChildBPsForIsEnemy(path);
-            Console.WriteLine(json);
-            return 0;
-        }
-
-        // Direct IoStore reading mode
-        if (!Directory.Exists(path))
-        {
-            Console.Error.WriteLine($"Directory not found: {path}");
-            return 1;
-        }
-
-        try
-        {
-            using var context = new ZenPackage.FZenPackageContext();
-            
-            // Set AES key if provided
-            if (!string.IsNullOrEmpty(aesKey))
-            {
-                string cleanKey = aesKey.StartsWith("0x") ? aesKey[2..] : aesKey;
-                context.SetAesKey(cleanKey);
-            }
-            else
-            {
-                // Default Marvel Rivals key
-                context.SetAesKey("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74");
-            }
-
-            Console.Error.WriteLine($"Loading game containers from: {path}");
-
-            // Load global.utoc first
-            string globalPath = Path.Combine(path, "global.utoc");
-            if (File.Exists(globalPath))
-            {
-                context.LoadContainer(globalPath);
-            }
-
-            // Load other containers
-            var utocFiles = Directory.GetFiles(path, "*.utoc", SearchOption.TopDirectoryOnly)
-                .Where(f => !f.EndsWith("global.utoc", StringComparison.OrdinalIgnoreCase))
-                .Where(f => !f.Contains("optional", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(f => f)
-                .ToList();
-
-            Console.Error.WriteLine($"Loading {utocFiles.Count} containers...");
-            foreach (var utocFile in utocFiles)
-            {
+                string file = files[fi];
+                string name = Path.GetFileNameWithoutExtension(file);
                 try
                 {
-                    context.LoadContainer(utocFile);
+                    // Read .uasset header bytes to find class names in name/import tables
+                    byte[] headerData = File.ReadAllBytes(file);
+                    int colorCurves = CountOccurrences(headerData, colorCurveBytes);
+                    // Subtract ColorCurve matches from generic Curve matches to avoid double-counting
+                    int rawCurves = CountOccurrences(headerData, scalarCurveBytes);
+                    int scalarCurves = rawCurves - colorCurves;
+                    int vectorCurves = CountOccurrences(headerData, vectorCurveBytes);
+                    int vector2dCurves = CountOccurrences(headerData, vector2dCurveBytes);
+
+                    // ShaderLUT is in name map (header), not .uexp (unversioned uses schema indices)
+                    int shaderLUTs = CountOccurrences(headerData, shaderLutBytes);
+
+                    summaryRows.Add(new { name, colorCurves, scalarCurves, vectorCurves, vector2dCurves, shaderLUTs, sizeKB = headerData.Length / 1024, error = (string?)null });
+                    headerData = null!; // help GC
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"  Warning: Failed to load {Path.GetFileName(utocFile)}: {ex.Message}");
+                    summaryRows.Add(new { name, colorCurves = 0, scalarCurves = 0, vectorCurves = 0, vector2dCurves = 0, shaderLUTs = 0, sizeKB = 0, error = ex.Message });
+                }
+
+                if ((fi + 1) % 100 == 0)
+                {
+                    GC.Collect(0, GCCollectionMode.Default, false);
+                    Console.Error.WriteLine($"  Processed {fi + 1}/{files.Length}...");
                 }
             }
 
-            Console.Error.WriteLine($"Total packages indexed: {context.PackageCount}");
-            Console.Error.WriteLine("Scanning ChildBP packages for IsEnemy...");
-
-            var result = NiagaraService.ScanChildBPsFromIoStore(context);
-            string json = System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions 
-            { 
-                WriteIndented = true,
-                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
-            });
-            Console.WriteLine(json);
+            Console.Error.WriteLine($"  Done: {files.Length}/{files.Length}");
+            Console.WriteLine(JsonSerializer.Serialize(new { fileCount = files.Length, files = summaryRows },
+                new JsonSerializerOptions { WriteIndented = true }));
             return 0;
         }
-        catch (Exception ex)
+
+        var asset = LoadAsset(assetPath, usmapPath);
+
+        var exports = new List<object>();
+        for (int i = 0; i < asset.Exports.Count; i++)
         {
-            Console.Error.WriteLine($"Error: {ex.Message}");
+            if (targetExport.HasValue && targetExport.Value != i) continue;
+
+            var export = asset.Exports[i];
+            string className = export.GetExportClassType()?.Value?.Value ?? "Unknown";
+            string exportName = export.ObjectName?.Value?.Value ?? $"Export_{i}";
+            string csharpType = export.GetType().Name;
+            long serialSize = export.SerialSize;
+
+            object? propTree = null;
+            byte[]? extras = null;
+
+            if (export is NormalExport normalExport)
+            {
+                if (normalExport.Data != null && normalExport.Data.Count > 0)
+                    propTree = DumpPropertyList(normalExport.Data);
+                if (normalExport.Extras != null && normalExport.Extras.Length > 0)
+                    extras = normalExport.Extras;
+            }
+
+            // Resolve outer (parent) export name
+            int outerIdx = export.OuterIndex.Index;
+            string? outerName = null;
+            if (outerIdx > 0 && outerIdx <= asset.Exports.Count)
+                outerName = asset.Exports[outerIdx - 1].ObjectName?.Value?.Value;
+            else if (outerIdx < 0)
+            {
+                int impIdx = -outerIdx - 1;
+                if (impIdx < asset.Imports.Count)
+                    outerName = asset.Imports[impIdx].ObjectName?.Value?.Value;
+            }
+
+            var entry = new Dictionary<string, object?>
+            {
+                ["index"] = i,
+                ["name"] = exportName,
+                ["class"] = className,
+                ["csharpType"] = csharpType,
+                ["serialSize"] = serialSize,
+                ["outerIndex"] = outerIdx,
+                ["outerName"] = outerName,
+                ["properties"] = propTree,
+            };
+            if (extras != null)
+                entry["extrasSize"] = extras.Length;
+
+            exports.Add(entry);
+        }
+
+        var output = new { exportCount = asset.Exports.Count, exports };
+        Console.WriteLine(JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    private static object DumpPropertyList(List<PropertyData> properties)
+    {
+        var result = new List<object>();
+        foreach (var prop in properties)
+        {
+            result.Add(DumpProperty(prop));
+        }
+        return result;
+    }
+
+    private static object DumpProperty(PropertyData prop)
+    {
+        string name = prop.Name?.Value?.Value ?? "?";
+        string typeName = prop.GetType().Name.Replace("PropertyData", "");
+
+        var entry = new Dictionary<string, object?> { ["name"] = name, ["type"] = typeName };
+
+        switch (prop)
+        {
+            case StructPropertyData structProp:
+                entry["structType"] = structProp.StructType?.Value?.Value ?? "?";
+                if (structProp.Value != null && structProp.Value.Count > 0)
+                    entry["children"] = DumpPropertyList(structProp.Value);
+                break;
+
+            case ArrayPropertyData arrayProp:
+                entry["arrayType"] = arrayProp.ArrayType?.Value?.Value ?? "?";
+                entry["count"] = arrayProp.Value?.Length ?? 0;
+                if (arrayProp.Value != null)
+                {
+                    // For large arrays, show first few + last few
+                    int count = arrayProp.Value.Length;
+                    var items = new List<object>();
+                    int showMax = 6;
+                    for (int j = 0; j < Math.Min(showMax, count); j++)
+                        items.Add(DumpProperty(arrayProp.Value[j]));
+                    if (count > showMax)
+                        items.Add($"... ({count - showMax} more)");
+                    entry["items"] = items;
+                }
+                break;
+
+            case FloatPropertyData fpd:
+                entry["value"] = fpd.Value;
+                break;
+            case IntPropertyData ipd:
+                entry["value"] = ipd.Value;
+                break;
+            case BoolPropertyData bpd:
+                entry["value"] = bpd.Value;
+                break;
+            case NamePropertyData npd:
+                entry["value"] = npd.Value?.Value?.Value;
+                break;
+            case StrPropertyData spd:
+                entry["value"] = spd.Value?.Value;
+                break;
+            case EnumPropertyData epd:
+                entry["value"] = epd.Value?.Value?.Value;
+                break;
+            case ObjectPropertyData opd:
+                entry["value"] = opd.Value?.Index;
+                break;
+            case SoftObjectPropertyData sopd:
+                entry["value"] = sopd.Value.AssetPath.AssetName?.Value?.Value;
+                break;
+            case BytePropertyData byteProp:
+                entry["value"] = byteProp.Value;
+                break;
+            case UInt32PropertyData u32pd:
+                entry["value"] = u32pd.Value;
+                break;
+            case Int64PropertyData i64pd:
+                entry["value"] = i64pd.Value;
+                break;
+            default:
+                // For unknown types, just record the type name
+                break;
+        }
+
+        return entry;
+    }
+
+    /// <summary>
+    /// niagara_details: Rich read-only inspection of NiagaraSystem assets.
+    /// Returns JSON with color curves, outer chain, name map FNames for enemy/color params.
+    /// Called by the Tauri NS Editor app via: UAssetTool niagara_details <asset> [usmap] [--full]
+    /// </summary>
+    private static int CliNiagaraDetails(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool niagara_details <asset_path> [usmap_path] [--full]");
+            Console.Error.WriteLine("  Returns JSON with color curves, parent chains, and enemy/player FName metadata.");
             return 1;
         }
+
+        string assetPath = args[1];
+        string? usmapPath = null;
+        bool fullMode = false;
+
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--full") fullMode = true;
+            else if (args[i] == "--usmap" && i + 1 < args.Length) usmapPath = args[++i];
+            else if (usmapPath == null && !args[i].StartsWith("--")) usmapPath = args[i];
+        }
+
+        // Free memory before loading large assets to reduce OOM risk
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        UAsset asset;
+        try { asset = LoadAsset(assetPath, usmapPath); }
+        catch (OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"Error: Out of memory loading asset: {assetPath}");
+            Console.WriteLine(JsonSerializer.Serialize(new { success = false, error = "OutOfMemory", assetPath }));
+            return 1;
+        }
+
+        // --- 1. Build export lookup and outer chain resolver ---
+        string ResolveOuterChain(int exportIndex)
+        {
+            var chain = new List<string>();
+            var visited = new HashSet<int>();
+            int idx = exportIndex;
+            while (idx >= 0 && idx < asset.Exports.Count && !visited.Contains(idx))
+            {
+                visited.Add(idx);
+                var exp = asset.Exports[idx];
+                string eName = exp.ObjectName?.Value?.Value ?? $"Export_{idx}";
+                string eClass = exp.GetExportClassType()?.Value?.Value ?? "Unknown";
+                chain.Add($"{eName} ({eClass})");
+                int outerRaw = exp.OuterIndex.Index;
+                if (outerRaw > 0) idx = outerRaw - 1;
+                else break;
+            }
+            chain.Reverse();
+            return string.Join(" > ", chain);
+        }
+
+        string? ResolveOuterName(Export exp)
+        {
+            int outerIdx = exp.OuterIndex.Index;
+            if (outerIdx > 0 && outerIdx <= asset.Exports.Count)
+                return asset.Exports[outerIdx - 1].ObjectName?.Value?.Value;
+            if (outerIdx < 0)
+            {
+                int impIdx = -outerIdx - 1;
+                if (impIdx < asset.Imports.Count)
+                    return asset.Imports[impIdx].ObjectName?.Value?.Value;
+            }
+            return null;
+        }
+
+        // --- 2. Extract name map and find interesting FNames ---
+        var nameMap = asset.GetNameMapIndexList();
+        var emitterNames = new HashSet<string>();
+        var enemyColorFNames = new List<Dictionary<string, object?>>();
+        var colorParamFNames = new List<Dictionary<string, object?>>();
+        var isEnemyFNames = new List<Dictionary<string, object?>>();
+
+        // Also collect emitter names from NiagaraEmitter exports
+        for (int i = 0; i < asset.Exports.Count; i++)
+        {
+            string cls = asset.Exports[i].GetExportClassType()?.Value?.Value ?? "";
+            if (cls == "NiagaraEmitter")
+                emitterNames.Add(asset.Exports[i].ObjectName?.Value?.Value ?? "");
+        }
+
+        for (int ni = 0; ni < nameMap.Count; ni++)
+        {
+            string fname = nameMap[ni]?.Value ?? "";
+            if (string.IsNullOrEmpty(fname)) continue;
+
+            // Classify interesting FNames
+            string fnameLower = fname.ToLowerInvariant();
+            if (fnameLower.Contains("enemycolor") || fnameLower.Contains("enemyvalue"))
+            {
+                // Parse emitter prefix: "NS_Glow_001.EnemyColor0" -> emitter="NS_Glow_001", param="EnemyColor0"
+                string? emitter = null;
+                string param = fname;
+                int dotPos = fname.IndexOf('.');
+                if (dotPos > 0) { emitter = fname.Substring(0, dotPos); param = fname.Substring(dotPos + 1); }
+                enemyColorFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname, ["emitter"] = emitter, ["param"] = param });
+            }
+            else if (fnameLower.Contains("colorfromcurve") || fnameLower.Contains("colorcurve") || fnameLower.Contains("linercolor") || fnameLower.Contains("linearcolor") || fnameLower.Contains("initial.color") || fnameLower.Contains("scalecolor"))
+            {
+                string? emitter = null;
+                string param = fname;
+                int dotPos = fname.IndexOf('.');
+                if (dotPos > 0) { emitter = fname.Substring(0, dotPos); param = fname.Substring(dotPos + 1); }
+                colorParamFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname, ["emitter"] = emitter, ["param"] = param });
+            }
+            else if (fnameLower == "isenemy" || fnameLower.EndsWith(".isenemy"))
+            {
+                isEnemyFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname });
+            }
+        }
+
+        // --- 3. Classify color curves: use emitter enemy param presence ---
+        // Build set of emitters that have EnemyColor params
+        var emittersWithEnemyParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ef in enemyColorFNames)
+        {
+            if (ef["emitter"] is string em && !string.IsNullOrEmpty(em))
+                emittersWithEnemyParams.Add(em);
+        }
+
+        // --- 4. Build color curve details ---
+        var colorCurves = new List<Dictionary<string, object?>>();
+        var arrayColors = new List<Dictionary<string, object?>>();
+        int totalColorCount = 0;
+        int totalArrayColorValues = 0;
+
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+            if (className != "NiagaraDataInterfaceColorCurve") continue;
+            if (export is not NormalExport ne || ne.Data == null) continue;
+
+            string exportName = export.ObjectName?.Value?.Value ?? $"Export_{ei}";
+            string parentChain = ResolveOuterChain(ei);
+            string? parentName = ResolveOuterName(export);
+
+            // Walk up to find the emitter name
+            string? emitterName = null;
+            int walkIdx = ei;
+            while (walkIdx >= 0 && walkIdx < asset.Exports.Count)
+            {
+                var walkExp = asset.Exports[walkIdx];
+                string walkClass = walkExp.GetExportClassType()?.Value?.Value ?? "";
+                if (walkClass == "NiagaraEmitter")
+                {
+                    emitterName = walkExp.ObjectName?.Value?.Value;
+                    break;
+                }
+                int outerRaw = walkExp.OuterIndex.Index;
+                if (outerRaw > 0) walkIdx = outerRaw - 1;
+                else break;
+            }
+
+            // Classify: does this emitter have enemy params?
+            bool emitterHasEnemy = emitterName != null && emittersWithEnemyParams.Contains(emitterName);
+
+            // Collect the actual enemy param FNames for this emitter
+            var curveEnemyParams = emitterName != null
+                ? enemyColorFNames
+                    .Where(f => f["emitter"] is string em && em.Equals(emitterName, StringComparison.OrdinalIgnoreCase))
+                    .Select(f => f["fname"]?.ToString() ?? "")
+                    .ToList()
+                : new List<string>();
+
+            // Find ShaderLUT
+            foreach (var prop in ne.Data)
+            {
+                if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                int colorCount = arrayProp.Value.Length / 4;
+                var sampleColors = new List<Dictionary<string, object>>();
+
+                if (fullMode)
+                {
+                    for (int j = 0; j + 3 < arrayProp.Value.Length; j += 4)
+                    {
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = j / 4, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+                else
+                {
+                    // Just first, middle, last samples for compact output
+                    int[] indices = colorCount <= 3 ? Enumerable.Range(0, colorCount).ToArray() : new[] { 0, colorCount / 2, colorCount - 1 };
+                    foreach (int si in indices)
+                    {
+                        int j = si * 4;
+                        if (j + 3 >= arrayProp.Value.Length) continue;
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = si, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+
+                // Classification heuristics
+                var classification = ClassifyColorCurve(sampleColors);
+
+                colorCurves.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = ei,
+                    ["exportName"] = exportName,
+                    ["colorCount"] = colorCount,
+                    ["sampleColors"] = sampleColors,
+                    ["parentName"] = parentName,
+                    ["parentChain"] = parentChain,
+                    ["emitterName"] = emitterName,
+                    ["emitterHasEnemyParams"] = emitterHasEnemy,
+                    ["enemyParams"] = curveEnemyParams,
+                    ["classification"] = classification,
+                });
+                totalColorCount += colorCount;
+                break;
+            }
+        }
+
+        // --- 5. Also find ArrayPropertyData with LinearColor-like RGBA patterns (arrayColors) ---
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+            // Skip ColorCurves (already handled) and non-parseable exports
+            if (className == "NiagaraDataInterfaceColorCurve") continue;
+            if (export is not NormalExport ne || ne.Data == null) continue;
+
+            string exportName = export.ObjectName?.Value?.Value ?? $"Export_{ei}";
+
+            foreach (var prop in ne.Data)
+            {
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+                // Look for arrays of StructPropertyData with R,G,B,A float fields (LinearColor arrays)
+                if (arrayProp.Value.Length < 4) continue;
+                // Check if it looks like RGBA float data
+                bool isColorArray = true;
+                int colorCount = 0;
+                var sampleColors = new List<Dictionary<string, object>>();
+
+                if (arrayProp.ArrayType?.Value?.Value == "FloatProperty" && arrayProp.Value.Length >= 4 && arrayProp.Value.Length % 4 == 0)
+                {
+                    // Could be another ShaderLUT-like array - check if it has plausible RGBA patterns
+                    colorCount = arrayProp.Value.Length / 4;
+                    for (int j = 0; j + 3 < arrayProp.Value.Length && sampleColors.Count < (fullMode ? colorCount : 3); j += 4)
+                    {
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        if (ca < 0 || ca > 2) { isColorArray = false; break; }
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = j / 4, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+                else isColorArray = false;
+
+                if (!isColorArray || sampleColors.Count == 0) continue;
+
+                string propName = prop.Name?.Value?.Value ?? "Unknown";
+                string? parentName = ResolveOuterName(export);
+                string parentChain = ResolveOuterChain(ei);
+
+                // Resolve emitter for this export
+                string? acEmitterName = null;
+                int acWalkIdx = ei;
+                while (acWalkIdx >= 0 && acWalkIdx < asset.Exports.Count)
+                {
+                    var acWalkExp = asset.Exports[acWalkIdx];
+                    string acCls = acWalkExp.GetExportClassType()?.Value?.Value ?? "";
+                    if (acCls == "NiagaraEmitter")
+                    {
+                        acEmitterName = acWalkExp.ObjectName?.Value?.Value;
+                        break;
+                    }
+                    int acOuterRaw = acWalkExp.OuterIndex.Index;
+                    if (acOuterRaw > 0) acWalkIdx = acOuterRaw - 1;
+                    else break;
+                }
+                bool acEmitterHasEnemy = acEmitterName != null && emittersWithEnemyParams.Contains(acEmitterName);
+                var acEnemyParams = acEmitterName != null
+                    ? enemyColorFNames
+                        .Where(f => f["emitter"] is string em && em.Equals(acEmitterName, StringComparison.OrdinalIgnoreCase))
+                        .Select(f => f["fname"]?.ToString() ?? "")
+                        .ToList()
+                    : new List<string>();
+
+                var classification = ClassifyColorCurve(sampleColors);
+
+                arrayColors.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = ei,
+                    ["exportName"] = $"{exportName}.{propName}",
+                    ["colorCount"] = colorCount,
+                    ["sampleColors"] = sampleColors,
+                    ["parentName"] = parentName,
+                    ["parentChain"] = parentChain,
+                    ["emitterName"] = acEmitterName,
+                    ["emitterHasEnemyParams"] = acEmitterHasEnemy,
+                    ["enemyParams"] = acEnemyParams,
+                    ["classification"] = classification,
+                });
+                totalArrayColorValues += colorCount;
+            }
+        }
+
+        // --- 6. Build emitter summary ---
+        var emitterSummary = new List<Dictionary<string, object?>>();
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string cls = export.GetExportClassType()?.Value?.Value ?? "";
+            if (cls != "NiagaraEmitter") continue;
+
+            string eName = export.ObjectName?.Value?.Value ?? "";
+            bool hasEnemy = emittersWithEnemyParams.Contains(eName);
+
+            // Collect enemy param names for this emitter
+            var enemyParams = enemyColorFNames
+                .Where(f => f["emitter"] is string em && em.Equals(eName, StringComparison.OrdinalIgnoreCase))
+                .Select(f => f["fname"]?.ToString() ?? "")
+                .ToList();
+
+            // Collect color param names for this emitter
+            var colorParams = colorParamFNames
+                .Where(f => f["emitter"] is string em && em.Equals(eName, StringComparison.OrdinalIgnoreCase))
+                .Select(f => f["fname"]?.ToString() ?? "")
+                .ToList();
+
+            emitterSummary.Add(new Dictionary<string, object?>
+            {
+                ["exportIndex"] = ei,
+                ["name"] = eName,
+                ["hasEnemyParams"] = hasEnemy,
+                ["enemyParams"] = enemyParams,
+                ["colorParams"] = colorParams,
+            });
+        }
+
+        // --- 7. Output JSON ---
+        var result = new Dictionary<string, object?>
+        {
+            ["success"] = true,
+            ["totalExports"] = asset.Exports.Count,
+            ["colorCurveCount"] = colorCurves.Count,
+            ["totalColorCount"] = totalColorCount,
+            ["colorCurves"] = colorCurves,
+        };
+
+        if (arrayColors.Count > 0)
+        {
+            result["arrayColorCount"] = arrayColors.Count;
+            result["totalArrayColorValues"] = totalArrayColorValues;
+            result["arrayColors"] = arrayColors;
+        }
+
+        result["emitters"] = emitterSummary;
+        result["enemyColorFNames"] = enemyColorFNames;
+        result["colorParamFNames"] = colorParamFNames;
+        result["isEnemyFNames"] = isEnemyFNames;
+        result["hasIsEnemyParam"] = isEnemyFNames.Count > 0;
+
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
     }
-    
+
+    /// <summary>
+    /// Streaming niagara_details: loads usmap ONCE, then reads asset paths from stdin
+    /// and outputs JSON per asset. Massively reduces memory and startup overhead.
+    /// Protocol:
+    ///   stdin:  one asset path per line. Empty line or "EXIT" to quit.
+    ///   stdout: one JSON object per asset (compact, single line), followed by "---END---" delimiter.
+    ///   stderr: diagnostic logging (same as niagara_details).
+    /// </summary>
+    private static int CliNiagaraDetailsStream(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool niagara_details_stream <usmap_path> [--full]");
+            Console.Error.WriteLine("  Reads asset paths from stdin (one per line), outputs JSON per asset.");
+            Console.Error.WriteLine("  Send empty line or EXIT to quit.");
+            return 1;
+        }
+
+        string? usmapPath = null;
+        bool fullMode = false;
+
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] == "--full") fullMode = true;
+            else if (usmapPath == null && !args[i].StartsWith("--")) usmapPath = args[i];
+        }
+
+        // Load usmap ONCE — this is the expensive part (~200MB, 25k schemas)
+        Console.Error.WriteLine($"[stream] Loading usmap: {usmapPath ?? "null"}");
+        Usmap? mappings = LoadMappings(usmapPath);
+        Console.Error.WriteLine($"[stream] Usmap loaded: {mappings != null}, schemas: {mappings?.Schemas?.Count ?? 0}");
+        Console.Error.WriteLine("[stream] READY");
+        // Signal readiness on stdout so the caller knows usmap is loaded
+        Console.Out.WriteLine("READY");
+        Console.Out.Flush();
+
+        int processed = 0;
+        using var reader = new StreamReader(Console.OpenStandardInput(), System.Text.Encoding.UTF8);
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            line = line.Trim();
+            if (string.IsNullOrEmpty(line) || line.Equals("EXIT", StringComparison.OrdinalIgnoreCase))
+                break;
+
+            string assetPath = line;
+            Console.Error.WriteLine($"[stream] Processing: {Path.GetFileName(assetPath)}");
+
+            try
+            {
+                // Free previous asset memory
+                if (processed > 0 && processed % 5 == 0)
+                {
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    GC.WaitForPendingFinalizers();
+                }
+
+                var result = ProcessSingleNiagaraDetails(assetPath, mappings, fullMode);
+                // Output compact JSON (no indentation) + delimiter
+                string json = JsonSerializer.Serialize(result);
+                Console.Out.WriteLine(json);
+                Console.Out.WriteLine("---END---");
+                Console.Out.Flush();
+            }
+            catch (OutOfMemoryException)
+            {
+                Console.Error.WriteLine($"[stream] OOM: {Path.GetFileName(assetPath)}");
+                var errorResult = new Dictionary<string, object?> { ["success"] = false, ["error"] = "OutOfMemory", ["assetPath"] = assetPath };
+                Console.Out.WriteLine(JsonSerializer.Serialize(errorResult));
+                Console.Out.WriteLine("---END---");
+                Console.Out.Flush();
+                // Force GC after OOM
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[stream] Error: {Path.GetFileName(assetPath)}: {ex.Message}");
+                var errorResult = new Dictionary<string, object?> { ["success"] = false, ["error"] = ex.Message, ["assetPath"] = assetPath };
+                Console.Out.WriteLine(JsonSerializer.Serialize(errorResult));
+                Console.Out.WriteLine("---END---");
+                Console.Out.Flush();
+            }
+            processed++;
+        }
+
+        Console.Error.WriteLine($"[stream] Done: processed {processed} assets");
+        return 0;
+    }
+
+    /// <summary>
+    /// Core niagara_details logic extracted for reuse by both CliNiagaraDetails and CliNiagaraDetailsStream.
+    /// Returns a result dictionary ready for JSON serialization.
+    /// </summary>
+    private static Dictionary<string, object?> ProcessSingleNiagaraDetails(string assetPath, Usmap? mappings, bool fullMode)
+    {
+        UAsset asset = LoadAssetWithMappings(assetPath, mappings);
+
+        // --- 1. Build export lookup and outer chain resolver ---
+        string ResolveOuterChain(int exportIndex)
+        {
+            var chain = new List<string>();
+            var visited = new HashSet<int>();
+            int idx = exportIndex;
+            while (idx >= 0 && idx < asset.Exports.Count && !visited.Contains(idx))
+            {
+                visited.Add(idx);
+                var exp = asset.Exports[idx];
+                string eName = exp.ObjectName?.Value?.Value ?? $"Export_{idx}";
+                string eClass = exp.GetExportClassType()?.Value?.Value ?? "Unknown";
+                chain.Add($"{eName} ({eClass})");
+                int outerRaw = exp.OuterIndex.Index;
+                if (outerRaw > 0) idx = outerRaw - 1;
+                else break;
+            }
+            chain.Reverse();
+            return string.Join(" > ", chain);
+        }
+
+        string? ResolveOuterName(Export exp)
+        {
+            int outerIdx = exp.OuterIndex.Index;
+            if (outerIdx > 0 && outerIdx <= asset.Exports.Count)
+                return asset.Exports[outerIdx - 1].ObjectName?.Value?.Value;
+            if (outerIdx < 0)
+            {
+                int impIdx = -outerIdx - 1;
+                if (impIdx < asset.Imports.Count)
+                    return asset.Imports[impIdx].ObjectName?.Value?.Value;
+            }
+            return null;
+        }
+
+        // --- 2. Extract name map and find interesting FNames ---
+        var nameMap = asset.GetNameMapIndexList();
+        var emitterNames = new HashSet<string>();
+        var enemyColorFNames = new List<Dictionary<string, object?>>();
+        var colorParamFNames = new List<Dictionary<string, object?>>();
+        var isEnemyFNames = new List<Dictionary<string, object?>>();
+
+        for (int i = 0; i < asset.Exports.Count; i++)
+        {
+            string cls = asset.Exports[i].GetExportClassType()?.Value?.Value ?? "";
+            if (cls == "NiagaraEmitter")
+                emitterNames.Add(asset.Exports[i].ObjectName?.Value?.Value ?? "");
+        }
+
+        for (int ni = 0; ni < nameMap.Count; ni++)
+        {
+            string fname = nameMap[ni]?.Value ?? "";
+            if (string.IsNullOrEmpty(fname)) continue;
+            string fnameLower = fname.ToLowerInvariant();
+            if (fnameLower.Contains("enemycolor") || fnameLower.Contains("enemyvalue"))
+            {
+                string? emitter = null; string param = fname;
+                int dotPos = fname.IndexOf('.');
+                if (dotPos > 0) { emitter = fname.Substring(0, dotPos); param = fname.Substring(dotPos + 1); }
+                enemyColorFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname, ["emitter"] = emitter, ["param"] = param });
+            }
+            else if (fnameLower.Contains("colorfromcurve") || fnameLower.Contains("colorcurve") || fnameLower.Contains("linercolor") || fnameLower.Contains("linearcolor") || fnameLower.Contains("initial.color") || fnameLower.Contains("scalecolor"))
+            {
+                string? emitter = null; string param = fname;
+                int dotPos = fname.IndexOf('.');
+                if (dotPos > 0) { emitter = fname.Substring(0, dotPos); param = fname.Substring(dotPos + 1); }
+                colorParamFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname, ["emitter"] = emitter, ["param"] = param });
+            }
+            else if (fnameLower == "isenemy" || fnameLower.EndsWith(".isenemy"))
+            {
+                isEnemyFNames.Add(new Dictionary<string, object?> { ["nameIndex"] = ni, ["fname"] = fname });
+            }
+        }
+
+        // --- 3. Build set of emitters with enemy params ---
+        var emittersWithEnemyParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ef in enemyColorFNames)
+        {
+            if (ef["emitter"] is string em && !string.IsNullOrEmpty(em))
+                emittersWithEnemyParams.Add(em);
+        }
+
+        // --- 4. Build color curve details ---
+        var colorCurves = new List<Dictionary<string, object?>>();
+        var arrayColors = new List<Dictionary<string, object?>>();
+        int totalColorCount = 0;
+        int totalArrayColorValues = 0;
+
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+            if (className != "NiagaraDataInterfaceColorCurve") continue;
+            if (export is not NormalExport ne || ne.Data == null) continue;
+
+            string exportName = export.ObjectName?.Value?.Value ?? $"Export_{ei}";
+            string parentChain = ResolveOuterChain(ei);
+            string? parentName = ResolveOuterName(export);
+
+            string? emitterName = null;
+            int walkIdx = ei;
+            while (walkIdx >= 0 && walkIdx < asset.Exports.Count)
+            {
+                var walkExp = asset.Exports[walkIdx];
+                string walkClass = walkExp.GetExportClassType()?.Value?.Value ?? "";
+                if (walkClass == "NiagaraEmitter") { emitterName = walkExp.ObjectName?.Value?.Value; break; }
+                int outerRaw = walkExp.OuterIndex.Index;
+                if (outerRaw > 0) walkIdx = outerRaw - 1; else break;
+            }
+
+            bool emitterHasEnemy = emitterName != null && emittersWithEnemyParams.Contains(emitterName);
+            var curveEnemyParams = emitterName != null
+                ? enemyColorFNames.Where(f => f["emitter"] is string em && em.Equals(emitterName, StringComparison.OrdinalIgnoreCase)).Select(f => f["fname"]?.ToString() ?? "").ToList()
+                : new List<string>();
+
+            foreach (var prop in ne.Data)
+            {
+                if (prop.Name?.Value?.Value != "ShaderLUT") continue;
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+
+                int colorCount = arrayProp.Value.Length / 4;
+                var sampleColors = new List<Dictionary<string, object>>();
+
+                if (fullMode)
+                {
+                    for (int j = 0; j + 3 < arrayProp.Value.Length; j += 4)
+                    {
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = j / 4, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+                else
+                {
+                    int[] indices = colorCount <= 3 ? Enumerable.Range(0, colorCount).ToArray() : new[] { 0, colorCount / 2, colorCount - 1 };
+                    foreach (int si in indices)
+                    {
+                        int j = si * 4;
+                        if (j + 3 >= arrayProp.Value.Length) continue;
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = si, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+
+                var classification = ClassifyColorCurve(sampleColors);
+                colorCurves.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = ei, ["exportName"] = exportName, ["colorCount"] = colorCount,
+                    ["sampleColors"] = sampleColors, ["parentName"] = parentName, ["parentChain"] = parentChain,
+                    ["emitterName"] = emitterName, ["emitterHasEnemyParams"] = emitterHasEnemy,
+                    ["enemyParams"] = curveEnemyParams, ["classification"] = classification,
+                });
+                totalColorCount += colorCount;
+                break;
+            }
+        }
+
+        // --- 5. ArrayColor patterns ---
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string className = export.GetExportClassType()?.Value?.Value ?? "";
+            if (className == "NiagaraDataInterfaceColorCurve") continue;
+            if (export is not NormalExport ne || ne.Data == null) continue;
+
+            string exportName = export.ObjectName?.Value?.Value ?? $"Export_{ei}";
+            foreach (var prop in ne.Data)
+            {
+                if (prop is not ArrayPropertyData arrayProp || arrayProp.Value == null) continue;
+                if (arrayProp.Value.Length < 4) continue;
+                bool isColorArray = true;
+                int colorCount = 0;
+                var sampleColors = new List<Dictionary<string, object>>();
+
+                if (arrayProp.ArrayType?.Value?.Value == "FloatProperty" && arrayProp.Value.Length >= 4 && arrayProp.Value.Length % 4 == 0)
+                {
+                    colorCount = arrayProp.Value.Length / 4;
+                    for (int j = 0; j + 3 < arrayProp.Value.Length && sampleColors.Count < (fullMode ? colorCount : 3); j += 4)
+                    {
+                        float cr = (arrayProp.Value[j] is FloatPropertyData rp) ? rp.Value : 0;
+                        float cg = (arrayProp.Value[j + 1] is FloatPropertyData gp) ? gp.Value : 0;
+                        float cb = (arrayProp.Value[j + 2] is FloatPropertyData bp) ? bp.Value : 0;
+                        float ca = (arrayProp.Value[j + 3] is FloatPropertyData ap) ? ap.Value : 0;
+                        if (ca < 0 || ca > 2) { isColorArray = false; break; }
+                        sampleColors.Add(new Dictionary<string, object> { ["index"] = j / 4, ["r"] = cr, ["g"] = cg, ["b"] = cb, ["a"] = ca });
+                    }
+                }
+                else isColorArray = false;
+
+                if (!isColorArray || sampleColors.Count == 0) continue;
+
+                string propName = prop.Name?.Value?.Value ?? "Unknown";
+                string? pName = ResolveOuterName(export);
+                string pChain = ResolveOuterChain(ei);
+
+                string? acEmitterName = null;
+                int acWalkIdx = ei;
+                while (acWalkIdx >= 0 && acWalkIdx < asset.Exports.Count)
+                {
+                    var acWalkExp = asset.Exports[acWalkIdx];
+                    string acCls = acWalkExp.GetExportClassType()?.Value?.Value ?? "";
+                    if (acCls == "NiagaraEmitter") { acEmitterName = acWalkExp.ObjectName?.Value?.Value; break; }
+                    int acOuterRaw = acWalkExp.OuterIndex.Index;
+                    if (acOuterRaw > 0) acWalkIdx = acOuterRaw - 1; else break;
+                }
+                bool acEmitterHasEnemy = acEmitterName != null && emittersWithEnemyParams.Contains(acEmitterName);
+                var acEnemyParams = acEmitterName != null
+                    ? enemyColorFNames.Where(f => f["emitter"] is string em && em.Equals(acEmitterName, StringComparison.OrdinalIgnoreCase)).Select(f => f["fname"]?.ToString() ?? "").ToList()
+                    : new List<string>();
+
+                var classification = ClassifyColorCurve(sampleColors);
+                arrayColors.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = ei, ["exportName"] = $"{exportName}.{propName}", ["colorCount"] = colorCount,
+                    ["sampleColors"] = sampleColors, ["parentName"] = pName, ["parentChain"] = pChain,
+                    ["emitterName"] = acEmitterName, ["emitterHasEnemyParams"] = acEmitterHasEnemy,
+                    ["enemyParams"] = acEnemyParams, ["classification"] = classification,
+                });
+                totalArrayColorValues += colorCount;
+            }
+        }
+
+        // --- 6. Emitter summary ---
+        var emitterSummary = new List<Dictionary<string, object?>>();
+        for (int ei = 0; ei < asset.Exports.Count; ei++)
+        {
+            var export = asset.Exports[ei];
+            string cls = export.GetExportClassType()?.Value?.Value ?? "";
+            if (cls != "NiagaraEmitter") continue;
+            string eName = export.ObjectName?.Value?.Value ?? "";
+            bool hasEnemy = emittersWithEnemyParams.Contains(eName);
+            var enemyParams = enemyColorFNames.Where(f => f["emitter"] is string em && em.Equals(eName, StringComparison.OrdinalIgnoreCase)).Select(f => f["fname"]?.ToString() ?? "").ToList();
+            var colorParams = colorParamFNames.Where(f => f["emitter"] is string em && em.Equals(eName, StringComparison.OrdinalIgnoreCase)).Select(f => f["fname"]?.ToString() ?? "").ToList();
+            emitterSummary.Add(new Dictionary<string, object?> { ["exportIndex"] = ei, ["name"] = eName, ["hasEnemyParams"] = hasEnemy, ["enemyParams"] = enemyParams, ["colorParams"] = colorParams });
+        }
+
+        // --- 7. Build result ---
+        var result = new Dictionary<string, object?>
+        {
+            ["success"] = true,
+            ["assetPath"] = assetPath,
+            ["totalExports"] = asset.Exports.Count,
+            ["colorCurveCount"] = colorCurves.Count,
+            ["totalColorCount"] = totalColorCount,
+            ["colorCurves"] = colorCurves,
+        };
+        if (arrayColors.Count > 0)
+        {
+            result["arrayColorCount"] = arrayColors.Count;
+            result["totalArrayColorValues"] = totalArrayColorValues;
+            result["arrayColors"] = arrayColors;
+        }
+        result["emitters"] = emitterSummary;
+        result["enemyColorFNames"] = enemyColorFNames;
+        result["colorParamFNames"] = colorParamFNames;
+        result["isEnemyFNames"] = isEnemyFNames;
+        result["hasIsEnemyParam"] = isEnemyFNames.Count > 0;
+
+        return result;
+    }
+
+    /// <summary>
+    /// Heuristic classification of a color curve based on its sample values.
+    /// </summary>
+    private static Dictionary<string, object> ClassifyColorCurve(List<Dictionary<string, object>> samples)
+    {
+        if (samples.Count == 0)
+            return new Dictionary<string, object> { ["type"] = "unknown", ["confidence"] = 0.0, ["reason"] = "no samples", ["suggestEdit"] = false, ["isGrayscale"] = false, ["isHdr"] = false, ["hasAlphaVariation"] = false, ["isConstant"] = false, ["maxValue"] = 0.0, ["minValue"] = 0.0 };
+
+        float maxR = 0, maxG = 0, maxB = 0, minR = float.MaxValue, minG = float.MaxValue, minB = float.MaxValue;
+        float sumR = 0, sumG = 0, sumB = 0;
+        bool hasAlphaVariation = false;
+        float firstA = Convert.ToSingle(samples[0]["a"]);
+
+        foreach (var s in samples)
+        {
+            float sr = Convert.ToSingle(s["r"]), sg = Convert.ToSingle(s["g"]), sb = Convert.ToSingle(s["b"]), sa = Convert.ToSingle(s["a"]);
+            maxR = Math.Max(maxR, sr); maxG = Math.Max(maxG, sg); maxB = Math.Max(maxB, sb);
+            minR = Math.Min(minR, sr); minG = Math.Min(minG, sg); minB = Math.Min(minB, sb);
+            sumR += sr; sumG += sg; sumB += sb;
+            if (Math.Abs(sa - firstA) > 0.01f) hasAlphaVariation = true;
+        }
+
+        float avgR = sumR / samples.Count, avgG = sumG / samples.Count, avgB = sumB / samples.Count;
+        float maxVal = Math.Max(maxR, Math.Max(maxG, maxB));
+        float minVal = Math.Min(minR, Math.Min(minG, minB));
+        bool isHdr = maxVal > 1.05f;
+        bool isGrayscale = Math.Abs(avgR - avgG) < 0.05f && Math.Abs(avgG - avgB) < 0.05f;
+        bool isConstant = (maxR - minR) < 0.01f && (maxG - minG) < 0.01f && (maxB - minB) < 0.01f;
+
+        string type = "color";
+        string reason = "has color variation";
+        double confidence = 0.8;
+        bool suggestEdit = true;
+
+        if (isGrayscale && !isHdr)
+        {
+            type = "opacity";
+            reason = "grayscale, non-HDR — likely opacity/alpha curve";
+            confidence = 0.6;
+            suggestEdit = false;
+        }
+        else if (isHdr)
+        {
+            type = "emission";
+            reason = isGrayscale ? "grayscale HDR — emission intensity" : "HDR color — emission/glow";
+            confidence = 0.9;
+            suggestEdit = true;
+        }
+        else if (isConstant && maxVal < 0.01f)
+        {
+            type = "unknown";
+            reason = "all zeros";
+            confidence = 0.3;
+            suggestEdit = false;
+        }
+
+        return new Dictionary<string, object>
+        {
+            ["type"] = type,
+            ["confidence"] = confidence,
+            ["reason"] = reason,
+            ["suggestEdit"] = suggestEdit,
+            ["isGrayscale"] = isGrayscale,
+            ["isHdr"] = isHdr,
+            ["hasAlphaVariation"] = hasAlphaVariation,
+            ["isConstant"] = isConstant,
+            ["maxValue"] = (double)maxVal,
+            ["minValue"] = (double)minVal,
+        };
+    }
+
     #endregion
 
     #region Interactive JSON Mode
@@ -2270,8 +3753,6 @@ public partial class Program
                 "cityhash" => CityHashJson(request.FilePath),
                 "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
                 "inspect_zen" => InspectZenJson(request.FilePath),
-                "niagara_list" => NiagaraListJson(request.InputDir, request.UsmapPath),
-                "niagara_details" => NiagaraDetailsJson(request.FilePath, request.UsmapPath),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -4030,6 +5511,22 @@ public partial class Program
         }
     }
     
+    private static int CountOccurrences(byte[] data, byte[] pattern)
+    {
+        int count = 0;
+        int end = data.Length - pattern.Length;
+        for (int i = 0; i <= end; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < pattern.Length; j++)
+            {
+                if (data[i + j] != pattern[j]) { match = false; break; }
+            }
+            if (match) { count++; i += pattern.Length - 1; }
+        }
+        return count;
+    }
+
     private static Usmap? LoadMappings(string? usmapPath)
     {
         if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
@@ -6020,38 +7517,6 @@ public partial class Program
         catch (Exception ex)
         {
             return new UAssetResponse { Success = false, Message = $"Failed to inspect Zen package: {ex.Message}" };
-        }
-    }
-    
-    private static UAssetResponse NiagaraListJson(string? directory, string? usmapPath)
-    {
-        if (string.IsNullOrEmpty(directory))
-            return new UAssetResponse { Success = false, Message = "input_dir is required" };
-        
-        try
-        {
-            var result = NiagaraService.ListNiagaraFiles(directory, usmapPath);
-            return new UAssetResponse { Success = true, Data = result };
-        }
-        catch (Exception ex)
-        {
-            return new UAssetResponse { Success = false, Message = $"Failed to list Niagara files: {ex.Message}" };
-        }
-    }
-    
-    private static UAssetResponse NiagaraDetailsJson(string? filePath, string? usmapPath)
-    {
-        if (string.IsNullOrEmpty(filePath))
-            return new UAssetResponse { Success = false, Message = "file_path is required" };
-        
-        try
-        {
-            var result = NiagaraService.GetNiagaraDetails(filePath, usmapPath, fullData: true);
-            return new UAssetResponse { Success = true, Data = result };
-        }
-        catch (Exception ex)
-        {
-            return new UAssetResponse { Success = false, Message = $"Failed to get Niagara details: {ex.Message}" };
         }
     }
     

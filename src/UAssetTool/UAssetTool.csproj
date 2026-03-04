@@ -8,6 +8,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
     <AssemblyName>UAssetTool</AssemblyName>
     <RootNamespace>UAssetTool</RootNamespace>
     <Authors>XzantGaming</Authors>

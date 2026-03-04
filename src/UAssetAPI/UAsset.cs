@@ -971,46 +971,6 @@ namespace UAssetAPI
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<StaticMeshExport>();
                         }
-                        else if (exportClassType == "NiagaraDataInterfaceColorCurve" || 
-                                 exportClassType.EndsWith("DataInterfaceColorCurve"))
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceColorCurveExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceCurve" || 
-                                 exportClassType.EndsWith("DataInterfaceCurve"))
-                        {
-                            // Must check after ColorCurve since ColorCurve also ends with "Curve"
-                            if (!exportClassType.Contains("Color") && !exportClassType.Contains("Vector"))
-                                Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceCurveExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceVector2DCurve" || 
-                                 exportClassType.EndsWith("DataInterfaceVector2DCurve"))
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceVector2DCurveExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceVectorCurve" || 
-                                 exportClassType.EndsWith("DataInterfaceVectorCurve"))
-                        {
-                            // Must check after Vector2DCurve
-                            if (!exportClassType.Contains("2D"))
-                                Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceVectorCurveExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceArrayColor")
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayColorExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceArrayFloat")
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayFloatExport>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceArrayFloat3")
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayFloat3Export>();
-                        }
-                        else if (exportClassType == "NiagaraDataInterfaceArrayInt32")
-                        {
-                            Exports[i] = Exports[i].ConvertToChildExport<NiagaraDataInterfaceArrayInt32Export>();
-                        }
                         else if (exportClassType.EndsWith("BlueprintGeneratedClass"))
                         {
                             Exports[i] = Exports[i].ConvertToChildExport<ClassExport>();
