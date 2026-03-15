@@ -57,6 +57,12 @@ public static class NiagaraService
         public string ClassType { get; set; } = "";
         public string Name { get; set; } = "";
         public int Channels { get; set; }
+        public int OuterIndex { get; set; }
+        public string? EmitterName { get; set; }
+        public bool EmitterHasEnemyParams { get; set; }
+        public List<string>? EnemyParams { get; set; }
+        public string? ParentName { get; set; }
+        public string? ParentChain { get; set; }
         public ShaderLutInfo? ShaderLut { get; set; }
         public List<float[]>? ColorData { get; set; }
     }
@@ -125,7 +131,144 @@ public static class NiagaraService
     public static string GetColorDetails(string assetPath, Usmap? mappings)
     {
         var (asset, colorIndices) = LoadSelective(assetPath, mappings);
+        var info = BuildColorInfo(asset, colorIndices, assetPath);
+        return JsonSerializer.Serialize(info, JsonOpts);
+    }
 
+    /// <summary>
+    /// Returns a rich Dictionary matching the format the Avalonia app expects
+    /// (equivalent to the old ProcessSingleNiagaraDetails).
+    /// Includes: outerIndex, emitterName, enemyParams, classification, sampleColors.
+    /// </summary>
+    public static Dictionary<string, object?> GetColorDetailsForUI(string assetPath, Usmap? mappings, bool fullMode = true)
+    {
+        var (asset, colorIndices) = LoadSelective(assetPath, mappings);
+        var info = BuildColorInfo(asset, colorIndices, assetPath);
+
+        // Detect enemy FNames in the asset name map
+        var enemyColorFNames = DetectEnemyFNames(asset);
+        var emittersWithEnemyParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ef in enemyColorFNames)
+        {
+            if (ef.TryGetValue("emitter", out var em) && em is string emStr && !string.IsNullOrEmpty(emStr))
+                emittersWithEnemyParams.Add(emStr);
+        }
+
+        var colorCurves = new List<Dictionary<string, object?>>();
+        var arrayColors = new List<Dictionary<string, object?>>();
+        int totalColorCount = 0;
+        int totalArrayColorValues = 0;
+
+        foreach (var exp in info.Exports)
+        {
+            // Resolve outer chain
+            string? emitterName = ResolveEmitterName(asset, exp.ExportIndex);
+            string parentChain = ResolveOuterChain(asset, exp.ExportIndex);
+            string? parentName = ResolveOuterName(asset, exp.ExportIndex);
+            int outerIndex = asset.Exports[exp.ExportIndex].OuterIndex.Index;
+
+            bool emitterHasEnemy = emitterName != null && emittersWithEnemyParams.Contains(emitterName);
+            var curveEnemyParams = emitterName != null
+                ? enemyColorFNames
+                    .Where(f => f.TryGetValue("emitter", out var em) && em is string emS && emS.Equals(emitterName, StringComparison.OrdinalIgnoreCase))
+                    .Select(f => f.TryGetValue("fname", out var fn) ? fn?.ToString() ?? "" : "")
+                    .Where(s => s.Length > 0)
+                    .ToList()
+                : new List<string>();
+
+            // Build sample colors list (unified RGBA format)
+            var sampleColors = new List<Dictionary<string, object>>();
+            if (exp.ShaderLut != null)
+            {
+                int channels = exp.Channels;
+                for (int s = 0; s < exp.ShaderLut.Samples.Count; s++)
+                {
+                    var sample = exp.ShaderLut.Samples[s];
+                    sampleColors.Add(new Dictionary<string, object>
+                    {
+                        ["index"] = s,
+                        ["r"] = channels >= 1 ? sample[0] : 0f,
+                        ["g"] = channels >= 2 ? sample[1] : 0f,
+                        ["b"] = channels >= 3 ? sample[2] : 0f,
+                        ["a"] = channels >= 4 ? sample[3] : 1f,
+                    });
+                }
+
+                var classification = ClassifyColorCurve(sampleColors);
+                colorCurves.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = exp.ExportIndex,
+                    ["exportName"] = exp.Name,
+                    ["colorCount"] = exp.ShaderLut.SampleCount,
+                    ["outerIndex"] = outerIndex,
+                    ["sampleColors"] = sampleColors,
+                    ["parentName"] = parentName,
+                    ["parentChain"] = parentChain,
+                    ["emitterName"] = emitterName,
+                    ["emitterHasEnemyParams"] = emitterHasEnemy,
+                    ["enemyParams"] = curveEnemyParams,
+                    ["classification"] = classification,
+                });
+                totalColorCount += exp.ShaderLut.SampleCount;
+            }
+            else if (exp.ColorData != null)
+            {
+                for (int s = 0; s < exp.ColorData.Count; s++)
+                {
+                    var cd = exp.ColorData[s];
+                    sampleColors.Add(new Dictionary<string, object>
+                    {
+                        ["index"] = s,
+                        ["r"] = cd.Length >= 1 ? cd[0] : 0f,
+                        ["g"] = cd.Length >= 2 ? cd[1] : 0f,
+                        ["b"] = cd.Length >= 3 ? cd[2] : 0f,
+                        ["a"] = cd.Length >= 4 ? cd[3] : 1f,
+                    });
+                }
+
+                var classification = ClassifyColorCurve(sampleColors);
+                arrayColors.Add(new Dictionary<string, object?>
+                {
+                    ["exportIndex"] = exp.ExportIndex,
+                    ["exportName"] = exp.Name,
+                    ["colorCount"] = exp.ColorData.Count,
+                    ["outerIndex"] = outerIndex,
+                    ["sampleColors"] = sampleColors,
+                    ["parentName"] = parentName,
+                    ["parentChain"] = parentChain,
+                    ["emitterName"] = emitterName,
+                    ["emitterHasEnemyParams"] = emitterHasEnemy,
+                    ["enemyParams"] = curveEnemyParams,
+                    ["classification"] = classification,
+                });
+                totalArrayColorValues += exp.ColorData.Count;
+            }
+        }
+
+        var result = new Dictionary<string, object?>
+        {
+            ["success"] = true,
+            ["totalExports"] = info.TotalExports,
+            ["colorCurveCount"] = colorCurves.Count,
+            ["totalColorCount"] = totalColorCount,
+            ["colorCurves"] = colorCurves,
+        };
+
+        if (arrayColors.Count > 0)
+        {
+            result["arrayColorCount"] = arrayColors.Count;
+            result["totalArrayColorValues"] = totalArrayColorValues;
+            result["arrayColors"] = arrayColors;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Build NiagaraColorInfo from a selectively-loaded asset.
+    /// </summary>
+    private static NiagaraColorInfo BuildColorInfo(UAsset asset, List<int> colorIndices, string assetPath)
+    {
         var info = new NiagaraColorInfo
         {
             FileName = Path.GetFileName(assetPath),
@@ -145,6 +288,7 @@ public static class NiagaraService
                 ClassType = classType,
                 Name = export.ObjectName?.Value?.Value ?? $"Export_{idx}",
                 Channels = GetChannelCount(classType),
+                OuterIndex = export.OuterIndex.Index,
             };
 
             if (export is NormalExport normalExport)
@@ -166,7 +310,6 @@ public static class NiagaraService
                         MaxTime = maxTime,
                     };
 
-                    // Include all samples
                     for (int s = 0; s < sampleCount; s++)
                     {
                         var sample = new float[channels];
@@ -188,9 +331,7 @@ public static class NiagaraService
                     foreach (var entry in colorArray.Value)
                     {
                         if (entry is StructPropertyData colorStruct)
-                        {
                             exportInfo.ColorData.Add(ExtractLinearColor(colorStruct));
-                        }
                     }
                 }
 
@@ -202,9 +343,7 @@ public static class NiagaraService
                     foreach (var entry in internalArray.Value)
                     {
                         if (entry is StructPropertyData vecStruct)
-                        {
                             exportInfo.ColorData.Add(ExtractVectorAsFloats(vecStruct));
-                        }
                     }
                 }
             }
@@ -212,7 +351,7 @@ public static class NiagaraService
             info.Exports.Add(exportInfo);
         }
 
-        return JsonSerializer.Serialize(info, JsonOpts);
+        return info;
     }
 
     // ── Edit: Apply color changes ──
@@ -290,117 +429,162 @@ public static class NiagaraService
         asset.Write(outputPath);
     }
 
-    // ── MakeGreen: Recolor all color exports to green ──
+    // ── OuterIndex / EmitterName / EnemyParams Resolution ──
 
     /// <summary>
-    /// Recolors all color-relevant exports in a Niagara asset to green and writes the result.
-    /// - ColorCurve/Vector4Curve (4ch): R=0, G=max(original RGB brightness, 0.5), B=0, A=unchanged
-    /// - VectorCurve (3ch): X=0, Y=max(original brightness, 0.5), Z=0
-    /// - ArrayColor/ArrayFloat4 (4ch): R=0, G=max(original RGB brightness, 0.5), B=0, A=unchanged
-    /// - ArrayFloat3 (3ch): X=0, Y=max(original brightness, 0.5), Z=0
-    /// - Curve (1ch) and Vector2DCurve (2ch): unchanged (opacity/size/UV, not color)
-    /// Returns the number of exports modified.
+    /// Walk the outer chain from an export index up to the NiagaraEmitter parent.
     /// </summary>
-    public static int MakeGreen(string assetPath, string outputPath, Usmap? mappings)
+    private static string? ResolveEmitterName(UAsset asset, int exportIndex)
     {
-        var (asset, colorIndices) = LoadSelective(assetPath, mappings);
-        int modified = 0;
-
-        foreach (int idx in colorIndices)
+        int walkIdx = exportIndex;
+        while (walkIdx >= 0 && walkIdx < asset.Exports.Count)
         {
-            if (idx >= asset.Exports.Count) continue;
-            var export = asset.Exports[idx];
-            if (export is not NormalExport ne) continue;
+            var walkExp = asset.Exports[walkIdx];
+            string walkClass = walkExp.GetExportClassType()?.Value?.Value ?? "";
+            if (walkClass == "NiagaraEmitter")
+                return walkExp.ObjectName?.Value?.Value;
+            int outerRaw = walkExp.OuterIndex.Index;
+            if (outerRaw > 0) walkIdx = outerRaw - 1; else break;
+        }
+        return null;
+    }
 
-            string classType = ne.GetExportClassType().Value.Value;
-            int channels = GetChannelCount(classType);
+    /// <summary>
+    /// Build a display string for the outer export chain (e.g. "NiagaraSystem > NiagaraEmitter > NiagaraScript").
+    /// </summary>
+    private static string ResolveOuterChain(UAsset asset, int exportIndex)
+    {
+        var parts = new List<string>();
+        int walkIdx = exportIndex;
+        int safety = 0;
+        while (walkIdx >= 0 && walkIdx < asset.Exports.Count && safety++ < 50)
+        {
+            var exp = asset.Exports[walkIdx];
+            string cls = exp.GetExportClassType()?.Value?.Value ?? "Unknown";
+            string name = exp.ObjectName?.Value?.Value ?? $"Export_{walkIdx}";
+            parts.Add($"{cls}:{name}");
+            int outerRaw = exp.OuterIndex.Index;
+            if (outerRaw > 0) walkIdx = outerRaw - 1; else break;
+        }
+        parts.Reverse();
+        return string.Join(" > ", parts);
+    }
 
-            // Skip 1-channel (scalar curves = opacity/size) and 2-channel (Vector2D = UV)
-            if (channels < 3) continue;
+    /// <summary>
+    /// Get the immediate outer export's name.
+    /// </summary>
+    private static string? ResolveOuterName(UAsset asset, int exportIndex)
+    {
+        if (exportIndex < 0 || exportIndex >= asset.Exports.Count) return null;
+        int outerRaw = asset.Exports[exportIndex].OuterIndex.Index;
+        if (outerRaw > 0 && outerRaw - 1 < asset.Exports.Count)
+            return asset.Exports[outerRaw - 1].ObjectName?.Value?.Value;
+        return null;
+    }
 
-            // ShaderLUT recolor
-            var lutProp = FindProp(ne.Data, "ShaderLUT");
-            if (lutProp is ArrayPropertyData lutArray && lutArray.Value.Length > 0)
+    /// <summary>
+    /// Scan the asset's name map for enemy-related FNames (EnemyColor, EnemyValue).
+    /// Returns list of dicts with "fname" and "emitter" keys.
+    /// </summary>
+    private static List<Dictionary<string, object?>> DetectEnemyFNames(UAsset asset)
+    {
+        var results = new List<Dictionary<string, object?>>();
+        if (asset.GetNameMapIndexList() == null) return results;
+
+        foreach (var nameEntry in asset.GetNameMapIndexList())
+        {
+            string name = nameEntry.Value;
+            string lower = name.ToLowerInvariant();
+            if (!lower.Contains("enemycolor") && !lower.Contains("enemyvalue")) continue;
+
+            // Parse dot-prefixed emitter names (e.g. "NS_Path_002.EnemyColor0")
+            string? emitter = null;
+            int dotIdx = name.IndexOf('.');
+            if (dotIdx > 0)
+                emitter = name.Substring(0, dotIdx);
+
+            results.Add(new Dictionary<string, object?>
             {
-                for (int s = 0; s < lutArray.Value.Length / channels; s++)
-                {
-                    int baseIdx = s * channels;
-                    // Read original values to preserve brightness
-                    float origR = (lutArray.Value[baseIdx] is FloatPropertyData f0) ? f0.Value : 0;
-                    float origG = (baseIdx + 1 < lutArray.Value.Length && lutArray.Value[baseIdx + 1] is FloatPropertyData f1) ? f1.Value : 0;
-                    float origB = (baseIdx + 2 < lutArray.Value.Length && lutArray.Value[baseIdx + 2] is FloatPropertyData f2) ? f2.Value : 0;
-                    float brightness = Math.Max(Math.Max(origR, origG), Math.Max(origB, 0.5f));
-
-                    // Set R=0, G=brightness, B=0
-                    if (lutArray.Value[baseIdx] is FloatPropertyData fpR) fpR.Value = 0f;
-                    if (baseIdx + 1 < lutArray.Value.Length && lutArray.Value[baseIdx + 1] is FloatPropertyData fpG) fpG.Value = brightness;
-                    if (baseIdx + 2 < lutArray.Value.Length && lutArray.Value[baseIdx + 2] is FloatPropertyData fpB) fpB.Value = 0f;
-                    // A (index +3) stays unchanged for 4-channel types
-                }
-                modified++;
-            }
-
-            // ColorData recolor (ArrayColor)
-            var colorDataProp = FindProp(ne.Data, "ColorData");
-            if (colorDataProp is ArrayPropertyData colorArray && colorArray.Value.Length > 0)
-            {
-                foreach (var entry in colorArray.Value)
-                {
-                    if (entry is StructPropertyData colorStruct && colorStruct.Value != null)
-                    {
-                        float origR = 0, origG = 0, origB = 0;
-                        foreach (var prop in colorStruct.Value)
-                        {
-                            if (prop is FloatPropertyData fp)
-                            {
-                                var n = prop.Name?.Value?.Value;
-                                if (n == "R") origR = fp.Value;
-                                else if (n == "G") origG = fp.Value;
-                                else if (n == "B") origB = fp.Value;
-                            }
-                        }
-                        float brightness = Math.Max(Math.Max(origR, origG), Math.Max(origB, 0.5f));
-                        foreach (var prop in colorStruct.Value)
-                        {
-                            if (prop is FloatPropertyData fp)
-                            {
-                                var n = prop.Name?.Value?.Value;
-                                if (n == "R") fp.Value = 0f;
-                                else if (n == "G") fp.Value = brightness;
-                                else if (n == "B") fp.Value = 0f;
-                                // A stays unchanged
-                            }
-                        }
-                    }
-                }
-                modified++;
-            }
-
-            // InternalFloatData recolor (ArrayFloat3/Float4)
-            var internalProp = FindProp(ne.Data, "InternalFloatData");
-            if (internalProp is ArrayPropertyData internalArray && internalArray.Value.Length > 0)
-            {
-                foreach (var entry in internalArray.Value)
-                {
-                    if (entry is StructPropertyData vecStruct && vecStruct.Value != null)
-                    {
-                        var floats = vecStruct.Value.OfType<FloatPropertyData>().ToList();
-                        if (floats.Count >= 3)
-                        {
-                            float brightness = Math.Max(Math.Max(floats[0].Value, floats[1].Value), Math.Max(floats[2].Value, 0.5f));
-                            floats[0].Value = 0f;       // R/X
-                            floats[1].Value = brightness; // G/Y
-                            floats[2].Value = 0f;       // B/Z
-                            // A (index 3) stays unchanged if present
-                        }
-                    }
-                }
-                modified++;
-            }
+                ["fname"] = name,
+                ["emitter"] = emitter,
+            });
         }
 
-        asset.Write(outputPath);
-        return modified;
+        return results;
+    }
+
+    /// <summary>
+    /// Heuristic classification of a color curve based on its sample values.
+    /// </summary>
+    public static Dictionary<string, object> ClassifyColorCurve(List<Dictionary<string, object>> samples)
+    {
+        if (samples.Count == 0)
+            return new Dictionary<string, object> { ["type"] = "unknown", ["confidence"] = 0.0, ["reason"] = "no samples", ["suggestEdit"] = false };
+
+        double maxVal = 0, minVal = double.MaxValue;
+        double sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+        bool allZero = true, allAlphaOne = true;
+        int nonZeroCount = 0;
+
+        foreach (var s in samples)
+        {
+            float r = Convert.ToSingle(s.GetValueOrDefault("r", 0f));
+            float g = Convert.ToSingle(s.GetValueOrDefault("g", 0f));
+            float b = Convert.ToSingle(s.GetValueOrDefault("b", 0f));
+            float a = Convert.ToSingle(s.GetValueOrDefault("a", 1f));
+
+            sumR += r; sumG += g; sumB += b; sumA += a;
+            double brightness = Math.Max(r, Math.Max(g, b));
+            if (brightness > maxVal) maxVal = brightness;
+            if (brightness < minVal) minVal = brightness;
+            if (r != 0 || g != 0 || b != 0) { allZero = false; nonZeroCount++; }
+            if (Math.Abs(a - 1f) > 0.01f) allAlphaOne = false;
+        }
+
+        int n = samples.Count;
+        double avgR = sumR / n, avgG = sumG / n, avgB = sumB / n, avgA = sumA / n;
+
+        bool isGrayscale = Math.Abs(avgR - avgG) < 0.02 && Math.Abs(avgG - avgB) < 0.02;
+        bool isHdr = maxVal > 1.05;
+        bool hasAlphaVariation = !allAlphaOne;
+        bool isConstant = Math.Abs(maxVal - minVal) < 0.01;
+
+        // Classify
+        string type;
+        double confidence;
+        string reason;
+        bool suggestEdit;
+
+        if (allZero)
+        {
+            type = "opacity"; confidence = 0.9; reason = "all values zero"; suggestEdit = false;
+        }
+        else if (isGrayscale && !isHdr)
+        {
+            type = "opacity"; confidence = 0.85; reason = "grayscale non-HDR"; suggestEdit = false;
+        }
+        else if (isHdr && !isGrayscale)
+        {
+            type = "emission"; confidence = 0.8; reason = "HDR color values"; suggestEdit = true;
+        }
+        else
+        {
+            type = "color"; confidence = 0.7; reason = "standard color"; suggestEdit = true;
+        }
+
+        return new Dictionary<string, object>
+        {
+            ["type"] = type,
+            ["confidence"] = confidence,
+            ["reason"] = reason,
+            ["suggestEdit"] = suggestEdit,
+            ["isGrayscale"] = isGrayscale,
+            ["isHdr"] = isHdr,
+            ["hasAlphaVariation"] = hasAlphaVariation,
+            ["isConstant"] = isConstant,
+            ["maxValue"] = maxVal,
+            ["minValue"] = minVal,
+        };
     }
 
     // ── Helpers ──

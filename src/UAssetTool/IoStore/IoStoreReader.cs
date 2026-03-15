@@ -113,8 +113,8 @@ public class IoStoreReader : IDisposable
         reader.ReadBytes(16); // encryptionKeyGuid
         byte containerFlags = reader.ReadByte();
 
-        // EIoContainerFlags::Encrypted = 0x01
-        return (containerFlags & 0x01) != 0;
+        // EIoContainerFlags::Encrypted = 0x02
+        return (containerFlags & 0x02) != 0;
     }
 
     /// <summary>

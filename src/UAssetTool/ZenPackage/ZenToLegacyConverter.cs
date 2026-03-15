@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using UAssetAPI;
 using UAssetAPI.UnrealTypes;
@@ -35,6 +36,7 @@ public class ZenToLegacyConverter
     private readonly Dictionary<ulong, int> _zenImportLookup = new(); // FPackageObjectIndex.Value -> import index
     private readonly Dictionary<int, int> _originalImportOrder = new(); // zen import index -> legacy import index
     
+    private bool _needsToRebuildExportsData = false; // Whether export data needs reordering from bundle order
     private bool _debugMode = false; // Enable debug output for dependency tracing
     
     public void SetDebugMode(bool enabled) => _debugMode = enabled;
@@ -79,6 +81,7 @@ public class ZenToLegacyConverter
         CopyPackageSections();
         BuildImportMap();
         BuildExportMap();
+        ResolvePrestreamPackageImports();
         ResolveExportDependencies();
         FinalizeAsset();
         
@@ -141,14 +144,11 @@ public class ZenToLegacyConverter
 
     private void BeginBuildSummary()
     {
-        // Use full path from context if available, otherwise fall back to zen package name
-        string packageName = _zenPackage.PackageName();
-        if (_context != null && _packageId != 0)
-        {
-            string? fullPath = _context.GetPackagePath(_packageId);
-            if (!string.IsNullOrEmpty(fullPath))
-                packageName = fullPath;
-        }
+        // Use the zen package's own SourcePackageName for the FolderName.
+        // Do NOT use _context.GetPackagePath() here because the UTOC directory index
+        // may have different casing than the zen name map (e.g., "Mvp" vs "MVP").
+        // Retoc also uses the zen package name, not the UTOC directory path.
+        string packageName = _zenPackage.SourcePackageName();
         
         // Normalize package name - resolve /../ patterns
         // e.g., /Game/Marvel/../../../Marvel/Content/Marvel/Characters/... -> /Game/Marvel/Characters/...
@@ -359,13 +359,99 @@ public class ZenToLegacyConverter
             _builder.Exports.Add(newExport);
         }
         
-        // Recalculate serial offsets sequentially (matching retoc)
-        // Export bundle headers exist means exports need reordering
-        long currentExportSerialOffset = 0;
-        for (int i = 0; i < _builder.Exports.Count; i++)
+        // Determine if we need to rebuild export data (reorder from bundle order to sequential)
+        // For UE5.3+ NoExportInfo packages, bundle headers are NOT in the zen package itself -
+        // they come from the container header store entry. Since we don't read those, our
+        // generated bundle headers are synthetic. In this case, export data is already in
+        // sequential order and we should use CookedSerialOffset directly (matching retoc).
+        _needsToRebuildExportsData = _zenPackage.ExportBundleHeaders.Any(h => h.SerialOffset != ulong.MaxValue);
+        
+        if (_needsToRebuildExportsData)
         {
-            _builder.Exports[i].SerialOffset = currentExportSerialOffset;
-            currentExportSerialOffset += _builder.Exports[i].SerialSize;
+            // Recalculate serial offsets sequentially for rebuild
+            long currentExportSerialOffset = 0;
+            for (int i = 0; i < _builder.Exports.Count; i++)
+            {
+                _builder.Exports[i].SerialOffset = currentExportSerialOffset;
+                currentExportSerialOffset += _builder.Exports[i].SerialSize;
+            }
+        }
+        else
+        {
+            // Use CookedSerialOffset directly - data is already in correct order
+            for (int i = 0; i < _builder.Exports.Count; i++)
+            {
+                _builder.Exports[i].SerialOffset = (long)_zenPackage.ExportMap[i].CookedSerialOffset;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolve PrestreamPackage imports for packages in ImportedPackages that are not
+    /// referenced by any import map entry. These are special imports that hint the loader
+    /// to pre-stream another package. Matches retoc's resolve_prestream_package_imports.
+    /// </summary>
+    private void ResolvePrestreamPackageImports()
+    {
+        if (_context == null)
+            return;
+        
+        // Collect all package IDs that are already represented in the import map
+        // (imports with null outer whose object names are non-/Script/ package paths)
+        var existingPackageIds = new HashSet<ulong>();
+        foreach (var import in _builder.Imports)
+        {
+            if (!import.OuterIndex.IsNull())
+                continue;
+            
+            // Get the object name
+            if (import.ObjectName < 0 || import.ObjectName >= _builder.NameMap.Count)
+                continue;
+            
+            string objectName = _builder.NameMap[import.ObjectName];
+            if (objectName.StartsWith("/Script/"))
+                continue;
+            
+            // Compute package ID from the FULL FName (base name + number suffix)
+            // The FName number is stored separately in ObjectNameNumber
+            string fullFName = objectName;
+            if (import.ObjectNameNumber > 0)
+                fullFName = $"{objectName}_{import.ObjectNameNumber - 1}";
+            ulong packageId = FPackageId.FromName(fullFName);
+            existingPackageIds.Add(packageId);
+        }
+        
+        // Find imported packages not already in the import map
+        foreach (ulong importedPackageId in _zenPackage.ImportedPackages)
+        {
+            if (existingPackageIds.Contains(importedPackageId))
+                continue;
+            
+            // Try to resolve the package to get its name
+            var targetPackage = _context.GetPackage(importedPackageId);
+            if (targetPackage == null)
+            {
+                Console.Error.WriteLine($"[ZenToLegacy] Failed to resolve pre-stream package {importedPackageId:X16}");
+                continue;
+            }
+            
+            string resolvedPackageName = targetPackage.SourcePackageName();
+            
+            int classPackageIdx = StoreOrFindName(CORE_OBJECT_PACKAGE_NAME);
+            int classNameIdx = StoreOrFindName(PRESTREAM_PACKAGE_CLASS_NAME);
+            int objectNameIdx = StoreOrFindName(resolvedPackageName);
+            
+            _builder.Imports.Add(new LegacyObjectImport
+            {
+                ClassPackage = classPackageIdx,
+                ClassPackageNumber = 0,
+                ClassName = classNameIdx,
+                ClassNameNumber = 0,
+                OuterIndex = FPackageIndex.CreateNull(),
+                ObjectName = objectNameIdx,
+                ObjectNameNumber = 0,
+                IsOptional = false
+            });
         }
     }
 
@@ -874,9 +960,10 @@ public class ZenToLegacyConverter
     {
         int headerSize = (int)_zenPackage.Summary.HeaderSize;
         
-        // If we have export bundle headers, exports are in bundle order and need reordering
-        // This is the case for all UE5.0+ packages
-        if (_zenPackage.ExportBundleHeaders.Count > 0)
+        // If we have real bundle headers (with explicit SerialOffsets), exports need reordering
+        // For UE5.3+ NoExportInfo where headers are generated (all SerialOffset=MaxValue),
+        // data is already in correct order - just strip the zen header (matching retoc)
+        if (_needsToRebuildExportsData)
         {
             return RebuildExportDataFromBundles();
         }
@@ -902,9 +989,9 @@ public class ZenToLegacyConverter
     }
     
     /// <summary>
-    /// Rebuild export data by iterating through export bundle entries in order,
-    /// tracking a running position through the raw data. Only Serialize commands
-    /// contribute data; Create commands are skipped (zero bytes in stream).
+    /// Rebuild export data by iterating through export bundle headers and their entries,
+    /// using each bundle's SerialOffset to determine where its data starts in the raw package.
+    /// Only Serialize commands contribute data; Create commands are zero-size.
     /// Matches retoc's rebuild_asset_export_data_internal.
     /// </summary>
     private byte[] RebuildExportDataFromBundles()
@@ -928,31 +1015,55 @@ public class ZenToLegacyConverter
         int totalFileSize = (int)totalExportSerialSize + 4;
         byte[] result = new byte[totalFileSize];
         
-        // Iterate through export bundle entries in order, tracking position in raw data.
-        // Only Serialize commands have data in the stream; Create commands are zero-size.
-        long currentSourceOffset = zenHeaderSize;
+        // Iterate through export bundle headers, using their SerialOffset to find data position.
+        // For UE5+ bundles with explicit SerialOffset, use that to set the starting position.
+        // For legacy bundles (SerialOffset=ulong.MaxValue), track running position sequentially.
+        // Matches retoc's rebuild_asset_export_data_internal.
+        long currentPackageOffset = zenHeaderSize;
         
-        foreach (var bundleEntry in _zenPackage.ExportBundleEntries)
+        for (int bundleIndex = 0; bundleIndex < _zenPackage.ExportBundleHeaders.Count; bundleIndex++)
         {
-            int exportIndex = (int)bundleEntry.LocalExportIndex;
+            var bundleHeader = _zenPackage.ExportBundleHeaders[bundleIndex];
             
-            if (exportIndex < 0 || exportIndex >= _builder.Exports.Count)
-                continue;
-            
-            // Only Serialize commands contain actual export data
-            if (bundleEntry.CommandType != EExportCommandType.Serialize)
-                continue;
-            
-            int exportSerialSize = (int)_builder.Exports[exportIndex].SerialSize;
-            long targetOffset = _builder.Exports[exportIndex].SerialOffset - legacyHeaderSize;
-            
-            if (currentSourceOffset >= 0 && currentSourceOffset + exportSerialSize <= _rawPackageData.Length &&
-                targetOffset >= 0 && targetOffset + exportSerialSize <= totalExportSerialSize)
+            long currentSerialOffset;
+            if (bundleHeader.SerialOffset != ulong.MaxValue)
             {
-                Array.Copy(_rawPackageData, currentSourceOffset, result, (int)targetOffset, exportSerialSize);
+                currentSerialOffset = zenHeaderSize + (long)bundleHeader.SerialOffset;
+            }
+            else
+            {
+                currentSerialOffset = currentPackageOffset;
             }
             
-            currentSourceOffset += exportSerialSize;
+            for (uint i = 0; i < bundleHeader.EntryCount; i++)
+            {
+                int entryIndex = (int)bundleHeader.FirstEntryIndex + (int)i;
+                if (entryIndex >= _zenPackage.ExportBundleEntries.Count)
+                    break;
+                
+                var bundleEntry = _zenPackage.ExportBundleEntries[entryIndex];
+                int exportIndex = (int)bundleEntry.LocalExportIndex;
+                
+                if (exportIndex < 0 || exportIndex >= _builder.Exports.Count)
+                    continue;
+                
+                // Only Serialize commands contain actual export data
+                if (bundleEntry.CommandType != EExportCommandType.Serialize)
+                    continue;
+                
+                int exportSerialSize = (int)_builder.Exports[exportIndex].SerialSize;
+                long targetOffset = _builder.Exports[exportIndex].SerialOffset - legacyHeaderSize;
+                
+                if (currentSerialOffset >= 0 && currentSerialOffset + exportSerialSize <= _rawPackageData.Length &&
+                    targetOffset >= 0 && targetOffset + exportSerialSize <= totalExportSerialSize)
+                {
+                    Array.Copy(_rawPackageData, currentSerialOffset, result, (int)targetOffset, exportSerialSize);
+                }
+                
+                currentSerialOffset += exportSerialSize;
+            }
+            
+            currentPackageOffset = currentSerialOffset;
         }
         
         // Write PACKAGE_FILE_TAG footer
@@ -1129,13 +1240,17 @@ public class ZenToLegacyConverter
         string packageName = packageImport.ImportedPackageIndex < _zenPackage.ImportedPackageNames.Count
             ? _zenPackage.ImportedPackageNames[packageImport.ImportedPackageIndex]
             : $"/Game/__Package_{importedPackageId:X16}__";
+        int packageNameNumber = packageImport.ImportedPackageIndex < _zenPackage.ImportedPackageNameNumbers.Count
+            ? _zenPackage.ImportedPackageNameNumbers[packageImport.ImportedPackageIndex]
+            : 0;
         
-        // Create the package import (outer)
+        // Create the package import (outer) with base name and FName number separated
         var packageOuter = new ResolvedZenImport
         {
             ClassPackage = CORE_OBJECT_PACKAGE_NAME,
             ClassName = PACKAGE_CLASS_NAME,
-            ObjectName = packageName
+            ObjectName = packageName,
+            ObjectNameNumber = packageNameNumber
         };
         
         // If we have context, resolve the actual export from the imported package
@@ -1179,8 +1294,8 @@ public class ZenToLegacyConverter
                                     Console.Error.WriteLine($"  Name at index={targetPackage.NameMap[(int)export.ObjectName.Index]}");
                             }
                             
-                            // Use GetName with scriptObjects for Global name type support
-                            string exportName = targetPackage.GetName(export.ObjectName, _scriptObjects);
+                            // Get base name and FName number separately
+                            var (exportBaseName, exportNumber) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
                             
                             // Resolve the class of this export
                             string className = OBJECT_CLASS_NAME;
@@ -1209,7 +1324,8 @@ public class ZenToLegacyConverter
                             {
                                 ClassPackage = classPackage,
                                 ClassName = className,
-                                ObjectName = exportName,
+                                ObjectName = exportBaseName,
+                                ObjectNameNumber = exportNumber,
                                 Outer = packageOuter
                             };
                         }
@@ -1231,7 +1347,7 @@ public class ZenToLegacyConverter
                         if (targetPackage.ExportMap.Count == 1)
                         {
                             var export = targetPackage.ExportMap[0];
-                            string exportName = targetPackage.GetName(export.ObjectName, _scriptObjects);
+                            var (fbBaseName, fbNumber) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
                             string className = OBJECT_CLASS_NAME;
                             string classPackage = CORE_OBJECT_PACKAGE_NAME;
                             
@@ -1254,7 +1370,8 @@ public class ZenToLegacyConverter
                             {
                                 ClassPackage = classPackage,
                                 ClassName = className,
-                                ObjectName = exportName,
+                                ObjectName = fbBaseName,
+                                ObjectNameNumber = fbNumber,
                                 Outer = packageOuter
                             };
                         }
@@ -1264,7 +1381,7 @@ public class ZenToLegacyConverter
                         if (exportIdx < targetPackage.ExportMap.Count)
                         {
                             var export = targetPackage.ExportMap[exportIdx];
-                            string exportName = targetPackage.GetName(export.ObjectName, _scriptObjects);
+                            var (fb2BaseName, fb2Number) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
                             string className = OBJECT_CLASS_NAME;
                             string classPackage = CORE_OBJECT_PACKAGE_NAME;
                             
@@ -1287,7 +1404,8 @@ public class ZenToLegacyConverter
                             {
                                 ClassPackage = classPackage,
                                 ClassName = className,
-                                ObjectName = exportName,
+                                ObjectName = fb2BaseName,
+                                ObjectNameNumber = fb2Number,
                                 Outer = packageOuter
                             };
                         }
@@ -1374,11 +1492,9 @@ public class ZenToLegacyConverter
             outerIndex = -(FindOrAddResolvedImport(import.Outer) + 1);
         }
         
-        // Store names directly without re-parsing numeric suffixes.
-        // Names like "MI_104841_Butterfly_1_001" must be stored as-is — the "_001"
-        // is part of the actual asset name, NOT an FName Number suffix.
-        // GetName() already bakes the FMappedName.Number into the string when present,
-        // so we store the full resolved name with Number=0 (matching retoc behavior).
+        // Store base names in the name map, keep FName numbers separate.
+        // The ObjectName on ResolvedZenImport is the BASE name (without number suffix).
+        // The ObjectNameNumber carries the FName Number field separately.
         int classPackageIdx = StoreOrFindName(import.ClassPackage);
         int classNameIdx = StoreOrFindName(import.ClassName);
         int objectNameIdx = StoreOrFindName(import.ObjectName);
@@ -1393,12 +1509,55 @@ public class ZenToLegacyConverter
             ClassNameNumber = 0,
             OuterIndex = new FPackageIndex(outerIndex),
             ObjectName = objectNameIdx,
-            ObjectNameNumber = 0,
+            ObjectNameNumber = import.ObjectNameNumber,
             IsOptional = false
         });
         
         _resolvedImportLookup[import] = newIndex;
         return newIndex;
+    }
+
+    /// <summary>
+    /// Get the base name and FName number from an export's ObjectName in a target package.
+    /// Unlike GetName() which bakes the number into the string, this keeps them separate
+    /// for correct legacy import entry construction.
+    /// </summary>
+    private (string baseName, int number) GetExportBaseNameAndNumber(FZenPackageHeader targetPackage, FMappedName objectName)
+    {
+        string baseName;
+        if (objectName.Type == EMappedNameType.Package)
+        {
+            baseName = objectName.Index < targetPackage.NameMap.Count
+                ? targetPackage.NameMap[(int)objectName.Index]
+                : $"__UNKNOWN_NAME_{objectName.Type}_{objectName.Index}__";
+        }
+        else if (objectName.Type == EMappedNameType.Global && _scriptObjects != null)
+        {
+            // For global names, ScriptObjectsDatabase returns the full name with number baked in
+            // We need to extract base name and number ourselves
+            string fullName = _scriptObjects.GetName(objectName);
+            // If Number > 0, the suffix was baked in by ScriptObjectsDatabase.GetName
+            // But for global names used as export names, Number is typically 0
+            if (objectName.Number > 0)
+            {
+                // Strip the baked-in suffix to get base name
+                string expectedSuffix = $"_{objectName.Number - 1}";
+                if (fullName.EndsWith(expectedSuffix))
+                    baseName = fullName.Substring(0, fullName.Length - expectedSuffix.Length);
+                else
+                    baseName = fullName;
+            }
+            else
+            {
+                baseName = fullName;
+            }
+        }
+        else
+        {
+            baseName = $"__UNKNOWN_NAME_{objectName.Type}_{objectName.Index}__";
+        }
+        
+        return (baseName, (int)objectName.Number);
     }
 
     private int StoreOrFindName(string name)
@@ -1643,6 +1802,7 @@ public class ResolvedZenImport : IEquatable<ResolvedZenImport>
     public string ClassPackage { get; set; } = "";
     public string ClassName { get; set; } = "";
     public string ObjectName { get; set; } = "";
+    public int ObjectNameNumber { get; set; } = 0; // FName number (0=no suffix, >0 means _{N-1})
     public ResolvedZenImport? Outer { get; set; }
 
     public bool Equals(ResolvedZenImport? other)
@@ -1651,6 +1811,7 @@ public class ResolvedZenImport : IEquatable<ResolvedZenImport>
         return ClassPackage == other.ClassPackage &&
                ClassName == other.ClassName &&
                ObjectName == other.ObjectName &&
+               ObjectNameNumber == other.ObjectNameNumber &&
                Equals(Outer, other.Outer);
     }
 
@@ -1658,7 +1819,7 @@ public class ResolvedZenImport : IEquatable<ResolvedZenImport>
     
     public override int GetHashCode()
     {
-        return HashCode.Combine(ClassPackage, ClassName, ObjectName, Outer?.GetHashCode() ?? 0);
+        return HashCode.Combine(ClassPackage, ClassName, ObjectName, ObjectNameNumber, Outer?.GetHashCode() ?? 0);
     }
 }
 

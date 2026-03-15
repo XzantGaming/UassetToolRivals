@@ -34,6 +34,7 @@ public class FZenPackageHeader
     // Imported packages
     public List<ulong> ImportedPackages { get; set; } // Package IDs
     public List<string> ImportedPackageNames { get; set; }
+    public List<int> ImportedPackageNameNumbers { get; set; } // FName numbers for ImportedPackageNames
     public List<ulong> ImportedPublicExportHashes { get; set; }
     
     // Bulk data
@@ -56,6 +57,7 @@ public class FZenPackageHeader
         DependencyBundleEntries = new List<FDependencyBundleEntry>();
         ImportedPackages = new List<ulong>();
         ImportedPackageNames = new List<string>();
+        ImportedPackageNameNumbers = new List<int>();
         ImportedPublicExportHashes = new List<ulong>();
         BulkData = new List<FBulkDataMapEntry>();
         InternalDependencyArcs = new List<FInternalDependencyArc>();
@@ -433,18 +435,25 @@ public class FZenPackageHeader
             nameNumbers[i] = reader.ReadInt32();
         }
         
-        // Apply name numbers to create full names
+        // Apply name numbers to create full names for PackageId computation,
+        // but store base names (without number) for legacy import resolution.
+        // Package paths in the legacy format use the base name, with the FName
+        // number stored separately in the import entry.
         for (int i = 0; i < names.Count; i++)
         {
-            string fullName = names[i];
+            string baseName = names[i];
+            // Compute full FName (with number suffix) for PackageId hash
+            string fullNameForHash = baseName;
             if (nameNumbers[i] != 0)
             {
-                fullName = $"{names[i]}_{nameNumbers[i] - 1}";
+                fullNameForHash = $"{baseName}_{nameNumbers[i] - 1}";
             }
-            ImportedPackageNames.Add(fullName);
+            // Store the base name for legacy import (matching retoc)
+            ImportedPackageNames.Add(baseName);
+            ImportedPackageNameNumbers.Add(nameNumbers[i]);
             
-            // Extract package ID from name
-            ulong packageId = FPackageId.FromName(fullName);
+            // Extract package ID from the FULL name (including number)
+            ulong packageId = FPackageId.FromName(fullNameForHash);
             ImportedPackages.Add(packageId);
         }
     }

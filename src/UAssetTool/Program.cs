@@ -73,7 +73,6 @@ public partial class Program
                 "niagara_details" => CliNiagaraDetails(args),
                 "niagara_edit" => CliNiagaraEdit(args),
                 "niagara_audit" => CliNiagaraAudit(args),
-                "niagara_green_batch" => CliNiagaraGreenBatch(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
@@ -2033,78 +2032,6 @@ public partial class Program
         }
 
         return 0;
-    }
-
-    /// <summary>
-    /// niagara_green_batch: Batch-edit all NS assets in a directory to green.
-    /// Outputs edited assets preserving directory structure for create_mod_iostore.
-    /// </summary>
-    private static int CliNiagaraGreenBatch(string[] args)
-    {
-        if (args.Length < 4)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool niagara_green_batch <input_dir> <output_dir> <usmap_path>");
-            Console.Error.WriteLine("  Edits ALL NS_*.uasset files in input_dir to green.");
-            Console.Error.WriteLine("  Output preserves directory structure for create_mod_iostore.");
-            return 1;
-        }
-
-        string inputDir = args[1];
-        string outputDir = args[2];
-        string usmapPath = args[3];
-
-        if (!Directory.Exists(inputDir)) { Console.Error.WriteLine($"Input dir not found: {inputDir}"); return 1; }
-        if (!File.Exists(usmapPath)) { Console.Error.WriteLine($"Usmap not found: {usmapPath}"); return 1; }
-
-        var mappings = new Usmap(usmapPath);
-        var nsFiles = Directory.GetFiles(inputDir, "NS_*.uasset", SearchOption.AllDirectories);
-        Console.Error.WriteLine($"[NiagaraGreenBatch] Found {nsFiles.Length} NS assets in {inputDir}");
-
-        if (nsFiles.Length == 0) return 0;
-
-        Directory.CreateDirectory(outputDir);
-        int success = 0, failed = 0, skipped = 0;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
-        foreach (var nsFile in nsFiles)
-        {
-            string relativePath = Path.GetRelativePath(inputDir, nsFile);
-            string outAsset = Path.Combine(outputDir, relativePath);
-            string? outDir = Path.GetDirectoryName(outAsset);
-            if (!string.IsNullOrEmpty(outDir)) Directory.CreateDirectory(outDir);
-
-            try
-            {
-                int modified = NiagaraService.MakeGreen(nsFile, outAsset, mappings);
-                if (modified > 0)
-                {
-                    // Copy .uexp alongside (MakeGreen writes both via asset.Write)
-                    success++;
-                }
-                else
-                {
-                    // No color exports to modify — still copy so create_mod_iostore has the full asset
-                    // asset.Write already wrote both .uasset and .uexp
-                    skipped++;
-                }
-
-                if ((success + failed + skipped) % 50 == 0)
-                    Console.Error.WriteLine($"  Progress: {success + failed + skipped}/{nsFiles.Length} (green={success}, skip={skipped}, fail={failed})");
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  FAIL: {relativePath}: {ex.Message}");
-                failed++;
-            }
-        }
-
-        Console.Error.WriteLine();
-        Console.Error.WriteLine($"[NiagaraGreenBatch] Done in {sw.Elapsed.TotalSeconds:F1}s");
-        Console.Error.WriteLine($"  Green: {success}");
-        Console.Error.WriteLine($"  Skipped (no color exports): {skipped}");
-        Console.Error.WriteLine($"  Failed: {failed}");
-        Console.Error.WriteLine($"  Output: {outputDir}");
-        return failed < nsFiles.Length ? 0 : 1;
     }
 
     /// <summary>
@@ -4185,7 +4112,7 @@ public partial class Program
         return LoadAssetWithMappings(filePath, mappings);
     }
     
-    private static UAsset LoadAssetWithMappings(string filePath, Usmap? mappings)
+    public static UAsset LoadAssetWithMappings(string filePath, Usmap? mappings)
     {
         var asset = new UAsset(filePath, EngineVersion.VER_UE5_3, mappings);
         asset.UseSeparateBulkDataFiles = true;
@@ -4280,7 +4207,7 @@ public partial class Program
         return count;
     }
 
-    private static Usmap? LoadMappings(string? usmapPath)
+    public static Usmap? LoadMappings(string? usmapPath)
     {
         if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
         {
