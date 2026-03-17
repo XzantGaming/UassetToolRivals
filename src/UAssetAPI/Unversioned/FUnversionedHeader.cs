@@ -1,6 +1,8 @@
-﻿using System.Collections;
+﻿using Newtonsoft.Json;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using UAssetAPI.JSON;
 
 namespace UAssetAPI.Unversioned
 {
@@ -13,10 +15,15 @@ namespace UAssetAPI.Unversioned
     public class FUnversionedHeader
     {
         public LinkedList<FFragment> Fragments;
+        [JsonIgnore]
         public LinkedListNode<FFragment> CurrentFragment;
+        [JsonIgnore]
         public int UnversionedPropertyIndex = 0;
+        [JsonIgnore]
         public int ZeroMaskIndex = 0;
+        [JsonIgnore]
         public uint ZeroMaskNum = 0;
+        [JsonConverter(typeof(BitArrayJsonConverter))]
         public BitArray ZeroMask;
         public bool bHasNonZeroValues = false;
 
