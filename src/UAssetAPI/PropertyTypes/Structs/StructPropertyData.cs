@@ -97,8 +97,8 @@ public class StructPropertyData : PropertyData<List<PropertyData>>
         Value = new List<PropertyData> { data };
     }
 
-    [Newtonsoft.Json.JsonIgnore]
-    internal FUnversionedHeader _originalStructHeader;
+    [JsonProperty("OriginalStructHeader")]
+    public FUnversionedHeader _originalStructHeader;
 
     private void ReadNTPL(AssetBinaryReader reader, bool resetValue = true)
     {
