@@ -1,4 +1,5 @@
-﻿using UAssetAPI.CustomVersions;
+﻿using Newtonsoft.Json;
+using UAssetAPI.CustomVersions;
 using UAssetAPI.PropertyTypes.Objects;
 using UAssetAPI.UnrealTypes;
 
@@ -6,9 +7,13 @@ namespace UAssetAPI.PropertyTypes.Structs;
 
 public class MaterialOverrideNanitePropertyData : StructPropertyData
 {
+    [JsonProperty]
     public FSoftObjectPath OverrideMaterialRef;
+    [JsonProperty]
     public bool bEnableOverride;
+    [JsonProperty]
     public FPackageIndex OverrideMaterial;
+    [JsonProperty]
     public bool bSerializeAsCookedData;
 
     public MaterialOverrideNanitePropertyData(FName name, FName forcedType) : base(name, forcedType) { }
@@ -56,9 +61,11 @@ public class MaterialOverrideNanitePropertyData : StructPropertyData
             writer.Write(bEnableOverride ? 1 : 0);
             writer.Write(OverrideMaterial?.Index ?? 0);
         }
-
-        writer.Write(bSerializeAsCookedData ? 1 : 0);
-        if (bSerializeAsCookedData) writer.Write(OverrideMaterial?.Index ?? 0);
+        else
+        {
+            writer.Write(bSerializeAsCookedData ? 1 : 0);
+            if (bSerializeAsCookedData) writer.Write(OverrideMaterial?.Index ?? 0);
+        }
 
         StructType = FName.DefineDummy(writer.Asset, CurrentPropertyType);
         base.Write(writer, includeHeader, PropertySerializationContext.StructFallback);
