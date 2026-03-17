@@ -106,7 +106,7 @@ public partial class Program
         Console.WriteLine("  Asset Editing:");
         Console.WriteLine("    fix <uasset_path> [usmap_path]          - Fix SerializeSize for meshes");
         Console.WriteLine("    to_json <path> [usmap] [output_dir]     - Convert uasset to JSON (file or directory)");
-        Console.WriteLine("    from_json <json> <output_uasset> [usmap] - Convert JSON back to uasset");
+        Console.WriteLine("    from_json <path> <output> [usmap]         - Convert JSON back to uasset (file or directory)");
         Console.WriteLine();
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
@@ -1653,53 +1653,105 @@ public partial class Program
     {
         if (args.Length < 3)
         {
-            Console.Error.WriteLine("Usage: UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]");
+            Console.Error.WriteLine("Usage: UAssetTool from_json <json_path_or_dir> <output_path_or_dir> [usmap_path]");
+            Console.Error.WriteLine("  <json_path_or_dir>   - Path to a .json file or directory containing .json files");
+            Console.Error.WriteLine("  <output_path_or_dir> - Output .uasset path (single file) or output directory (batch)");
+            Console.Error.WriteLine("  [usmap_path]         - Optional path to .usmap mappings file");
             return 1;
         }
 
-        string jsonPath = args[1];
+        string inputPath = args[1];
         string outputPath = args[2];
         string? usmapPath = args.Length > 3 ? args[3] : null;
 
-        if (!File.Exists(jsonPath))
-        {
-            Console.Error.WriteLine($"JSON file not found: {jsonPath}");
-            return 1;
-        }
-
-        // Read JSON with UTF-8 encoding to preserve Unicode characters
-        string jsonData = File.ReadAllText(jsonPath, System.Text.Encoding.UTF8);
-        
-        // Load mappings if provided
+        // Load mappings once if provided
         Usmap? mappings = null;
         if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
             mappings = new Usmap(usmapPath);
-        
-        // Deserialize from JSON
-        var asset = UAsset.DeserializeJson(jsonData);
-        if (asset == null)
+
+        int successCount = 0;
+        int failCount = 0;
+
+        if (Directory.Exists(inputPath))
         {
-            Console.Error.WriteLine("Failed to deserialize JSON");
+            // Batch mode: process all .json files in directory
+            var files = Directory.GetFiles(inputPath, "*.json", SearchOption.AllDirectories);
+            Console.WriteLine($"Found {files.Length} .json files in {inputPath}");
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    // Preserve relative directory structure in output
+                    string relativePath = Path.GetRelativePath(inputPath, file);
+                    string relativeDir = Path.GetDirectoryName(relativePath) ?? "";
+                    string outputSubDir = Path.Combine(outputPath, relativeDir);
+                    Directory.CreateDirectory(outputSubDir);
+                    string uassetOutputPath = Path.Combine(outputSubDir, Path.GetFileNameWithoutExtension(file) + ".uasset");
+
+                    string jsonData = File.ReadAllText(file, System.Text.Encoding.UTF8);
+                    var asset = UAsset.DeserializeJson(jsonData);
+                    if (asset == null)
+                    {
+                        Console.Error.WriteLine($"Failed to deserialize: {file}");
+                        failCount++;
+                        continue;
+                    }
+
+                    asset.Mappings = mappings;
+                    asset.FilePath = Path.GetFullPath(uassetOutputPath);
+                    PreloadReferencedAssetsForSchemas(asset);
+                    asset.Write(uassetOutputPath);
+                    Console.WriteLine($"Converted: {file} -> {uassetOutputPath}");
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to convert {file}: {ex.Message}");
+                    failCount++;
+                }
+            }
+
+            Console.WriteLine($"\nBatch conversion complete: {successCount} succeeded, {failCount} failed");
+        }
+        else if (File.Exists(inputPath))
+        {
+            // Single file mode
+            try
+            {
+                string jsonData = File.ReadAllText(inputPath, System.Text.Encoding.UTF8);
+                var asset = UAsset.DeserializeJson(jsonData);
+                if (asset == null)
+                {
+                    Console.Error.WriteLine("Failed to deserialize JSON");
+                    return 1;
+                }
+
+                asset.Mappings = mappings;
+                asset.FilePath = Path.GetFullPath(outputPath);
+                PreloadReferencedAssetsForSchemas(asset);
+
+                string? outDir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrEmpty(outDir))
+                    Directory.CreateDirectory(outDir);
+
+                asset.Write(outputPath);
+                Console.WriteLine($"Asset imported from JSON and saved to {outputPath}");
+                successCount = 1;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to convert: {ex.Message}");
+                return 1;
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine($"Path not found: {inputPath}");
             return 1;
         }
-        
-        asset.Mappings = mappings;
-        
-        // Set FilePath so FindAssetOnDiskFromPath can locate sibling assets for schema resolution
-        asset.FilePath = Path.GetFullPath(outputPath);
-        
-        // Preload schemas from referenced assets (parent BPs etc.) - same as CliToJson
-        PreloadReferencedAssetsForSchemas(asset);
-        
-        // Ensure output directory exists
-        string? outputDir = Path.GetDirectoryName(outputPath);
-        if (!string.IsNullOrEmpty(outputDir))
-            Directory.CreateDirectory(outputDir);
-        
-        asset.Write(outputPath);
-        
-        Console.WriteLine($"Asset imported from JSON and saved to {outputPath}");
-        return 0;
+
+        return failCount > 0 ? 1 : 0;
     }
     
     private static int CliToJson(string[] args)
