@@ -1064,6 +1064,7 @@ public partial class Program
             Console.Error.WriteLine("  --container <path>       Additional container to load for cross-package imports");
             Console.Error.WriteLine("  --aes <hex>              AES key for decryption (can specify multiple times)");
             Console.Error.WriteLine("  --filter <patterns...>   Only extract packages matching patterns (space-separated)");
+            Console.Error.WriteLine("                           Can also pass a .txt file containing one pattern per line");
             Console.Error.WriteLine("  --with-deps              Also extract imported/referenced packages");
             Console.Error.WriteLine("  --mod <path>             Path to modded .utoc file or directory containing .utoc files.");
             Console.Error.WriteLine("                           Extracts from mod containers, uses game paks for import resolution.");
@@ -1075,6 +1076,7 @@ public partial class Program
             Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --filter Characters/1014 Characters/1057");
             Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --mod \"C:/Mods/my_mod.utoc\" --filter SK_1014");
             Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --mod \"C:/Mods/\" --with-deps");
+            Console.Error.WriteLine("  extract_iostore_legacy \"C:/Game/Paks\" output --filter filters.txt");
             return 1;
         }
 
@@ -1111,7 +1113,20 @@ public partial class Program
                 // Collect all following args until next option (starts with --)
                 while (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
                 {
-                    filterPatterns.Add(args[++i]);
+                    string filterArg = args[++i];
+                    // If the argument is a .txt file, read patterns from it (one per line)
+                    if (filterArg.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) && File.Exists(filterArg))
+                    {
+                        var lines = File.ReadAllLines(filterArg)
+                            .Select(l => l.Trim())
+                            .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith("#") && !l.StartsWith("//"));
+                        filterPatterns.AddRange(lines);
+                        Console.Error.WriteLine($"[Filter] Loaded {lines.Count()} patterns from {filterArg}");
+                    }
+                    else
+                    {
+                        filterPatterns.Add(filterArg);
+                    }
                 }
             }
             else if (args[i] == "-deps" || args[i] == "--with-deps")
