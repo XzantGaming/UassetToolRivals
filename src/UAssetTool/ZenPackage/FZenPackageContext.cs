@@ -485,15 +485,49 @@ public class FZenPackageContext : IDisposable
     public int LastContainerIndex => _containers.Count - 1;
     
     /// <summary>
-    /// Read bulk data chunk for a package (combines all BulkData chunks with different indices)
+    /// Get the container index that owns the ExportBundleData for a package
     /// </summary>
-    public byte[]? ReadBulkData(ulong packageId)
+    public int GetPackageContainerIndex(ulong packageId)
     {
-        // Find which container has this package
-        if (!_packageIdToChunk.TryGetValue(packageId, out var location))
+        if (_packageIdToChunk.TryGetValue(packageId, out var location))
+            return location.ContainerIndex;
+        return -1;
+    }
+    
+    /// <summary>
+    /// Check if a specific container has BulkData chunks for a package
+    /// </summary>
+    public bool ContainerHasBulkData(ulong packageId, int containerIndex)
+    {
+        if (containerIndex < 0 || containerIndex >= _containers.Count)
+            return false;
+        var reader = _containers[containerIndex];
+        foreach (var chunk in reader.GetChunks())
+        {
+            if (chunk.GetChunkType() == IoStore.EIoChunkType.BulkData && chunk.Id == packageId)
+                return true;
+        }
+        return false;
+    }
+    
+    /// <summary>
+    /// Read bulk data chunk for a package from a specific container.
+    /// If containerIndex is -1, uses the container that owns the ExportBundleData.
+    /// </summary>
+    public byte[]? ReadBulkData(ulong packageId, int containerIndex = -1)
+    {
+        if (containerIndex < 0)
+        {
+            // Fall back to the container that owns the ExportBundleData
+            if (!_packageIdToChunk.TryGetValue(packageId, out var location))
+                return null;
+            containerIndex = location.ContainerIndex;
+        }
+        
+        if (containerIndex >= _containers.Count)
             return null;
             
-        var reader = _containers[location.ContainerIndex];
+        var reader = _containers[containerIndex];
         
         // Collect all BulkData chunks for this package (may have multiple with different indices)
         var bulkChunks = new List<(ushort Index, byte[] Data)>();

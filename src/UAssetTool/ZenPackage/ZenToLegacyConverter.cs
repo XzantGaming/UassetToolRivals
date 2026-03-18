@@ -27,6 +27,7 @@ public class ZenToLegacyConverter
     private readonly FZenPackageContext? _context;
     private readonly ScriptObjectsDatabase? _scriptObjects;
     private readonly ulong _packageId;
+    private readonly int _sourceContainerIndex = -1; // Container that provided this package's ExportBundleData
     
     // Legacy package being built
     private readonly LegacyPackageBuilder _builder;
@@ -49,6 +50,7 @@ public class ZenToLegacyConverter
         _context = context;
         _packageId = packageId;
         _scriptObjects = context.ScriptObjects;
+        _sourceContainerIndex = context.GetPackageContainerIndex(packageId);
         
         var cached = context.GetCachedPackage(packageId);
         if (cached == null)
@@ -87,14 +89,15 @@ public class ZenToLegacyConverter
         
         var bundle = SerializeAsset();
         
-        // Extract bulk data from IoStore if available
+        // Extract bulk data from the SAME container that provided the ExportBundleData.
+        // This prevents extracting the game's .ubulk when a mod texture has no mipmaps.
         if (!skipBulkData && _context != null && _packageId != 0)
         {
-            byte[]? bulkData = _context.ReadBulkData(_packageId);
+            byte[]? bulkData = _context.ReadBulkData(_packageId, _sourceContainerIndex);
             if (bulkData != null && bulkData.Length > 0)
             {
                 bundle.BulkData = bulkData;
-                Console.Error.WriteLine($"[ZenToLegacy] Extracted {bulkData.Length} bytes of bulk data");
+                Console.Error.WriteLine($"[ZenToLegacy] Extracted {bulkData.Length} bytes of bulk data from container {_sourceContainerIndex}");
             }
         }
         

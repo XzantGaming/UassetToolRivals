@@ -160,7 +160,7 @@ public class IoStoreReader : IDisposable
     /// <summary>
     /// Parse AES key from hex string
     /// </summary>
-    private static byte[] ParseAesKey(string hex)
+    internal static byte[] ParseAesKey(string hex)
     {
         hex = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex[2..] : hex;
         byte[] bytes = new byte[hex.Length / 2];

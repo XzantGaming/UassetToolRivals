@@ -68,6 +68,7 @@ public partial class Program
                 "to_json" => CliToJson(args),
                 "dump_zen_from_game" => CliDumpZenFromGame(args),
                 "clone_mod_iostore" => CliCloneModIoStore(args),
+                "list_iostore" => CliListIoStore(args),
                 "extract_pak" => CliExtractPak(args),
                 "niagara_poc" => CliNiagaraPoc(args),
                 "niagara_details" => CliNiagaraDetails(args),
@@ -126,6 +127,7 @@ public partial class Program
         Console.WriteLine("    recompress_iostore <utoc_path>           - Recompress IoStore with Oodle");
         Console.WriteLine("    cityhash <path_string>                   - Calculate CityHash64 for a path");
         Console.WriteLine("    clone_mod_iostore <utoc> <output>        - Clone/repackage a mod IoStore");
+        Console.WriteLine("    list_iostore <utoc_path> [--aes <key>]   - List IoStore contents with ubulk status");
         Console.WriteLine();
         Console.WriteLine("  Other:");
         Console.WriteLine();
@@ -4475,6 +4477,140 @@ public partial class Program
         }
     }
     
+    /// <summary>
+    /// List IoStore contents showing which packages have accompanying BulkData (.ubulk).
+    /// </summary>
+    private static int CliListIoStore(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool list_iostore <utoc_path_or_dir> [--aes <key>] [--filter <pattern>]");
+            Console.Error.WriteLine("Lists all packages in an IoStore with their chunk types (ExportBundleData, BulkData, etc.)");
+            return 1;
+        }
+
+        string inputPath = args[1];
+        string? aesKey = null;
+        string? filterPattern = null;
+
+        for (int i = 2; i < args.Length; i++)
+        {
+            if ((args[i] == "--aes" || args[i] == "--aes-key") && i + 1 < args.Length)
+                aesKey = args[++i];
+            else if (args[i] == "--filter" && i + 1 < args.Length)
+                filterPattern = args[++i];
+        }
+
+        try
+        {
+            // Collect utoc files
+            var utocFiles = new List<string>();
+            if (Directory.Exists(inputPath))
+            {
+                utocFiles.AddRange(Directory.GetFiles(inputPath, "*.utoc", SearchOption.TopDirectoryOnly));
+            }
+            else if (File.Exists(inputPath) && inputPath.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase))
+            {
+                utocFiles.Add(inputPath);
+            }
+            else
+            {
+                Console.Error.WriteLine($"Not found: {inputPath}");
+                return 1;
+            }
+
+            foreach (var utocPath in utocFiles)
+            {
+                Console.WriteLine($"=== {Path.GetFileName(utocPath)} ===");
+
+                IoStore.IoStoreReader reader;
+                if (!string.IsNullOrEmpty(aesKey))
+                    reader = new IoStore.IoStoreReader(utocPath, IoStore.IoStoreReader.ParseAesKey(aesKey));
+                else
+                    reader = new IoStore.IoStoreReader(utocPath, (byte[]?)null);
+
+                // Group chunks by package ID
+                var packageChunks = new Dictionary<ulong, List<IoStore.FIoChunkId>>();
+                foreach (var chunk in reader.GetChunks())
+                {
+                    if (!packageChunks.ContainsKey(chunk.Id))
+                        packageChunks[chunk.Id] = new List<IoStore.FIoChunkId>();
+                    packageChunks[chunk.Id].Add(chunk);
+                }
+
+                int totalPackages = 0;
+                int withBulk = 0;
+                int withOptionalBulk = 0;
+                int withoutBulk = 0;
+
+                foreach (var (packageId, chunks) in packageChunks.OrderBy(kvp => kvp.Key))
+                {
+                    bool hasExportBundle = chunks.Any(c => c.GetChunkType() == IoStore.EIoChunkType.ExportBundleData);
+                    if (!hasExportBundle) continue; // Skip non-package chunks (ContainerHeader, ScriptObjects, etc.)
+
+                    string? path = reader.GetChunkPath(chunks.First(c => c.GetChunkType() == IoStore.EIoChunkType.ExportBundleData));
+                    if (path == null) path = $"<unknown:{packageId:X16}>";
+
+                    if (filterPattern != null && !path.Contains(filterPattern, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    totalPackages++;
+
+                    bool hasBulk = chunks.Any(c => c.GetChunkType() == IoStore.EIoChunkType.BulkData);
+                    bool hasOptBulk = chunks.Any(c => c.GetChunkType() == IoStore.EIoChunkType.OptionalBulkData);
+                    bool hasMemMapped = chunks.Any(c => c.GetChunkType() == IoStore.EIoChunkType.MemoryMappedBulkData);
+
+                    if (hasBulk) withBulk++;
+                    else if (hasOptBulk) withOptionalBulk++;
+                    else withoutBulk++;
+
+                    // Build chunk type summary
+                    var typeFlags = new List<string>();
+                    if (hasBulk) typeFlags.Add(".ubulk");
+                    if (hasOptBulk) typeFlags.Add(".uptnl");
+                    if (hasMemMapped) typeFlags.Add(".m.ubulk");
+
+                    string bulkStatus = typeFlags.Count > 0 ? $" [{string.Join(", ", typeFlags)}]" : " [no bulk]";
+
+                    // Get sizes
+                    var exportChunk = chunks.First(c => c.GetChunkType() == IoStore.EIoChunkType.ExportBundleData);
+                    int exportSize = 0;
+                    try { exportSize = reader.ReadChunk(exportChunk).Length; } catch { }
+
+                    int bulkSize = 0;
+                    if (hasBulk)
+                    {
+                        foreach (var bc in chunks.Where(c => c.GetChunkType() == IoStore.EIoChunkType.BulkData))
+                        {
+                            try { bulkSize += reader.ReadChunk(bc).Length; } catch { }
+                        }
+                    }
+
+                    string sizeInfo = hasBulk
+                        ? $"export={exportSize:N0}b bulk={bulkSize:N0}b"
+                        : $"export={exportSize:N0}b";
+
+                    Console.WriteLine($"  {path}{bulkStatus}  ({sizeInfo})");
+                }
+
+                Console.WriteLine();
+                Console.WriteLine($"  Summary: {totalPackages} packages, {withBulk} with .ubulk, {withOptionalBulk} with .uptnl, {withoutBulk} without bulk data");
+                Console.WriteLine();
+
+                reader.Dispose();
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+                Console.Error.WriteLine(ex.StackTrace);
+            return 1;
+        }
+    }
+
     /// <summary>
     /// Clone packages directly from game IoStore to create a mod IoStore.
     /// This preserves the exact Zen package structure without going through legacy conversion.
