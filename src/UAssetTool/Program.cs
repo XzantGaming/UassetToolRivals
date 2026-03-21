@@ -5202,16 +5202,13 @@ public partial class Program
             byte[]? aesKey = ParseAesKeyOrDefault(aesKeyHex);
             using var reader = new IoStore.IoStoreReader(utocPath, aesKey);
             
-            // Get all chunks and their paths
+            // Get all chunks and their paths, resolved to Marvel/Content/ format
             var chunks = reader.GetChunks()
-                .Select((chunkId, idx) => new Dictionary<string, object?>
-                {
-                    ["index"] = idx,
-                    ["chunk_type"] = chunkId.ChunkType.ToString(),
-                    ["path"] = reader.GetChunkPath(chunkId)
-                })
-                .Where(c => c["path"] != null) // Only include chunks with paths
+                .Select((chunkId, idx) => new { Index = idx, ChunkType = chunkId.ChunkType.ToString(), Path = reader.GetChunkPath(chunkId) })
+                .Where(c => c.Path != null)
                 .ToList();
+            
+            var resolvedPaths = chunks.Select(c => ResolveGamePathToContent(c.Path!)).ToList();
             
             return new UAssetResponse
             {
@@ -5221,7 +5218,7 @@ public partial class Program
                 {
                     ["package_count"] = chunks.Count,
                     ["container_name"] = reader.ContainerName,
-                    ["files"] = chunks.Select(c => c["path"]).ToList()
+                    ["files"] = resolvedPaths
                 }
             };
         }
@@ -5248,6 +5245,32 @@ public partial class Program
         return bytes;
     }
     
+    /// <summary>
+    /// Resolve a game path to Marvel/Content/ format for on-disk folders and display.
+    /// Handles:
+    ///   ../../../Marvel/Content/X  → Marvel/Content/X
+    ///   /Game/X                    → Marvel/Content/X
+    ///   Marvel/Content/X           → Marvel/Content/X (no change)
+    /// </summary>
+    private static string ResolveGamePathToContent(string path)
+    {
+        // Strip leading ../../../ (mount point prefix)
+        string p = path;
+        while (p.StartsWith("../"))
+            p = p.Substring(3);
+        
+        // Convert /Game/X → Marvel/Content/X
+        if (p.StartsWith("/Game/"))
+            p = "Marvel/Content" + p.Substring(5);
+        else if (p.StartsWith("Game/"))
+            p = "Marvel/Content/" + p.Substring(5);
+        
+        // Strip leading /
+        p = p.TrimStart('/');
+        
+        return p;
+    }
+
     /// <summary>
     /// Check if an IoStore container is compressed
     /// </summary>
@@ -5450,11 +5473,8 @@ public partial class Program
                             relPath = "/Game" + relPath.Substring(contentIdx + "/Content".Length);
                     }
                     
-                    // Remove /Game/ prefix
-                    if (relPath.StartsWith("/Game/"))
-                        relPath = relPath.Substring(6);
-                    else if (relPath.StartsWith("/"))
-                        relPath = relPath.Substring(1);
+                    // Resolve /Game/ to Marvel/Content/ for on-disk folder structure
+                    relPath = ResolveGamePathToContent(relPath);
                     
                     relPath = relPath.Replace('/', Path.DirectorySeparatorChar);
                     if (!relPath.EndsWith(".uasset"))
@@ -5725,6 +5745,9 @@ public partial class Program
             // Create companion PAK with chunknames
             IoStore.ChunkNamesPakWriter.Create(pakPath, filePaths, mount, 0, aesKey);
             
+            // Resolve file paths to Marvel/Content/ format for the app
+            var resolvedFilePaths = filePaths.Select(p => ResolveGamePathToContent(p)).ToList();
+            
             return new UAssetResponse
             {
                 Success = true,
@@ -5736,6 +5759,7 @@ public partial class Program
                     ["pak_path"] = pakPath,
                     ["converted_count"] = converted,
                     ["file_count"] = filePaths.Count,
+                    ["file_paths"] = resolvedFilePaths,
                     ["errors"] = errors.Count > 0 ? errors : null
                 }
             };
