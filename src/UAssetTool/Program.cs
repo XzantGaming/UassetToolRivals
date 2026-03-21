@@ -508,7 +508,7 @@ public partial class Program
         string? pakAesKey = null;
         // Marvel Rivals AES key for obfuscation
         const string MARVEL_RIVALS_AES_KEY = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
-        var uassetFiles = new List<(string path, string? rootDir)>();
+        var uassetFiles = new List<string>();
         var tempDirsToCleanup = new List<string>();
 
         for (int i = 2; i < args.Length; i++)
@@ -577,7 +577,7 @@ public partial class Program
                     var dirFiles = Directory.GetFiles(tempDir, "*.uasset", SearchOption.AllDirectories);
                     foreach (var f in dirFiles)
                     {
-                        uassetFiles.Add((Path.GetFullPath(f), tempDir));
+                        uassetFiles.Add(Path.GetFullPath(f));
                     }
                     Console.Error.WriteLine($"[CreateModIoStore]   Found {dirFiles.Length} .uasset files");
                 }
@@ -588,16 +588,15 @@ public partial class Program
             }
             else if (args[i].EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && File.Exists(args[i]))
             {
-                uassetFiles.Add((Path.GetFullPath(args[i]), null));
+                uassetFiles.Add(Path.GetFullPath(args[i]));
             }
             else if (Directory.Exists(args[i]))
             {
                 // Support directory input - recursively find all .uasset files
-                string rootDir = Path.GetFullPath(args[i]);
                 var dirFiles = Directory.GetFiles(args[i], "*.uasset", SearchOption.AllDirectories);
                 foreach (var f in dirFiles)
                 {
-                    uassetFiles.Add((Path.GetFullPath(f), rootDir));
+                    uassetFiles.Add(Path.GetFullPath(f));
                 }
                 Console.Error.WriteLine($"Found {dirFiles.Length} .uasset files in directory: {args[i]}");
             }
@@ -636,31 +635,13 @@ public partial class Program
             int processedCount = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            Parallel.ForEach(uassetFiles, new ParallelOptions { MaxDegreeOfParallelism = threadCount }, fileEntry =>
+            Parallel.ForEach(uassetFiles, new ParallelOptions { MaxDegreeOfParallelism = threadCount }, uassetPath =>
             {
-                var (uassetPath, rootDir) = fileEntry;
                 string assetName = Path.GetFileNameWithoutExtension(uassetPath);
                 try
                 {
-                    // Compute overrideGamePath from file's relative position in input directory
-                    string? overrideGamePath = null;
-                    if (rootDir != null)
-                    {
-                        string relPath = Path.GetRelativePath(rootDir, uassetPath);
-                        // Remove .uasset extension and normalize separators
-                        relPath = Path.ChangeExtension(relPath, null).Replace('\\', '/');
-                        // Convert to /Game/... format: the file tree under the input dir
-                        // maps to the game's content structure
-                        overrideGamePath = "/Game/" + relPath;
-                    }
-
-                    byte[] zenData;
-                    string packagePath;
-                    ZenPackage.FZenPackage zenPackage;
-
-                    (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo,
-                        overrideGamePath: overrideGamePath);
+                    var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
+                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
 
                     byte[]? ubulkData = null;
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
@@ -5599,7 +5580,6 @@ public partial class Program
         try
         {
             // Collect all uasset files
-            string inputDirFull = Path.GetFullPath(inputDir);
             var uassetFiles = Directory.GetFiles(inputDir, "*.uasset", SearchOption.AllDirectories).ToList();
             
             if (uassetFiles.Count == 0)
@@ -5627,14 +5607,8 @@ public partial class Program
                 string assetName = Path.GetFileNameWithoutExtension(uassetPath);
                 try
                 {
-                    // Compute overrideGamePath from file's relative position in input directory
-                    string relPath = Path.GetRelativePath(inputDirFull, Path.GetFullPath(uassetPath));
-                    relPath = Path.ChangeExtension(relPath, null).Replace('\\', '/');
-                    string overrideGamePath = "/Game/" + relPath;
-
                     var (zenData, packagePath, zenPackage) = ZenPackage.ZenConverter.ConvertLegacyToZenFull(
-                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo,
-                        overrideGamePath: overrideGamePath);
+                        uassetPath, containerVersion: ZenPackage.EIoContainerHeaderVersion.NoExportInfo);
                     
                     byte[]? ubulkData = null;
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");

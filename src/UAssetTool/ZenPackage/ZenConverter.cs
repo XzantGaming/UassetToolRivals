@@ -89,10 +89,9 @@ public class ZenConverter
     /// </summary>
     public static (byte[] ZenData, string PackagePath, FZenPackage ZenPackage) ConvertLegacyToZenFull(
         string uassetPath,
-        EIoContainerHeaderVersion containerVersion = EIoContainerHeaderVersion.NoExportInfo,
-        string? overrideGamePath = null)
+        EIoContainerHeaderVersion containerVersion = EIoContainerHeaderVersion.NoExportInfo)
     {
-        var zenData = ConvertLegacyToZenInternal(uassetPath, containerVersion, out string packagePath, out FZenPackage zenPackage, overrideGamePath);
+        var zenData = ConvertLegacyToZenInternal(uassetPath, containerVersion, out string packagePath, out FZenPackage zenPackage);
         return (zenData, packagePath, zenPackage);
     }
     
@@ -110,8 +109,7 @@ public class ZenConverter
         string uassetPath,
         EIoContainerHeaderVersion containerVersion,
         out string packagePath,
-        out FZenPackage zenPackageOut,
-        string? overrideGamePath = null)
+        out FZenPackage zenPackageOut)
     {
         // Try to load script objects database if not already loaded
         lock (_scriptObjectsLock)
@@ -134,41 +132,30 @@ public class ZenConverter
         // The Zen package flags will be set to match the source asset's format
         // Verbose logging disabled for parallel performance
 
-        // Extract package path from asset's FolderName or overrideGamePath
-        // overrideGamePath is the /Game/... format path derived from the file's position
-        // in the input directory structure (e.g. "/Game/Marvel/Characters/1015/1015300/Textures/T_1015300_Body_D")
-        // FolderName from modder-cooked assets is often just the asset name, not a valid path.
+        // Extract package path from asset's FolderName
         string folderName = asset.FolderName?.Value ?? "";
         string assetName = Path.GetFileNameWithoutExtension(uassetPath);
         
-        // Determine the authoritative game path
-        // Priority: overrideGamePath > FolderName (if it looks like a real path) > fallback
+        // Determine the game path from FolderName
         string gamePath;
-        if (!string.IsNullOrEmpty(overrideGamePath))
+        string normalizedFolder = NormalizePath(folderName);
+        if (normalizedFolder.StartsWith("/Game/"))
         {
-            gamePath = overrideGamePath;
+            gamePath = normalizedFolder;
+        }
+        else if (normalizedFolder.StartsWith("/Marvel/Content/"))
+        {
+            gamePath = "/Game" + normalizedFolder.Substring("/Marvel/Content".Length);
+        }
+        else if (normalizedFolder.Contains("/"))
+        {
+            // Has path separators, treat as a path
+            gamePath = normalizedFolder;
         }
         else
         {
-            string normalizedFolder = NormalizePath(folderName);
-            if (normalizedFolder.StartsWith("/Game/"))
-            {
-                gamePath = normalizedFolder;
-            }
-            else if (normalizedFolder.StartsWith("/Marvel/Content/"))
-            {
-                gamePath = "/Game" + normalizedFolder.Substring("/Marvel/Content".Length);
-            }
-            else if (normalizedFolder.Contains("/"))
-            {
-                // Has path separators, treat as a path
-                gamePath = normalizedFolder;
-            }
-            else
-            {
-                // FolderName is just the asset name or empty — no valid path
-                gamePath = "/Game/" + assetName;
-            }
+            // FolderName is just the asset name or empty — no valid path
+            gamePath = "/Game/" + assetName;
         }
         
         // Ensure gamePath ends with asset name
@@ -370,9 +357,7 @@ public class ZenConverter
         };
 
         // Build name map from legacy asset (includes package name)
-        // Pass whether the game path was derived from file system (overrideGamePath) vs FolderName.
-        // When from file system, skip FName stripping to avoid false matches against unrelated NameMap entries.
-        BuildNameMap(asset, zenPackage, gamePath, overrideGamePath != null);
+        BuildNameMap(asset, zenPackage, gamePath);
 
         // Set package name and flags from legacy asset
         SetPackageSummary(asset, zenPackage);
@@ -660,7 +645,7 @@ public class ZenConverter
         return -1; // Not found
     }
 
-    private static void BuildNameMap(UAsset asset, FZenPackage zenPackage, string gamePath, bool pathFromFileSystem)
+    private static void BuildNameMap(UAsset asset, FZenPackage zenPackage, string gamePath)
     {
         // Add all names from legacy name map
         // NOTE: We cannot filter names here because the export data contains FName references
@@ -705,10 +690,9 @@ public class ZenConverter
             {
                 // Full asset name found — use it with Number=0
             }
-            else if (!pathFromFileSystem)
+            else
             {
-                // FName stripping: only for round-trip assets (path from FolderName).
-                // For modder-cooked assets (path from file system), skip to avoid false matches.
+                // FName stripping: try to find the FName base name with numeric suffix.
                 string fnameBase = assetName;
                 int fnameNumber = 0;
                 int lastUnderscore = assetName.LastIndexOf('_');
