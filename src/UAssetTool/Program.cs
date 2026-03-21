@@ -726,7 +726,6 @@ public partial class Program
 
                     var packageId = IoStore.FPackageId.FromName(gamePackagePath);
                     var chunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.ExportBundleData);
-                    Console.Error.WriteLine($"[DIAG] Package: {assetName} path={gamePackagePath} pkgId=0x{packageId.Value:X16}");
 
                     // Create store entry with imported packages from the Zen package
                     var storeEntry = new IoStore.StoreEntry
@@ -735,16 +734,6 @@ public partial class Program
                         ExportBundleCount = 1,
                         LoadOrder = 0
                     };
-
-                    // DIAG: Show imported packages for assets with imports
-                    if (zenPackage.ImportedPackages.Count > 0)
-                    {
-                        for (int ip = 0; ip < zenPackage.ImportedPackages.Count; ip++)
-                        {
-                            string ipName = ip < zenPackage.ImportedPackageNames.Count ? zenPackage.ImportedPackageNames[ip] : "?";
-                            Console.Error.WriteLine($"[DIAG]   ImportedPkg[{ip}]: 0x{zenPackage.ImportedPackages[ip]:X16} = {ipName}");
-                        }
-                    }
 
                     foreach (ulong importedPkgId in zenPackage.ImportedPackages)
                     {
