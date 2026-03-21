@@ -663,70 +663,21 @@ public class ZenConverter
         string assetName = Path.GetFileNameWithoutExtension(asset.FilePath ?? "Unknown");
         
         // The Zen summary Name field indexes into the NameMap.
-        // Game-extracted assets store the FName BASE name (without numeric suffix) in the NameMap,
-        // e.g. "MI_102993_Trail_13" for asset "MI_102993_Trail_13_301" (where _301 is FName Number).
-        // We must NOT add the full package path as a new NameMap entry — that causes extra names
-        // on round-trips.
+        // CUE4Parse (FModel) uses Summary.Name to compute FPackageId.FromName(Name) and look up
+        // the store entry in the container header. If Summary.Name resolves to a SHORT name
+        // (e.g. "SK_1044_1044001") instead of the full path ("/Game/.../SK_1044_1044001"),
+        // the PackageId won't match the container header's PackageId → no imported packages
+        // → blank materials in FModel's mesh preview.
         //
-        // Strategy: check in order:
-        // 1. Full package path — safest, avoids false matches against property names
-        // 2. Full asset name (e.g. "MI_Sword_6_602_601") — for round-trip names without FName number split
-        // 3. FName base name (e.g. "MI_102993_Trail_13") — for round-trip names with numeric suffix
-        //    ONLY when path came from FolderName (round-trip). When path came from file system,
-        //    the NameMap may contain coincidental matches (e.g. "SK_1015" from asset data)
-        //    that are NOT the FName base of the package name.
-        // 4. Only add full path as last resort
+        // Always use the full package path for Summary.Name.
+        // If already in the NameMap, reuse it. Otherwise add it.
         int packageNameIndex = zenPackage.NameMap.IndexOf(packageName);
         uint packageNameNumber = 0;
-        if (packageNameIndex >= 0)
+        if (packageNameIndex < 0)
         {
-            // Full package path found — use it with Number=0 (safest)
-        }
-        else
-        {
-            // Full path not in NameMap — try asset name (round-trip scenario)
-            packageNameIndex = zenPackage.NameMap.IndexOf(assetName);
-            if (packageNameIndex >= 0)
-            {
-                // Full asset name found — use it with Number=0
-            }
-            else
-            {
-                // FName stripping: try to find the FName base name with numeric suffix.
-                string fnameBase = assetName;
-                int fnameNumber = 0;
-                int lastUnderscore = assetName.LastIndexOf('_');
-                if (lastUnderscore > 0 && lastUnderscore < assetName.Length - 1)
-                {
-                    string suffix = assetName.Substring(lastUnderscore + 1);
-                    if (suffix.Length == 1 || suffix[0] != '0') // same zero-padding rule as FName
-                    {
-                        if (int.TryParse(suffix, out int suffixVal))
-                        {
-                            fnameBase = assetName.Substring(0, lastUnderscore);
-                            fnameNumber = suffixVal + 1; // FName Number = suffix + 1
-                        }
-                    }
-                }
-                
-                // Only use fnameBase if we actually detected a numeric suffix (fnameNumber > 0)
-                if (fnameNumber > 0)
-                {
-                    packageNameIndex = zenPackage.NameMap.IndexOf(fnameBase);
-                    if (packageNameIndex >= 0)
-                    {
-                        // FName base found — use it with the computed Number
-                        packageNameNumber = (uint)fnameNumber;
-                    }
-                }
-            }
-            
-            if (packageNameIndex < 0)
-            {
-                // Neither present — add the full path (new asset with no prior NameMap entry)
-                packageNameIndex = zenPackage.NameMap.Count;
-                zenPackage.NameMap.Add(packageName);
-            }
+            // Full path not in NameMap — add it
+            packageNameIndex = zenPackage.NameMap.Count;
+            zenPackage.NameMap.Add(packageName);
         }
         
         zenPackage.PackageName = packageName;
