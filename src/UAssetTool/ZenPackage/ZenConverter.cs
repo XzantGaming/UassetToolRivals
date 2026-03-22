@@ -174,8 +174,6 @@ public class ZenConverter
             packagePath = gamePath.TrimStart('/');
         }
         
-        // Verbose logging disabled for parallel performance
-
         string uexpPath = uassetPath.Replace(".uasset", ".uexp");
         if (!File.Exists(uexpPath))
         {
@@ -1318,8 +1316,6 @@ public class ZenConverter
         // Each FBulkDataMapEntry is 32 bytes: serial_offset(8) + duplicate_serial_offset(8) + serial_size(8) + flags(4) + pad(4)
         // 
         // IMPORTANT: If we have a .ubulk file, we need to validate/fix the offsets to match the actual file
-        // For inline data (no .ubulk), offsets need to be transformed from legacy to zen coordinate system
-        List<long>? inlineBulkDataOffsetPositions = null;
         long ubulkSize = 0;
         string ubulkPath = Path.ChangeExtension(asset.FilePath, ".ubulk");
         if (File.Exists(ubulkPath))
@@ -1375,20 +1371,18 @@ public class ZenConverter
         else if (asset.DataResources != null && asset.DataResources.Count > 0)
         {
             // No .ubulk file but we have DataResources (inline texture data).
-            // IMPORTANT: Legacy DataResources.SerialOffset is absolute from .uasset start.
-            // In the Zen ExportBundle chunk, data layout is [ZenHeader][ExportData].
-            // BulkDataMap.SerialOffset must be absolute from Zen chunk start.
-            // We need: zenOffset = legacyOffset - cookedHeaderSize + zenHeaderSize
-            // But zenHeaderSize isn't known yet, so write placeholders and patch later.
+            // Write offsets as-is from legacy DataResources (same as retoc).
+            // SerialOffset is relative to export data start, which is the same
+            // coordinate system used by both legacy and zen formats.
+            // The game engine reads inline bulk data sequentially from the export
+            // stream and does NOT use BulkDataMap.SerialOffset to seek.
             long bulkDataMapSize = asset.DataResources.Count * 32;
             writer.Write(bulkDataMapSize);
             
-            inlineBulkDataOffsetPositions = new List<long>();
             foreach (var resource in asset.DataResources)
             {
-                inlineBulkDataOffsetPositions.Add(writer.BaseStream.Position); // track SerialOffset position
-                writer.Write(resource.SerialOffset); // placeholder - will be patched
-                writer.Write(resource.DuplicateSerialOffset); // DuplicateSerialOffset (-1 typically)
+                writer.Write(resource.SerialOffset);
+                writer.Write(resource.DuplicateSerialOffset);
                 writer.Write(resource.SerialSize);
                 writer.Write((uint)resource.LegacyBulkDataFlags);
                 writer.Write((uint)0); // padding
@@ -1468,24 +1462,6 @@ public class ZenConverter
         // CookedHeaderSize = the legacy .uasset file size
         // This is what retoc uses and what the engine expects for serial offset calculations
         int cookedHeaderSize = (int)new FileInfo(asset.FilePath).Length;
-
-        // Patch inline BulkDataMap offsets now that we know zenHeaderSize.
-        // Legacy SerialOffset is absolute from .uasset start (= cookedHeaderSize + offset_in_uexp).
-        // Zen SerialOffset must be absolute from chunk start (= zenHeaderSize + offset_in_uexp).
-        // Transform: zenOffset = legacyOffset - cookedHeaderSize + zenHeaderSize
-        if (inlineBulkDataOffsetPositions != null)
-        {
-            long savedPos = writer.BaseStream.Position;
-            int offsetDelta = zenHeaderSize - cookedHeaderSize;
-            foreach (long pos in inlineBulkDataOffsetPositions)
-            {
-                writer.BaseStream.Seek(pos, SeekOrigin.Begin);
-                long legacyOffset = new BinaryReader(writer.BaseStream).ReadInt64();
-                writer.BaseStream.Seek(pos, SeekOrigin.Begin);
-                writer.Write(legacyOffset + offsetDelta);
-            }
-            writer.BaseStream.Seek(savedPos, SeekOrigin.Begin);
-        }
 
         // Write the full .uexp data as export data (do NOT strip trailing PACKAGE_FILE_TAG)
         // retoc preserves the complete .uexp contents including the 4-byte tag
