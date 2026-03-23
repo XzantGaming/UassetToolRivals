@@ -73,11 +73,26 @@ public class FZenPackageContext : IDisposable
     /// <summary>
     /// Load an IoStore container with priority - packages in this container will override
     /// any previously loaded packages with the same ID. Used for mod containers.
-    /// Mod containers are loaded WITHOUT encryption (no AES key) - obfuscated mods require passcode.
+    /// Tries without encryption first; if the container is obfuscated (encrypted), 
+    /// automatically retries with the AES key.
     /// </summary>
     public void LoadContainerWithPriority(string utocPath)
     {
-        LoadContainerInternal(utocPath, overridePriority: true, useEncryption: false);
+        // First try without encryption (normal mods)
+        var testReader = new IoStore.IoStoreReader(utocPath, (byte[]?)null);
+        if (testReader.Toc.IsEncrypted && _aesKey != null)
+        {
+            // Obfuscated mod - reload with AES key for block decryption
+            testReader.Dispose();
+            Console.Error.WriteLine($"[Context] Detected obfuscated mod, loading with AES key...");
+            LoadContainerInternal(utocPath, overridePriority: true, useEncryption: true);
+        }
+        else
+        {
+            // Normal unencrypted mod - use the already-opened reader
+            testReader.Dispose();
+            LoadContainerInternal(utocPath, overridePriority: true, useEncryption: false);
+        }
     }
     
     private void LoadContainerInternal(string utocPath, bool overridePriority, bool useEncryption = true)
@@ -91,15 +106,19 @@ public class FZenPackageContext : IDisposable
         _containers.Add(reader);
         
         // Determine container version from TOC version
-        if (reader.Toc.Version >= EIoStoreTocVersion.PerfectHashWithOverflow)
-            ContainerHeaderVersion = EIoContainerHeaderVersion.NoExportInfo;
-        else if (reader.Toc.Version >= EIoStoreTocVersion.PartitionSize)
-            ContainerHeaderVersion = EIoContainerHeaderVersion.LocalizedPackages;
-        else
-            ContainerHeaderVersion = EIoContainerHeaderVersion.Initial;
+        // Only update from non-priority (game) containers, since mod containers
+        // may have been created with older tool versions that wrote a different TOC version
+        // but still used NoExportInfo format for the actual zen package data.
+        if (!overridePriority)
+        {
+            if (reader.Toc.Version >= EIoStoreTocVersion.PerfectHashWithOverflow)
+                ContainerHeaderVersion = EIoContainerHeaderVersion.NoExportInfo;
+            else if (reader.Toc.Version >= EIoStoreTocVersion.PartitionSize)
+                ContainerHeaderVersion = EIoContainerHeaderVersion.LocalizedPackages;
+            else
+                ContainerHeaderVersion = EIoContainerHeaderVersion.Initial;
+        }
         
-        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-            Console.Error.WriteLine($"[Context] TOC version: {reader.Toc.Version}, Container header version: {ContainerHeaderVersion}");
         
         // Read ContainerHeader chunk to get global name map (for versions > Initial)
         if (ContainerHeaderVersion > EIoContainerHeaderVersion.Initial)
@@ -115,14 +134,10 @@ public class FZenPackageContext : IDisposable
                         if (nameMap.Count > 0)
                         {
                             _containerNameMaps[containerIndex] = nameMap;
-                            if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                                Console.Error.WriteLine($"[Context] Loaded {nameMap.Count} names from ContainerHeader");
                         }
                     }
                     catch (Exception ex)
                     {
-                        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
-                            Console.Error.WriteLine($"[Context] Failed to parse ContainerHeader: {ex.Message}");
                     }
                     break;
                 }
@@ -144,7 +159,6 @@ public class FZenPackageContext : IDisposable
             
             // Always allow later containers to override earlier ones
             // In IoStore, later-loaded containers have higher priority (matching game engine)
-            if (!exists || true)
             {
                 if (exists)
                 {
@@ -172,7 +186,6 @@ public class FZenPackageContext : IDisposable
         
         string priorityStr = overridePriority ? " [PRIORITY]" : "";
         string overrideStr = overriddenPackages > 0 ? $", {overriddenPackages} overridden" : "";
-        Console.Error.WriteLine($"[Context] Loaded container{priorityStr}: {reader.ContainerName} ({newPackages} new packages{overrideStr}, {_packageIdToChunk.Count} total)");
     }
     
     /// <summary>
@@ -326,7 +339,6 @@ public class FZenPackageContext : IDisposable
         if (File.Exists(scriptObjectsPath))
         {
             ScriptObjects = ScriptObjectsDatabase.Load(scriptObjectsPath);
-            Console.Error.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects");
         }
     }
 
@@ -349,12 +361,10 @@ public class FZenPackageContext : IDisposable
                 {
                     byte[] data = reader.ReadChunk(chunk);
                     ScriptObjects = ScriptObjectsDatabase.Load(data);
-                    Console.Error.WriteLine($"[Context] Loaded {ScriptObjects.Count} script objects from container");
                     return;
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[Context] Failed to load script objects: {ex.Message}");
                 }
             }
         }
@@ -385,6 +395,7 @@ public class FZenPackageContext : IDisposable
             {
                 var reader = _containers[location.ContainerIndex];
                 byte[] rawData = reader.ReadChunk(location.ChunkId);
+                
                 
                 var header = FZenPackageHeader.Deserialize(rawData, ContainerHeaderVersion);
                 
@@ -568,7 +579,6 @@ public class FZenPackageContext : IDisposable
             offset += data.Length;
         }
         
-        Console.Error.WriteLine($"[Context] Combined {bulkChunks.Count} BulkData chunks into {totalSize} bytes");
         return result;
     }
 
@@ -668,7 +678,6 @@ public class FZenPackageContext : IDisposable
             progress?.Report((count * 100) / total);
         }
         
-        Console.Error.WriteLine($"[Context] Preloaded {count} packages");
     }
 
     /// <summary>

@@ -97,7 +97,6 @@ public class ZenToLegacyConverter
             if (bulkData != null && bulkData.Length > 0)
             {
                 bundle.BulkData = bulkData;
-                Console.Error.WriteLine($"[ZenToLegacy] Extracted {bulkData.Length} bytes of bulk data from container {_sourceContainerIndex}");
             }
         }
         
@@ -308,11 +307,6 @@ public class ZenToLegacyConverter
             {
                 objectName = (int)zenExport.ObjectName.Index;
                 objectNameNumber = (int)zenExport.ObjectName.Number;
-                
-                if (debugMode && exportIndex < 20)
-                {
-                    Console.Error.WriteLine($"[DEBUG] Export[{exportIndex}]: ObjectName.Index={zenExport.ObjectName.Index}, Number={zenExport.ObjectName.Number}, Name=\"{_zenPackage.NameMap[(int)zenExport.ObjectName.Index]}\"");
-                }
             }
             else
             {
@@ -1168,12 +1162,6 @@ public class ZenToLegacyConverter
         
         string objectName = _scriptObjects.GetName(scriptObject.ObjectName);
         
-        if (_debugMode)
-        {
-            Console.Error.WriteLine($"[DEBUG] ResolveScriptImport: Index={import.Value:X16}");
-            Console.Error.WriteLine($"  ObjectName.Index={scriptObject.ObjectName.Index}, Type={scriptObject.ObjectName.Type}");
-            Console.Error.WriteLine($"  Resolved name='{objectName}'");
-        }
         
         if (scriptObject.OuterIndex.IsNull())
         {

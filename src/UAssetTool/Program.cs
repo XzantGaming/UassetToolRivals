@@ -75,6 +75,7 @@ public partial class Program
                 "niagara_edit" => CliNiagaraEdit(args),
                 "niagara_audit" => CliNiagaraAudit(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
+                "inject_texture" => CliInjectTexture(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -107,7 +108,10 @@ public partial class Program
         Console.WriteLine("  Asset Editing:");
         Console.WriteLine("    fix <uasset_path> [usmap_path]          - Fix SerializeSize for meshes");
         Console.WriteLine("    to_json <path> [usmap] [output_dir]     - Convert uasset to JSON (file or directory)");
-        Console.WriteLine("    from_json <path> <output> [usmap]         - Convert JSON back to uasset (file or directory)");
+        Console.WriteLine("    from_json <path> <output> [usmap]       - Convert JSON back to uasset (file or directory)");
+        Console.WriteLine("    inject_texture <base> <image> <output>  - Inject PNG/TGA/DDS into texture uasset");
+        Console.WriteLine("      Options: --format BC7|BC3|BC1|BGRA8   - Compression format (default: BC7)");
+        Console.WriteLine("               --no-mips                    - Don't generate mipmaps");
         Console.WriteLine();
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
@@ -4536,9 +4540,21 @@ public partial class Program
 
                 IoStore.IoStoreReader reader;
                 if (!string.IsNullOrEmpty(aesKey))
+                {
                     reader = new IoStore.IoStoreReader(utocPath, IoStore.IoStoreReader.ParseAesKey(aesKey));
+                }
                 else
+                {
+                    // Try without key first, auto-detect obfuscated containers
                     reader = new IoStore.IoStoreReader(utocPath, (byte[]?)null);
+                    if (reader.Toc.IsEncrypted)
+                    {
+                        // Obfuscated mod - reload with default Marvel Rivals AES key
+                        reader.Dispose();
+                        Console.Error.WriteLine("[ListIoStore] Detected obfuscated container, using game AES key...");
+                        reader = new IoStore.IoStoreReader(utocPath, IoStore.IoStoreReader.ParseAesKey("0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74"));
+                    }
+                }
 
                 // Group chunks by package ID
                 var packageChunks = new Dictionary<ulong, List<IoStore.FIoChunkId>>();
@@ -6420,6 +6436,66 @@ public partial class Program
         catch (Exception ex)
         {
             return new UAssetResponse { Success = false, Message = $"Failed to inspect Zen package: {ex.Message}" };
+        }
+    }
+    
+    private static int CliInjectTexture(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool inject_texture <base_uasset> <image_file> <output_uasset> [options]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --format <fmt>  Compression format: BC7, BC3, BC1, BC5, BC4, BGRA8 (default: BC7)");
+            Console.Error.WriteLine("  --no-mips       Don't generate mipmaps");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Supported image formats: PNG, TGA, DDS, BMP, JPEG");
+            return 1;
+        }
+        
+        string baseUasset = args[1];
+        string imageFile = args[2];
+        string outputPath = args[3];
+        
+        // Parse options
+        var format = Texture.TextureCompressionFormat.BC7;
+        bool generateMips = true;
+        
+        for (int i = 4; i < args.Length; i++)
+        {
+            if (args[i] == "--format" && i + 1 < args.Length)
+            {
+                format = Texture.TextureInjector.ParseFormat(args[++i]);
+            }
+            else if (args[i] == "--no-mips")
+            {
+                generateMips = false;
+            }
+        }
+        
+        Console.WriteLine($"Injecting texture...");
+        Console.WriteLine($"  Base: {baseUasset}");
+        Console.WriteLine($"  Image: {imageFile}");
+        Console.WriteLine($"  Output: {outputPath}");
+        Console.WriteLine($"  Format: {format}");
+        Console.WriteLine($"  Generate Mips: {generateMips}");
+        
+        var result = Texture.TextureInjector.Inject(baseUasset, imageFile, outputPath, format, generateMips);
+        
+        if (result.Success)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"Success!");
+            Console.WriteLine($"  Dimensions: {result.Width}x{result.Height}");
+            Console.WriteLine($"  Mip Count: {result.MipCount}");
+            Console.WriteLine($"  Pixel Format: {result.PixelFormat}");
+            Console.WriteLine($"  Total Data Size: {result.TotalDataSize:N0} bytes");
+            return 0;
+        }
+        else
+        {
+            Console.Error.WriteLine($"Failed: {result.ErrorMessage}");
+            return 1;
         }
     }
     
