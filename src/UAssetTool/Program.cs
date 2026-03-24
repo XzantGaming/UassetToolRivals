@@ -76,6 +76,7 @@ public partial class Program
                 "niagara_audit" => CliNiagaraAudit(args),
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
                 "inject_texture" => CliInjectTexture(args),
+                "extract_texture" => CliExtractTexture(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -112,6 +113,9 @@ public partial class Program
         Console.WriteLine("    inject_texture <base> <image> <output>  - Inject PNG/TGA/DDS into texture uasset");
         Console.WriteLine("      Options: --format BC7|BC3|BC1|BGRA8   - Compression format (default: BC7)");
         Console.WriteLine("               --no-mips                    - Don't generate mipmaps");
+        Console.WriteLine("    extract_texture <uasset> <output>       - Extract Texture2D to PNG/TGA/DDS/BMP");
+        Console.WriteLine("      Options: --format PNG|TGA|DDS|BMP     - Output format (default: PNG)");
+        Console.WriteLine("               --mip <index>                - Mip level to extract (default: 0)");
         Console.WriteLine();
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
@@ -1465,6 +1469,20 @@ public partial class Program
                     {
                         string outputBulkPath = Path.ChangeExtension(outputAssetPath, ".ubulk");
                         File.WriteAllBytes(outputBulkPath, legacyBundle.BulkData);
+                    }
+                    
+                    // Write optional bulk data (high-res texture mips) if present
+                    if (legacyBundle.OptionalBulkData != null && legacyBundle.OptionalBulkData.Length > 0)
+                    {
+                        string outputOptPath = Path.ChangeExtension(outputAssetPath, ".uptnl");
+                        File.WriteAllBytes(outputOptPath, legacyBundle.OptionalBulkData);
+                    }
+                    
+                    // Write memory-mapped bulk data if present
+                    if (legacyBundle.MemoryMappedBulkData != null && legacyBundle.MemoryMappedBulkData.Length > 0)
+                    {
+                        string outputMmapPath = Path.ChangeExtension(outputAssetPath, ".m.ubulk");
+                        File.WriteAllBytes(outputMmapPath, legacyBundle.MemoryMappedBulkData);
                     }
 
                     extractedPackages.Add(packageId);
@@ -6448,6 +6466,7 @@ public partial class Program
             Console.Error.WriteLine("Options:");
             Console.Error.WriteLine("  --format <fmt>  Compression format: BC7, BC3, BC1, BC5, BC4, BGRA8 (default: BC7)");
             Console.Error.WriteLine("  --no-mips       Don't generate mipmaps");
+            Console.Error.WriteLine("  --usmap <path>  Path to usmap file (required for game-extracted textures)");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Supported image formats: PNG, TGA, DDS, BMP, JPEG");
             return 1;
@@ -6460,6 +6479,7 @@ public partial class Program
         // Parse options
         var format = Texture.TextureCompressionFormat.BC7;
         bool generateMips = true;
+        string? usmapPath = null;
         
         for (int i = 4; i < args.Length; i++)
         {
@@ -6471,6 +6491,10 @@ public partial class Program
             {
                 generateMips = false;
             }
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
+            {
+                usmapPath = args[++i];
+            }
         }
         
         Console.WriteLine($"Injecting texture...");
@@ -6479,8 +6503,9 @@ public partial class Program
         Console.WriteLine($"  Output: {outputPath}");
         Console.WriteLine($"  Format: {format}");
         Console.WriteLine($"  Generate Mips: {generateMips}");
+        if (usmapPath != null) Console.WriteLine($"  Usmap: {usmapPath}");
         
-        var result = Texture.TextureInjector.Inject(baseUasset, imageFile, outputPath, format, generateMips);
+        var result = Texture.TextureInjector.Inject(baseUasset, imageFile, outputPath, format, generateMips, usmapPath);
         
         if (result.Success)
         {
@@ -6490,6 +6515,69 @@ public partial class Program
             Console.WriteLine($"  Mip Count: {result.MipCount}");
             Console.WriteLine($"  Pixel Format: {result.PixelFormat}");
             Console.WriteLine($"  Total Data Size: {result.TotalDataSize:N0} bytes");
+            return 0;
+        }
+        else
+        {
+            Console.Error.WriteLine($"Failed: {result.ErrorMessage}");
+            return 1;
+        }
+    }
+    
+    private static int CliExtractTexture(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool extract_texture <uasset_path> <output_path> [options]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --format <fmt>  Output format: PNG, TGA, DDS, BMP (default: PNG)");
+            Console.Error.WriteLine("  --mip <index>   Mip level to extract (default: 0 = largest)");
+            Console.Error.WriteLine("  --usmap <path>  Path to usmap file (required for game-extracted textures)");
+            return 1;
+        }
+        
+        string uassetPath = args[1];
+        string outputPath = args[2];
+        
+        // Parse options
+        var outputFormat = Texture.TextureOutputFormat.PNG;
+        int mipIndex = 0;
+        string? usmapPath = null;
+        
+        for (int i = 3; i < args.Length; i++)
+        {
+            if (args[i] == "--format" && i + 1 < args.Length)
+            {
+                outputFormat = Texture.TextureExtractor.ParseOutputFormat(args[++i]);
+            }
+            else if (args[i] == "--mip" && i + 1 < args.Length)
+            {
+                mipIndex = int.Parse(args[++i]);
+            }
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
+            {
+                usmapPath = args[++i];
+            }
+        }
+        
+        Console.WriteLine($"Extracting texture...");
+        Console.WriteLine($"  Input: {uassetPath}");
+        Console.WriteLine($"  Output: {outputPath}");
+        Console.WriteLine($"  Format: {outputFormat}");
+        Console.WriteLine($"  Mip: {mipIndex}");
+        if (usmapPath != null) Console.WriteLine($"  Usmap: {usmapPath}");
+        
+        var result = Texture.TextureExtractor.Extract(uassetPath, outputPath, outputFormat, mipIndex, usmapPath);
+        
+        if (result.Success)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"Success!");
+            Console.WriteLine($"  Dimensions: {result.Width}x{result.Height}");
+            Console.WriteLine($"  Mip Count: {result.MipCount}");
+            Console.WriteLine($"  Pixel Format: {result.PixelFormat}");
+            Console.WriteLine($"  Output: {result.OutputPath}");
             return 0;
         }
         else

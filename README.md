@@ -5,13 +5,16 @@ A CLI tool for parsing, editing, and converting Unreal Engine 5 assets. Built on
 ## Features
 
 - **IoStore Mod Creation** - Create IoStore mod bundles (`.utoc`/`.ucas`/`.pak`) from legacy assets or PAK files
-- **IoStore Extraction** - Extract game assets from IoStore containers to legacy `.uasset`/`.uexp` format
+- **IoStore Extraction** - Extract game assets from IoStore containers to legacy `.uasset`/`.uexp`/`.ubulk`/`.uptnl` format
 - **PAK Extraction** - Extract assets from legacy PAK files (Oodle, Zlib, Zstd, AES encryption)
 - **JSON Conversion** - Export `.uasset` to JSON and back for easy property editing
-- **NiagaraSystem Editing** - Modify particle effect colors with structured ShaderLUT parsing
+- **Texture Injection** - Inject PNG/TGA/DDS images into Texture2D assets with BC1/BC3/BC5/BC7 compression and mipmap generation
+- **Texture Extraction** - Extract Texture2D assets to PNG/TGA/DDS/BMP, including full-resolution mips from OptionalBulkData
+- **NiagaraSystem Editing** - Modify particle effect colors with structured ShaderLUT and ArrayColor parsing
 - **MaterialTag Injection** - Auto-inject per-slot gameplay tags from `MaterialTagAssetUserData` during mod creation
 - **StaticMesh Support** - ScreenSize expansion, unversioned property conversion, NavCollision handling
 - **Blueprint Analysis** - Scan ChildBP assets for IsEnemy parameter redirects
+- **IoStore Inspection** - List packages and chunk types in IoStore containers
 - **GUI Backend** - JSON stdin/stdout API for frontend integration
 
 ---
@@ -155,6 +158,13 @@ UAssetTool extract_iostore_legacy "C:/Game/Paks" "output_dir" --filter Character
 - `--global <path>` - Path to global.utoc for script objects
 - `--container <path>` - Additional container for cross-package imports
 
+**Output files per package:**
+- `.uasset` - Package header (name map, imports, exports, data resources)
+- `.uexp` - Export data (properties + binary extras)
+- `.ubulk` - External bulk data (texture mips 1-N, mesh LOD data)
+- `.uptnl` - Optional bulk data (highest-resolution texture mips, stored in separate IoStore containers)
+- `.m.ubulk` - Memory-mapped bulk data (if present)
+
 ### Mod Extraction
 
 ```bash
@@ -206,6 +216,72 @@ Supports PAK v11 (UE5), Oodle/Zlib/Zstd compression, encrypted and unencrypted.
 
 ---
 
+## Texture Handling
+
+### Texture Injection
+
+Inject images into existing Texture2D `.uasset` files:
+
+```bash
+# Inject a PNG into a texture asset
+UAssetTool inject_texture <base_uasset> <image_file> <output_uasset> [options]
+
+# Examples
+UAssetTool inject_texture T_Skin_D.uasset my_skin.png T_Skin_D_modded.uasset
+UAssetTool inject_texture T_Skin_D.uasset my_skin.dds output.uasset --format BC1
+UAssetTool inject_texture T_Skin_D.uasset my_skin.tga output.uasset --no-mips
+```
+
+**Options:**
+- `--format <fmt>` - Compression format: `BC7` (default), `BC3`, `BC1`, `BC5`, `BC4`, `BGRA8`
+- `--no-mips` - Don't generate mipmaps (single mip only)
+- `--usmap <path>` - Usmap mappings for unversioned assets
+
+**Supported input formats:** PNG, TGA, DDS, BMP, JPEG
+
+The injector reads the base `.uasset` to preserve all metadata (pixel format name, texture settings), replaces the pixel data with the new image compressed to the specified format, and generates a full mipchain.
+
+### Texture Extraction
+
+Extract Texture2D assets to common image formats:
+
+```bash
+# Extract to PNG (default)
+UAssetTool extract_texture <uasset_path> <output_path> [options]
+
+# Examples
+UAssetTool extract_texture T_Skin_D.uasset skin.png --usmap game.usmap
+UAssetTool extract_texture T_Skin_D.uasset skin.dds --format DDS
+UAssetTool extract_texture T_Skin_D.uasset mip2.png --mip 2
+```
+
+**Options:**
+- `--format <fmt>` - Output format: `PNG` (default), `TGA`, `DDS`, `BMP`
+- `--mip <index>` - Mip level to extract (0 = largest, default: 0)
+- `--usmap <path>` - Usmap mappings for unversioned assets
+
+**Supported pixel formats:** PF_DXT1 (BC1), PF_DXT5 (BC3), PF_BC5 (BC5), PF_BC7, PF_B8G8R8A8
+
+The extractor reads pixel data from `.uexp` (inline mips), `.ubulk` (external bulk), and `.uptnl` (optional/high-res mips). If the requested mip has no data, it falls back to the next available mip.
+
+### Texture Workflow
+
+```bash
+# 1. Extract a texture from the game
+UAssetTool extract_iostore_legacy "C:/Game/Paks" extracted --filter T_1053_Skin_D
+
+# 2. Extract to PNG for editing (full resolution including OptionalBulkData mips)
+UAssetTool extract_texture extracted/.../T_1053_Skin_D.uasset original.png --usmap game.usmap
+
+# 3. Edit in your image editor, then inject back
+UAssetTool inject_texture extracted/.../T_1053_Skin_D.uasset edited.png output/T_1053_Skin_D.uasset --usmap game.usmap
+
+# 4. Create mod
+UAssetTool create_mod_iostore "mods/MySkin" output/.../T_1053_Skin_D.uasset
+```
+
+---
+
 ## JSON Conversion
 
 ```bash
@@ -226,36 +302,33 @@ UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]
 Edit particle effect colors in NiagaraSystem assets:
 
 ```bash
-# List NS files with metadata
-UAssetTool niagara_list <directory> [usmap_path]
+# Inspect color curves (outputs JSON)
+UAssetTool niagara_details <asset_path> --usmap <usmap_path>
 
-# Inspect color curves
-UAssetTool niagara_details <asset_path> [usmap_path]
-UAssetTool niagara_details <asset_path> [usmap_path] --full
+# Edit colors via JSON edits
+UAssetTool niagara_edit <asset_path> --usmap <usmap_path> --output <output_path> --edits <edits_json>
 
-# Edit colors
-UAssetTool niagara_edit <asset_path> <R> <G> <B> [A] [options...] [usmap_path]
+# Or load edits from a file
+UAssetTool niagara_edit <asset_path> --usmap <usmap_path> --output <output_path> --edits-file <edits.json>
 
-# Batch modify
-UAssetTool modify_colors <directory> <usmap_path> [R G B A]
+# Deep audit of all color properties in an NS asset
+UAssetTool niagara_audit <asset_path> [usmap_path]
 ```
 
-### Selective Targeting
+### Edits JSON Format
 
-```bash
-UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-name Glow
-UAssetTool niagara_edit asset.uasset 0 10 0 1 --export-index 5
-UAssetTool niagara_edit asset.uasset 0 10 0 1 --color-range 0 10
-UAssetTool niagara_edit asset.uasset 0 10 0 1 --channels rgb
+The `--edits` parameter accepts a JSON array of edit operations:
+
+```json
+[
+  {
+    "exportIndex": 4,
+    "flatLut": [0, 10, 0, 1, 0, 10, 0, 1, ...]
+  }
+]
 ```
 
-| Option | CLI Flag | Description |
-|--------|----------|-------------|
-| `exportIndex` | `--export-index <n>` | Target specific export |
-| `exportNameFilter` | `--export-name <pattern>` | Filter by name (case-insensitive) |
-| `colorIndex` | `--color-index <n>` | Single color index |
-| `colorIndexStart/End` | `--color-range <start> <end>` | Color range (inclusive) |
-| `modifyR/G/B/A` | `--channels <rgba>` | Which channels to modify |
+Each edit targets a specific export by index and provides a flat array of RGBA float values for the color LUT.
 
 ### Workflow
 
@@ -263,18 +336,26 @@ UAssetTool niagara_edit asset.uasset 0 10 0 1 --channels rgb
 # 1. Extract NS assets from game
 UAssetTool extract_iostore_legacy "C:/Game/Paks" "output" --filter "VFX/Particles"
 
-# 2. List available NS files
-UAssetTool niagara_list "output/Content" "mappings.usmap"
+# 2. Inspect color curves
+UAssetTool niagara_details "output/.../NS_Effect.uasset" --usmap "mappings.usmap"
 
-# 3. Inspect a file
-UAssetTool niagara_details "output/.../NS_Effect.uasset" "mappings.usmap"
+# 3. Edit colors (using JSON edits)
+UAssetTool niagara_edit "output/.../NS_Effect.uasset" --usmap "mappings.usmap" --output "output/.../NS_Effect.uasset" --edits '[{"exportIndex":4,"flatLut":[0,10,0,1]}]'
 
-# 4. Modify colors
-UAssetTool niagara_edit "output/.../NS_Effect.uasset" 0 10 0 1 "mappings.usmap"
-
-# 5. Create mod bundle
+# 4. Create mod bundle
 UAssetTool create_mod_iostore "mods/GreenFX" "output/.../NS_Effect.uasset"
 ```
+
+---
+
+## IoStore Inspection
+
+```bash
+# List all packages in an IoStore with chunk types
+UAssetTool list_iostore <utoc_path_or_dir> [--aes <key>] [--filter <pattern>]
+```
+
+Shows each package and its chunk types (ExportBundleData, BulkData, OptionalBulkData, MemoryMappedBulkData). Useful for verifying which packages have external texture data.
 
 ---
 
@@ -295,15 +376,18 @@ UAssetTool to_zen <uasset_path> [usmap_path] [--no-material-tags]
 UAssetTool inspect_zen <zen_asset_path>
 
 # IoStore utilities
+UAssetTool extract_iostore <utoc_path> <output_dir> [--aes <key>] [--package <name>]
 UAssetTool extract_script_objects <paks_path> <output_file>
 UAssetTool recompress_iostore <utoc_path>
 UAssetTool is_iostore_compressed <utoc_path>
+UAssetTool is_iostore_encrypted <utoc_path>
 UAssetTool clone_mod_iostore <utoc_path> <output_base>
 UAssetTool cityhash <path_string>
+UAssetTool dump_zen_from_game <paks_path> <package_path> [output_file]
 
-# Blueprint analysis
-UAssetTool scan_childbp_isenemy <paks_directory> [--aes <key>]
-UAssetTool scan_childbp_isenemy <extracted_directory> --extracted
+# Additional IoStore bundle creation
+UAssetTool create_iostore_bundle <output> <files...>
+UAssetTool create_companion_pak <output.pak> <files...>
 ```
 
 ---
@@ -348,6 +432,8 @@ UAssetTool
 {"action": "get_texture_info", "file_path": "..."}
 {"action": "strip_mipmaps_native", "file_path": "...", "usmap_path": "..."}
 {"action": "has_inline_texture_data", "file_path": "...", "usmap_path": "..."}
+{"action": "batch_strip_mipmaps_native", "file_paths": [...], "usmap_path": "..."}
+{"action": "batch_has_inline_texture_data", "file_paths": [...], "usmap_path": "..."}
 ```
 
 **Detection**
@@ -364,10 +450,27 @@ UAssetTool
 {"action": "clone_mod_iostore", "file_path": "...", "output_path": "..."}
 ```
 
-**Niagara**
+**Mesh**
 ```json
-{"action": "niagara_list", "input_dir": "...", "usmap_path": "..."}
-{"action": "niagara_details", "file_path": "...", "usmap_path": "..."}
+{"action": "patch_mesh", "file_path": "...", "uexp_path": "..."}
+{"action": "get_mesh_info", "file_path": "...", "usmap_path": "..."}
+{"action": "fix_serialize_size", "file_path": "...", "usmap_path": "..."}
+{"action": "skeletal_mesh_info", "file_path": "...", "usmap_path": "..."}
+```
+
+**Zen Conversion**
+```json
+{"action": "convert_to_zen", "file_path": "...", "usmap_path": "..."}
+{"action": "convert_from_zen", "file_path": "...", "usmap_path": "..."}
+{"action": "inspect_zen", "file_path": "..."}
+```
+
+**IoStore (Additional)**
+```json
+{"action": "list_iostore_files", "file_path": "...", "aes_key": "..."}
+{"action": "extract_iostore", "file_path": "...", "output_path": "...", "aes_key": "..."}
+{"action": "is_iostore_encrypted", "file_path": "..."}
+{"action": "recompress_iostore", "file_path": "..."}
 ```
 
 </details>
@@ -380,15 +483,31 @@ UAssetTool
 UassetToolRivals/
 ├── UAssetTool.sln
 ├── README.md
+├── TECHNICAL_ANALYSIS.md     # Detailed format documentation
 ├── LICENSE
 └── src/
     ├── UAssetTool/
-    │   ├── Program.cs           # CLI entry point
+    │   ├── Program.cs           # CLI entry point & command routing
     │   ├── UAssetTool.csproj
     │   ├── NiagaraService.cs    # Niagara particle editing
     │   ├── IoStore/             # IoStore/PAK reading & writing
-    │   └── ZenPackage/          # Zen format conversion
+    │   │   ├── IoStoreReader.cs
+    │   │   ├── IoStoreWriter.cs
+    │   │   ├── PakReader.cs
+    │   │   ├── PakWriter.cs
+    │   │   └── OodleCompression.cs
+    │   ├── Texture/             # Texture injection & extraction
+    │   │   ├── TextureInjector.cs   # PNG/TGA/DDS → uasset (BC1-BC7)
+    │   │   └── TextureExtractor.cs  # uasset → PNG/TGA/DDS/BMP
+    │   └── ZenPackage/          # Zen format conversion & extraction
+    │       ├── ZenConverter.cs          # Legacy → Zen conversion
+    │       ├── ZenToLegacyConverter.cs  # Zen → Legacy extraction
+    │       ├── FZenPackageContext.cs    # Multi-container IoStore context
+    │       ├── MaterialTagReader.cs     # MaterialTag auto-injection
+    │       └── ScriptObjectsDatabase.cs # Engine class hash resolution
     └── UAssetAPI/               # Core UAsset parsing (modified fork)
+        └── ExportTypes/
+            └── Texture/         # Texture2D, FByteBulkData
 ```
 
 ## Dependencies
@@ -397,6 +516,9 @@ UassetToolRivals/
 - [Newtonsoft.Json](https://www.nuget.org/packages/Newtonsoft.Json) - JSON serialization
 - [Blake3](https://www.nuget.org/packages/Blake3) - Hashing for IoStore
 - [ZstdSharp](https://www.nuget.org/packages/ZstdSharp.Port) - Compression
+- [BCnEncoder.Net](https://www.nuget.org/packages/BCnEncoder.Net) - BC1/BC3/BC5/BC7 texture encoding & decoding
+- [SixLabors.ImageSharp](https://www.nuget.org/packages/SixLabors.ImageSharp) - Image loading, saving (PNG, TGA, BMP)
+- [Pfim](https://www.nuget.org/packages/Pfim) - DDS/TGA image loading
 
 ## License
 

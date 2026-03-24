@@ -583,6 +583,94 @@ public class FZenPackageContext : IDisposable
     }
 
     /// <summary>
+    /// Read optional bulk data (high-res mips) for a package from a container.
+    /// </summary>
+    public byte[]? ReadOptionalBulkData(ulong packageId, int containerIndex = -1)
+    {
+        return ReadBulkDataOfType(packageId, IoStore.EIoChunkType.OptionalBulkData, containerIndex);
+    }
+    
+    /// <summary>
+    /// Read memory-mapped bulk data for a package from a container.
+    /// </summary>
+    public byte[]? ReadMemoryMappedBulkData(ulong packageId, int containerIndex = -1)
+    {
+        return ReadBulkDataOfType(packageId, IoStore.EIoChunkType.MemoryMappedBulkData, containerIndex);
+    }
+    
+    /// <summary>
+    /// Read bulk data chunks of a specific type for a package.
+    /// For OptionalBulkData and MemoryMappedBulkData, searches ALL containers
+    /// since these chunk types are often stored in separate optional containers.
+    /// </summary>
+    private byte[]? ReadBulkDataOfType(ulong packageId, IoStore.EIoChunkType chunkType, int containerIndex)
+    {
+        // Build list of containers to search
+        List<int> containersToSearch = new();
+        
+        if (containerIndex >= 0 && containerIndex < _containers.Count)
+        {
+            containersToSearch.Add(containerIndex);
+        }
+        else if (_packageIdToChunk.TryGetValue(packageId, out var location))
+        {
+            containersToSearch.Add(location.ContainerIndex);
+        }
+        
+        // For optional/memory-mapped bulk data, also search all other containers
+        // since these are often stored in separate containers (e.g. pakchunk0_s1)
+        if (chunkType == IoStore.EIoChunkType.OptionalBulkData || 
+            chunkType == IoStore.EIoChunkType.MemoryMappedBulkData)
+        {
+            for (int i = 0; i < _containers.Count; i++)
+            {
+                if (!containersToSearch.Contains(i))
+                    containersToSearch.Add(i);
+            }
+        }
+        
+        var bulkChunks = new List<(ushort Index, byte[] Data)>();
+        
+        foreach (int ci in containersToSearch)
+        {
+            var reader = _containers[ci];
+            foreach (var chunk in reader.GetChunks())
+            {
+                if (chunk.GetChunkType() == chunkType && chunk.Id == packageId)
+                {
+                    try
+                    {
+                        byte[] data = reader.ReadChunk(chunk);
+                        bulkChunks.Add((chunk.Index, data));
+                    }
+                    catch { }
+                }
+            }
+            // Stop searching once we find chunks in any container
+            if (bulkChunks.Count > 0)
+                break;
+        }
+        
+        if (bulkChunks.Count == 0)
+            return null;
+            
+        bulkChunks.Sort((a, b) => a.Index.CompareTo(b.Index));
+        
+        if (bulkChunks.Count == 1)
+            return bulkChunks[0].Data;
+            
+        int totalSize = bulkChunks.Sum(c => c.Data.Length);
+        byte[] result = new byte[totalSize];
+        int offset = 0;
+        foreach (var (_, data) in bulkChunks)
+        {
+            Array.Copy(data, 0, result, offset, data.Length);
+            offset += data.Length;
+        }
+        return result;
+    }
+    
+    /// <summary>
     /// Resolve a package import to the actual export in the referenced package
     /// </summary>
     public (FZenPackageHeader? Package, FExportMapEntry? Export) ResolvePackageImport(

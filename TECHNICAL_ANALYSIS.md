@@ -10,12 +10,14 @@ Technical documentation for UAssetTool's file format handling and data structure
 4. [SkeletalMesh Structure](#skeletalmesh-structure)
 5. [StaticMesh Structure](#staticmesh-structure)
 6. [NiagaraSystem Data Interfaces](#niagarasystem-data-interfaces)
-7. [MaterialTag Injection](#materialtag-injection)
-8. [Legacy-to-Zen Conversion: Critical Fixes](#legacy-to-zen-conversion-critical-fixes)
-9. [FString UTF-16LE Encoding](#fstring-utf-16le-encoding)
-10. [IoStore Recompression](#iostore-recompression)
-11. [Script Objects Database](#script-objects-database)
-12. [JSON Serialization](#json-serialization)
+7. [Texture Handling](#texture-handling)
+8. [MaterialTag Injection](#materialtag-injection)
+9. [Zen-to-Legacy Extraction](#zen-to-legacy-extraction)
+10. [Legacy-to-Zen Conversion: Critical Fixes](#legacy-to-zen-conversion-critical-fixes)
+11. [FString UTF-16LE Encoding](#fstring-utf-16le-encoding)
+12. [IoStore Recompression](#iostore-recompression)
+13. [Script Objects Database](#script-objects-database)
+14. [JSON Serialization](#json-serialization)
 
 ---
 
@@ -515,7 +517,7 @@ These types store direct value arrays in properties (`ColorData`, `FloatData`, `
 | **Velocity** | `*Speed*`, `*Velocity*` | Movement parameters |
 | **Timing** | `*Lifetime*`, `*Spawn*` | Timing curves |
 
-**Best Practice:** Use `niagara_details` to inspect export names before editing, then use `--export-name` to target only color-related LUTs.
+**Best Practice:** Use `niagara_details` to inspect export names and indices before editing, then target specific exports by index in the `--edits` JSON.
 
 ### ShaderLUT Memory Layout
 
@@ -538,24 +540,129 @@ ShaderLUT Array (128 colors = 512 floats):
 
 When modifying particle effects, consider:
 
-1. **Preserve Alpha Gradients**: Use `--channels rgb` to keep original alpha/fade curves
-2. **Target Specific LUTs**: Use `--export-name` to only modify color-related exports
-3. **Gradient Preservation**: Use `--color-range` to modify only part of a gradient
-4. **Single Color Edits**: Use `--color-index` for precise control
+1. **Inspect first**: Use `niagara_details` to see all color-relevant exports with their indices and sample colors
+2. **Target by export index**: Each `NiagaraEditRequest` specifies an `exportIndex` to target a specific LUT
+3. **Provide full LUT data**: The `flatLut` array replaces the entire ShaderLUT for that export
+4. **Preserve non-color exports**: Only include exports you want to modify in the `--edits` JSON
 
 **Example Workflow:**
 ```bash
 # 1. Inspect the file to see all LUTs
-UAssetTool niagara_details NS_Effect.uasset mappings.usmap
+UAssetTool niagara_details NS_Effect.uasset --usmap mappings.usmap
 
-# Output shows:
+# Output shows (JSON):
 # Export 3: "NiagaraDataInterfaceColorCurve_Glow" - 128 colors
 # Export 5: "NiagaraDataInterfaceColorCurve_Alpha" - 128 colors  
 # Export 7: "NiagaraDataInterfaceColorCurve_Scale" - 64 colors
 
-# 2. Only modify the Glow LUT, preserve RGB only
-UAssetTool niagara_edit NS_Effect.uasset 0 10 0 1 --export-name Glow --channels rgb
+# 2. Only modify the Glow LUT (export 3), leave Alpha and Scale untouched
+UAssetTool niagara_edit NS_Effect.uasset --usmap mappings.usmap --output NS_Effect.uasset --edits "[{\"exportIndex\":3,\"flatLut\":[0,10,0,1,0,10,0,1]}]"
 ```
+
+---
+
+## Texture Handling
+
+**Implementation:** `UAssetTool/Texture/TextureInjector.cs`, `UAssetTool/Texture/TextureExtractor.cs`
+
+### Texture2D Asset Structure
+
+Texture2D assets store pixel data across multiple locations depending on mip size and IoStore packaging:
+
+```
+Texture2D Export
+├── Tagged Properties (PixelFormat, SizeX, SizeY, etc.)
+└── PlatformData (binary extras)
+    ├── PixelFormatName (FString)
+    ├── FirstMipToSerialize (int32)
+    ├── Mip[] array
+    │   ├── Mip 0 (2048×2048) → .uptnl (OptionalBulkData, flags 0x00010D01)
+    │   ├── Mip 1 (1024×1024) → .ubulk offset 0 (BulkData, flags 0x00010501)
+    │   ├── Mip 2 (512×512)   → .ubulk offset 524288
+    │   ├── ...
+    │   ├── Mip 5 (64×64)     → .uexp inline (flags 0x00000048)
+    │   └── Mip 11 (1×1)      → .uexp inline
+    └── DataResources[] (FObjectDataResource)
+        ├── [0] SerialOffset=0, SerialSize=2097152 (mip 0 in .uptnl)
+        ├── [1] SerialOffset=0, SerialSize=524288 (mip 1 in .ubulk)
+        └── ...
+```
+
+### BulkData Flags (FBulkDataMapEntry)
+
+The Zen `BulkDataMapEntry.Flags` field determines where each bulk data chunk is stored:
+
+| Flag | Value | Storage | Legacy File |
+|------|-------|---------|-------------|
+| `BULKDATA_PayloadInSeperateFile` | 0x0001 | External file | `.ubulk` |
+| `BULKDATA_ForceInlinePayload` | 0x0040 | Inline in `.uexp` | `.uexp` |
+| `BULKDATA_OptionalPayload` | 0x0800 | Optional container | `.uptnl` |
+| `BULKDATA_MemoryMappedPayload` | 0x1000 | Memory-mapped | `.m.ubulk` |
+
+**Marvel Rivals example (2048×2048 DXT1 texture, 12 mips):**
+
+| Entry | Flags | Size | Storage |
+|-------|-------|------|---------|
+| [0] mip 0 | `0x00010D01` | 2,097,152 | OptionalBulkData → `.uptnl` |
+| [1] mip 1 | `0x00010501` | 524,288 | BulkData → `.ubulk` |
+| [2] mip 2 | `0x00010501` | 131,072 | BulkData → `.ubulk` |
+| [3] mip 3 | `0x00010501` | 32,768 | BulkData → `.ubulk` |
+| [4] mip 4 | `0x00010501` | 8,192 | BulkData → `.ubulk` |
+| [5-11] mips 5-11 | `0x00000048` | 8-2,048 | Inline → `.uexp` |
+
+### OptionalBulkData Container Separation
+
+**Critical discovery:** Marvel Rivals stores OptionalBulkData (highest-res texture mips) in **separate IoStore containers** from the ExportBundleData. For example:
+- ExportBundleData + BulkData → `pakchunk0-WindowsClient.utoc`
+- OptionalBulkData → `pakchunk0_s1-WindowsClient.utoc` (separate optional container)
+
+`ReadOptionalBulkData()` in `FZenPackageContext` searches ALL loaded containers for OptionalBulkData chunks, not just the container that owns the ExportBundleData.
+
+### Texture Injection Pipeline
+
+```
+1. Load base .uasset with UAssetAPI (preserves all metadata)
+2. Load input image (PNG/TGA/DDS/BMP) with ImageSharp
+3. Resize if needed to match base texture dimensions
+4. Generate mipchain (halving dimensions each level)
+5. Compress each mip with BCnEncoder (BC1/BC3/BC5/BC7)
+6. Replace PlatformData mip array with new compressed mips
+7. Set all mips as inline (ForceInlinePayload flag)
+8. Update DataResources to match new mip layout
+9. Save modified .uasset + .uexp
+```
+
+### Texture Extraction Pipeline
+
+```
+1. Load .uasset with UAssetAPI + usmap
+2. Find Texture2DExport, read PlatformData
+3. For requested mip index, get pixel data:
+   a. Try GetData() (inline data from .uexp)
+   b. If empty/wrong-sized, try ReadMipDataFromFiles():
+      - Check .ubulk at DataResource[i].SerialOffset
+      - Check .uptnl at DataResource[i].SerialOffset
+      - Check .m.ubulk at DataResource[i].SerialOffset
+   c. Validate data size against expected mip dimensions
+   d. If invalid, fall back to next available mip
+4. Decode compressed data:
+   - BC1/BC3/BC5/BC7 → RGBA32 via BCnEncoder.Net BcDecoder
+   - B8G8R8A8 → channel swap to RGBA
+5. Save output:
+   - PNG/TGA/BMP → ImageSharp
+   - DDS → raw compressed data with DDS header
+```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `TextureInjector.cs` | Image → uasset injection with BC encoding and mipmap generation |
+| `TextureExtractor.cs` | uasset → image extraction with BC decoding and multi-file mip reading |
+| `FByteBulkData.cs` | Bulk data read/write with DataResourceIndex support |
+| `FByteBulkDataHeader.cs` | Bulk data metadata (flags, offset, size from DataResources) |
+
+---
 
 ### Frontend API
 
@@ -567,44 +674,28 @@ UAssetTool niagara_edit NS_Effect.uasset 0 10 0 1 --export-name Glow --channels 
 | `GetNiagaraDetails()` | Get color curves with sample colors |
 | `EditNiagaraColors()` | Modify colors with selective targeting |
 
-### ColorEditRequest Options
+### NiagaraEditRequest
 
 ```csharp
-public class ColorEditRequest
+public class NiagaraEditRequest
 {
-    public string AssetPath { get; set; }
-    public float R { get; set; }
-    public float G { get; set; }
-    public float B { get; set; }
-    public float A { get; set; } = 1.0f;
-    
-    // Selective targeting
-    public int? ExportIndex { get; set; }        // Target by export index
-    public string? ExportNameFilter { get; set; } // Target by name pattern
-    public int? ColorIndex { get; set; }          // Single color index
-    public int? ColorIndexStart { get; set; }     // Range start (inclusive)
-    public int? ColorIndexEnd { get; set; }       // Range end (inclusive)
-    
-    // Per-channel control
-    public bool? ModifyR { get; set; }  // Default: true
-    public bool? ModifyG { get; set; }  // Default: true
-    public bool? ModifyB { get; set; }  // Default: true
-    public bool? ModifyA { get; set; }  // Default: true
+    public int ExportIndex { get; set; }       // Target export by index
+    public float[]? FlatLut { get; set; }      // Flat RGBA array [r,g,b,a,r,g,b,a,...]
+    public List<float[]>? ColorData { get; set; } // Alternative: list of [r,g,b,a] arrays
 }
+```
+
+**CLI usage:**
+```bash
+UAssetTool niagara_edit <asset_path> --usmap <usmap_path> --output <output_path> --edits <json>
+UAssetTool niagara_edit <asset_path> --usmap <usmap_path> --output <output_path> --edits-file <file>
 ```
 
 ### Implementation Files
 
 | File | Purpose |
 |------|---------|
-| `NiagaraStructs.cs` | `FShaderLUT`, `FShaderLUTColor`, `FShaderLUTFloat`, `FShaderLUTVector2D`, `FShaderLUTVector3` structs |
-| `NiagaraDataInterfaceColorCurveExport.cs` | ColorCurve export (RGBA ShaderLUT) |
-| `NiagaraDataInterfaceCurveExport.cs` | Curve export (float ShaderLUT) |
-| `NiagaraDataInterfaceVector2DCurveExport.cs` | Vector2DCurve export (XY ShaderLUT) |
-| `NiagaraDataInterfaceVectorCurveExport.cs` | VectorCurve export (XYZ/RGB ShaderLUT) |
-| `NiagaraDataInterfaceArrayExports.cs` | ArrayColor, ArrayFloat, ArrayFloat3, ArrayInt32 exports |
-| `ColorModifier.cs` | Uses structured exports for color modification |
-| `NiagaraService.cs` | Frontend JSON API with all curve type support |
+| `NiagaraService.cs` | All Niagara editing: selective export parsing, color details, LUT editing, curve classification |
 
 ### NiagaraDetailsResult Structure
 
@@ -774,18 +865,16 @@ IoStore is UE5's container format consisting of:
 
 ### Chunk Types
 
-| Type | Value | Description |
-|------|-------|-------------|
-| ExportBundleData | 0 | Package export data |
-| BulkData | 1 | Bulk data (textures, etc.) |
-| OptionalBulkData | 2 | Optional bulk data |
-| MemoryMappedBulkData | 3 | Memory-mapped data |
-| ScriptObjects | 4 | Script object database |
-| ContainerHeader | 5 | Container metadata |
-| ExternalFile | 6 | External file reference |
-| ShaderCodeLibrary | 7 | Shader code |
-| ShaderCode | 8 | Individual shaders |
-| PackageStoreEntry | 9 | Package store entry |
+| Type | Value | Legacy File | Description |
+|------|-------|-------------|-------------|
+| Invalid | 0 | - | Invalid chunk |
+| ExportBundleData | 1 | `.uasset` + `.uexp` | Package export data |
+| BulkData | 2 | `.ubulk` | External bulk data (texture mips 1-N) |
+| OptionalBulkData | 3 | `.uptnl` | Optional bulk data (highest-res texture mips) |
+| MemoryMappedBulkData | 4 | `.m.ubulk` | Memory-mapped bulk data |
+| ScriptObjects | 5 | `scriptobjects.bin` | Global script object database |
+| ContainerHeader | 6 | - | Container metadata (package store entries) |
+| ExternalFile | 7 | - | External file reference |
 
 ### Chunk ID Calculation
 
@@ -1258,6 +1347,96 @@ foreach (int idx in createOrder)
 foreach (int idx in createOrder)
     entries.Add(new ExportBundleEntry(idx, Serialize));
 ```
+
+---
+
+## Zen-to-Legacy Extraction
+
+**Implementation:** `ZenPackage/ZenToLegacyConverter.cs`, `ZenPackage/FZenPackageContext.cs`
+
+The `extract_iostore_legacy` command converts Zen packages from IoStore containers back to legacy `.uasset`/`.uexp`/`.ubulk`/`.uptnl` format.
+
+### Extraction Architecture
+
+```
+FZenPackageContext (multi-container manager)
+├── LoadContainer() → game containers (AES encrypted)
+├── LoadContainerWithPriority() → mod containers (override game)
+└── Per-package operations:
+    ├── ReadPackage(packageId) → ExportBundleData chunk
+    ├── ReadBulkData(packageId) → BulkData chunks → .ubulk
+    ├── ReadOptionalBulkData(packageId) → OptionalBulkData → .uptnl
+    └── ReadMemoryMappedBulkData(packageId) → MemoryMappedBulkData → .m.ubulk
+```
+
+### ZenToLegacyConverter Pipeline
+
+```
+1. Parse Zen package header (NameMap, ImportMap, ExportMap, BulkDataMap)
+2. BeginBuildSummary() → initialize legacy package summary
+3. CopyPackageSections() → copy NameMap, DataResources from BulkDataMap
+4. BuildImportMap() → resolve script/package imports to legacy format
+5. BuildExportMap() → rebuild serial offsets for sequential layout
+6. ResolvePrestreamPackageImports() → add pre-stream dependency imports
+7. ResolveExportDependencies() → build preload dependency data
+8. FinalizeAsset() → set all header offsets and sizes
+9. SerializeAsset() → write .uasset header + .uexp export data
+10. Extract bulk data:
+    - ReadBulkData() from source container → .ubulk
+    - ReadOptionalBulkData() from ALL containers → .uptnl
+    - ReadMemoryMappedBulkData() from ALL containers → .m.ubulk
+```
+
+### Export Data Rebuilding
+
+Zen format stores exports in **bundle order** (dependency-sorted), not sequential order. The converter must reorder:
+
+```csharp
+// Zen: exports stored in bundle order (Create/Serialize interleaved)
+// Legacy: exports stored sequentially by export index
+
+// Iterate ExportBundleEntries, copy only Serialize commands
+// from their bundle position to sequential output position
+foreach (entry in ExportBundleEntries)
+{
+    if (entry.CommandType == Serialize)
+    {
+        // Copy from zen bundle offset → sequential legacy offset
+        CopyExportData(entry.LocalExportIndex, sourcePos, destPos);
+    }
+}
+```
+
+### Container Priority ("Last Wins")
+
+When multiple containers contain the same package ID, the **last loaded** container takes priority. This matches the game engine's behavior:
+
+```csharp
+// Game containers loaded first (alphabetical order)
+foreach (utoc in gameUtocs)
+    context.LoadContainer(utoc);
+
+// Mod containers loaded last → override game packages
+foreach (utoc in modUtocs)
+    context.LoadContainerWithPriority(utoc);
+```
+
+### Bulk Data Container Search
+
+Regular BulkData chunks are searched only in the source container. OptionalBulkData and MemoryMappedBulkData are searched across ALL containers because they're often in separate optional containers:
+
+```csharp
+// BulkData: search source container only
+ReadBulkData(packageId, sourceContainerIndex);
+
+// OptionalBulkData: search ALL containers (separate optional containers)
+ReadBulkDataOfType(packageId, OptionalBulkData, containerIndex)
+// → tries source container first, then all others
+```
+
+### Verification
+
+Extraction quality verified by round-trip testing: extract from game → create mod → extract from mod → compare. Achieves byte-identical `.uexp` files for 701/701 test packages against retoc reference implementation.
 
 ---
 

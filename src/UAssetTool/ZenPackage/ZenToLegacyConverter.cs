@@ -98,6 +98,18 @@ public class ZenToLegacyConverter
             {
                 bundle.BulkData = bulkData;
             }
+            
+            byte[]? optionalBulkData = _context.ReadOptionalBulkData(_packageId, _sourceContainerIndex);
+            if (optionalBulkData != null && optionalBulkData.Length > 0)
+            {
+                bundle.OptionalBulkData = optionalBulkData;
+            }
+            
+            byte[]? memoryMappedBulkData = _context.ReadMemoryMappedBulkData(_packageId, _sourceContainerIndex);
+            if (memoryMappedBulkData != null && memoryMappedBulkData.Length > 0)
+            {
+                bundle.MemoryMappedBulkData = memoryMappedBulkData;
+            }
         }
         
         return bundle;
