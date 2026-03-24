@@ -77,6 +77,8 @@ public partial class Program
                 "skeletal_mesh_info" => CliSkeletalMeshInfo(args),
                 "inject_texture" => CliInjectTexture(args),
                 "extract_texture" => CliExtractTexture(args),
+                "batch_inject_texture" => CliBatchInjectTexture(args),
+                "batch_extract_texture" => CliBatchExtractTexture(args),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -116,6 +118,15 @@ public partial class Program
         Console.WriteLine("    extract_texture <uasset> <output>       - Extract Texture2D to PNG/TGA/DDS/BMP");
         Console.WriteLine("      Options: --format PNG|TGA|DDS|BMP     - Output format (default: PNG)");
         Console.WriteLine("               --mip <index>                - Mip level to extract (default: 0)");
+        Console.WriteLine("    batch_inject_texture <uasset_dir> <image_dir> <output_dir> - Batch inject textures");
+        Console.WriteLine("      Matches image files to .uasset files by filename (e.g. T_Skin_D.png -> T_Skin_D.uasset)");
+        Console.WriteLine("      Options: --format BC7|BC3|BC1|BGRA8   - Compression format (default: BC7)");
+        Console.WriteLine("               --no-mips                    - Don't generate mipmaps");
+        Console.WriteLine("               --usmap <path>               - Path to usmap file");
+        Console.WriteLine("    batch_extract_texture <uasset_dir> <output_dir> - Batch extract textures");
+        Console.WriteLine("      Extracts all Texture2D .uasset files in directory to images");
+        Console.WriteLine("      Options: --format PNG|TGA|DDS|BMP     - Output format (default: PNG)");
+        Console.WriteLine("               --usmap <path>               - Path to usmap file");
         Console.WriteLine();
         Console.WriteLine("  Mod Creation (Legacy -> IoStore):");
         Console.WriteLine("    create_mod_iostore <output> <inputs...>  - Convert legacy assets and create IoStore bundle");
@@ -6587,6 +6598,235 @@ public partial class Program
         }
     }
     
+    private static int CliBatchInjectTexture(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool batch_inject_texture <uasset_dir> <image_dir> <output_dir> [options]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Matches image files to .uasset files by filename stem.");
+            Console.Error.WriteLine("Example: T_Skin_D.png in image_dir matches T_Skin_D.uasset in uasset_dir.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --format <fmt>  Compression format: BC7, BC3, BC1, BC5, BC4, BGRA8 (default: BC7)");
+            Console.Error.WriteLine("  --no-mips       Don't generate mipmaps");
+            Console.Error.WriteLine("  --usmap <path>  Path to usmap file (required for game-extracted textures)");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Supported image formats: PNG, TGA, DDS, BMP, JPEG");
+            return 1;
+        }
+
+        string uassetDir = args[1];
+        string imageDir = args[2];
+        string outputDir = args[3];
+
+        if (!Directory.Exists(uassetDir))
+        {
+            Console.Error.WriteLine($"uasset directory not found: {uassetDir}");
+            return 1;
+        }
+        if (!Directory.Exists(imageDir))
+        {
+            Console.Error.WriteLine($"Image directory not found: {imageDir}");
+            return 1;
+        }
+
+        // Parse options
+        var format = Texture.TextureCompressionFormat.BC7;
+        bool generateMips = true;
+        string? usmapPath = null;
+
+        for (int i = 4; i < args.Length; i++)
+        {
+            if (args[i] == "--format" && i + 1 < args.Length)
+                format = Texture.TextureInjector.ParseFormat(args[++i]);
+            else if (args[i] == "--no-mips")
+                generateMips = false;
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
+                usmapPath = args[++i];
+        }
+
+        // Build a lookup: filename stem -> uasset path (recursive)
+        var imageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".png", ".tga", ".dds", ".bmp", ".jpg", ".jpeg" };
+        var uassetFiles = Directory.GetFiles(uassetDir, "*.uasset", SearchOption.AllDirectories);
+        var uassetMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in uassetFiles)
+        {
+            string stem = Path.GetFileNameWithoutExtension(f);
+            if (!uassetMap.ContainsKey(stem))
+                uassetMap[stem] = f;
+        }
+
+        // Find all image files (recursive)
+        var imageFiles = Directory.GetFiles(imageDir, "*.*", SearchOption.AllDirectories)
+            .Where(f => imageExtensions.Contains(Path.GetExtension(f)))
+            .ToList();
+
+        if (imageFiles.Count == 0)
+        {
+            Console.Error.WriteLine($"No image files found in: {imageDir}");
+            return 1;
+        }
+
+        Console.WriteLine($"Found {imageFiles.Count} image file(s) in: {imageDir}");
+        Console.WriteLine($"Found {uassetMap.Count} .uasset file(s) in: {uassetDir}");
+        Console.WriteLine($"Format: {format}, Mips: {generateMips}");
+        Console.WriteLine();
+
+        Directory.CreateDirectory(outputDir);
+
+        int success = 0, failed = 0, skipped = 0;
+
+        foreach (var imageFile in imageFiles)
+        {
+            string imageStem = Path.GetFileNameWithoutExtension(imageFile);
+
+            if (!uassetMap.TryGetValue(imageStem, out string? matchedUasset))
+            {
+                Console.Error.WriteLine($"  SKIP: {Path.GetFileName(imageFile)} - no matching .uasset found");
+                skipped++;
+                continue;
+            }
+
+            // Preserve relative path structure from uasset_dir into output_dir
+            string relPath = Path.GetRelativePath(uassetDir, matchedUasset);
+            string outputPath = Path.Combine(outputDir, relPath);
+            string? outSubDir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(outSubDir))
+                Directory.CreateDirectory(outSubDir);
+
+            // Also copy companion .uexp if it exists alongside the base
+            string baseUexp = Path.ChangeExtension(matchedUasset, ".uexp");
+            string outputUexp = Path.ChangeExtension(outputPath, ".uexp");
+
+            Console.Write($"  {Path.GetFileName(imageFile)} -> {relPath} ... ");
+
+            try
+            {
+                var result = Texture.TextureInjector.Inject(matchedUasset, imageFile, outputPath, format, generateMips, usmapPath);
+                if (result.Success)
+                {
+                    Console.WriteLine($"OK ({result.Width}x{result.Height}, {result.MipCount} mips)");
+                    success++;
+                }
+                else
+                {
+                    Console.WriteLine($"FAILED: {result.ErrorMessage}");
+                    failed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ERROR: {ex.Message}");
+                failed++;
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Batch inject complete: {success} succeeded, {failed} failed, {skipped} skipped (no match)");
+        return failed > 0 ? 1 : 0;
+    }
+
+    private static int CliBatchExtractTexture(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool batch_extract_texture <uasset_dir> <output_dir> [options]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Extracts all Texture2D .uasset files in a directory to images.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --format <fmt>  Output format: PNG, TGA, DDS, BMP (default: PNG)");
+            Console.Error.WriteLine("  --mip <index>   Mip level to extract (default: 0 = largest)");
+            Console.Error.WriteLine("  --usmap <path>  Path to usmap file (required for game-extracted textures)");
+            return 1;
+        }
+
+        string uassetDir = args[1];
+        string outputDir = args[2];
+
+        if (!Directory.Exists(uassetDir))
+        {
+            Console.Error.WriteLine($"Directory not found: {uassetDir}");
+            return 1;
+        }
+
+        // Parse options
+        var outputFormat = Texture.TextureOutputFormat.PNG;
+        int mipIndex = 0;
+        string? usmapPath = null;
+
+        for (int i = 3; i < args.Length; i++)
+        {
+            if (args[i] == "--format" && i + 1 < args.Length)
+                outputFormat = Texture.TextureExtractor.ParseOutputFormat(args[++i]);
+            else if (args[i] == "--mip" && i + 1 < args.Length)
+                mipIndex = int.Parse(args[++i]);
+            else if (args[i] == "--usmap" && i + 1 < args.Length)
+                usmapPath = args[++i];
+        }
+
+        var uassetFiles = Directory.GetFiles(uassetDir, "*.uasset", SearchOption.AllDirectories);
+        if (uassetFiles.Length == 0)
+        {
+            Console.Error.WriteLine($"No .uasset files found in: {uassetDir}");
+            return 1;
+        }
+
+        string formatExt = outputFormat switch
+        {
+            Texture.TextureOutputFormat.PNG => ".png",
+            Texture.TextureOutputFormat.TGA => ".tga",
+            Texture.TextureOutputFormat.DDS => ".dds",
+            Texture.TextureOutputFormat.BMP => ".bmp",
+            _ => ".png"
+        };
+
+        Console.WriteLine($"Found {uassetFiles.Length} .uasset file(s) in: {uassetDir}");
+        Console.WriteLine($"Output format: {outputFormat}, Mip: {mipIndex}");
+        Console.WriteLine();
+
+        Directory.CreateDirectory(outputDir);
+
+        int success = 0, failed = 0, skipped = 0;
+
+        foreach (var uassetFile in uassetFiles)
+        {
+            string relPath = Path.GetRelativePath(uassetDir, uassetFile);
+            string outputFileName = Path.ChangeExtension(relPath, formatExt);
+            string outputPath = Path.Combine(outputDir, outputFileName);
+            string? outSubDir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(outSubDir))
+                Directory.CreateDirectory(outSubDir);
+
+            Console.Write($"  {relPath} ... ");
+
+            try
+            {
+                var result = Texture.TextureExtractor.Extract(uassetFile, outputPath, outputFormat, mipIndex, usmapPath);
+                if (result.Success)
+                {
+                    Console.WriteLine($"OK ({result.Width}x{result.Height}, {result.PixelFormat})");
+                    success++;
+                }
+                else
+                {
+                    Console.WriteLine($"SKIP: {result.ErrorMessage}");
+                    skipped++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ERROR: {ex.Message}");
+                failed++;
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Batch extract complete: {success} succeeded, {failed} errors, {skipped} skipped (not Texture2D)");
+        return failed > 0 ? 1 : 0;
+    }
+
     #endregion
 }
 

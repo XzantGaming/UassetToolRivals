@@ -264,20 +264,61 @@ UAssetTool extract_texture T_Skin_D.uasset mip2.png --mip 2
 
 The extractor reads pixel data from `.uexp` (inline mips), `.ubulk` (external bulk), and `.uptnl` (optional/high-res mips). If the requested mip has no data, it falls back to the next available mip.
 
+### Batch Texture Injection
+
+Inject textures in bulk by matching image filenames to `.uasset` filenames:
+
+```bash
+UAssetTool batch_inject_texture <uasset_dir> <image_dir> <output_dir> [options]
+```
+
+Place your replacement images (PNG/TGA/DDS/BMP) in a folder using the **same filename stem** as the target `.uasset`. For example:
+- `T_1053_Skin_D.png` matches `T_1053_Skin_D.uasset`
+- `T_1053_Hair_D.tga` matches `T_1053_Hair_D.uasset`
+
+```bash
+# Example: inject all replacement textures
+UAssetTool batch_inject_texture extracted/Textures/ my_skins/ output/ --usmap game.usmap --format BC7
+
+# Without mipmaps
+UAssetTool batch_inject_texture extracted/Textures/ my_skins/ output/ --usmap game.usmap --no-mips
+```
+
+Both directories are searched recursively. The output preserves the directory structure from `uasset_dir`. Images with no matching `.uasset` are reported as skipped.
+
+### Batch Texture Extraction
+
+Extract all Texture2D `.uasset` files in a directory to images:
+
+```bash
+UAssetTool batch_extract_texture <uasset_dir> <output_dir> [options]
+
+# Example: extract all textures to PNG
+UAssetTool batch_extract_texture extracted/Textures/ png_output/ --usmap game.usmap
+
+# Extract as DDS
+UAssetTool batch_extract_texture extracted/Textures/ dds_output/ --format DDS --usmap game.usmap
+```
+
+Non-Texture2D `.uasset` files are automatically skipped. Directory structure is preserved in the output.
+
 ### Texture Workflow
 
 ```bash
-# 1. Extract a texture from the game
+# 1. Extract textures from the game
 UAssetTool extract_iostore_legacy "C:/Game/Paks" extracted --filter T_1053_Skin_D
 
 # 2. Extract to PNG for editing (full resolution including OptionalBulkData mips)
 UAssetTool extract_texture extracted/.../T_1053_Skin_D.uasset original.png --usmap game.usmap
 
-# 3. Edit in your image editor, then inject back
+# 3. Edit in your image editor, then inject back (single file)
 UAssetTool inject_texture extracted/.../T_1053_Skin_D.uasset edited.png output/T_1053_Skin_D.uasset --usmap game.usmap
 
+# 3b. Or batch inject: put edited PNGs in a folder with matching names
+UAssetTool batch_inject_texture extracted/ my_edited_textures/ output/ --usmap game.usmap
+
 # 4. Create mod
-UAssetTool create_mod_iostore "mods/MySkin" output/.../T_1053_Skin_D.uasset
+UAssetTool create_mod_iostore "mods/MySkin" output/
 ```
 
 ---
