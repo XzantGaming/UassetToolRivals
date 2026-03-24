@@ -25,6 +25,14 @@ A CLI tool for parsing, editing, and converting Unreal Engine 5 assets. Built on
 
 Grab the latest self-contained executable from [Releases](https://github.com/XzantGaming/UassetToolRivals/releases). No .NET SDK required.
 
+### Check Version
+
+```bash
+UAssetTool version
+# or
+UAssetTool --version
+```
+
 ### Build from Source
 
 **Prerequisites:** .NET 8.0 SDK

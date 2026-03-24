@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using UAssetAPI;
@@ -79,6 +80,7 @@ public partial class Program
                 "extract_texture" => CliExtractTexture(args),
                 "batch_inject_texture" => CliBatchInjectTexture(args),
                 "batch_extract_texture" => CliBatchExtractTexture(args),
+                "version" or "--version" or "-v" => CliVersion(),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
             };
@@ -94,6 +96,16 @@ public partial class Program
         }
     }
     
+    private static int CliVersion()
+    {
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        var infoVersion = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        
+        Console.WriteLine($"UAssetTool v{infoVersion ?? version?.ToString() ?? "unknown"}");
+        return 0;
+    }
+
     private static int CliHelp()
     {
         Console.WriteLine("UAssetTool - Unified UE Asset Tool");
@@ -149,6 +161,7 @@ public partial class Program
         Console.WriteLine("    list_iostore <utoc_path> [--aes <key>]   - List IoStore contents with ubulk status");
         Console.WriteLine();
         Console.WriteLine("  Other:");
+        Console.WriteLine("    version                                  - Show tool version");
         Console.WriteLine();
         Console.WriteLine("Interactive mode: Run without arguments to use JSON stdin/stdout");
         return 0;
