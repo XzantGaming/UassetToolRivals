@@ -1495,19 +1495,8 @@ public partial class Program
                         File.WriteAllBytes(outputBulkPath, legacyBundle.BulkData);
                     }
                     
-                    // Write optional bulk data (high-res texture mips) if present
-                    if (legacyBundle.OptionalBulkData != null && legacyBundle.OptionalBulkData.Length > 0)
-                    {
-                        string outputOptPath = Path.ChangeExtension(outputAssetPath, ".uptnl");
-                        File.WriteAllBytes(outputOptPath, legacyBundle.OptionalBulkData);
-                    }
-                    
-                    // Write memory-mapped bulk data if present
-                    if (legacyBundle.MemoryMappedBulkData != null && legacyBundle.MemoryMappedBulkData.Length > 0)
-                    {
-                        string outputMmapPath = Path.ChangeExtension(outputAssetPath, ".m.ubulk");
-                        File.WriteAllBytes(outputMmapPath, legacyBundle.MemoryMappedBulkData);
-                    }
+                    // Note: OptionalBulkData and MemoryMappedBulkData are now merged into BulkData
+                    // by ZenToLegacyConverter for mod compatibility (legacy-to-Zen doesn't support .uptnl)
 
                     extractedPackages.Add(packageId);
                     converted++;
