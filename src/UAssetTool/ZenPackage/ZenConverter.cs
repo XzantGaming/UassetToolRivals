@@ -174,7 +174,7 @@ public class ZenConverter
             packagePath = gamePath.TrimStart('/');
         }
         
-        string uexpPath = uassetPath.Replace(".uasset", ".uexp");
+        string uexpPath = Path.ChangeExtension(uassetPath, ".uexp");
         if (!File.Exists(uexpPath))
         {
             throw new FileNotFoundException($"No .uexp file found: {uexpPath}");

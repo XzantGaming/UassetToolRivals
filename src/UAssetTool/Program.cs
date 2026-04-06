@@ -855,7 +855,9 @@ public partial class Program
 
         try
         {
-            byte[]? aesKey = aesKeyHex != null ? Convert.FromHexString(aesKeyHex) : null;
+            // Default to Marvel Rivals AES key if none provided
+            aesKeyHex ??= "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+            byte[] aesKey = Convert.FromHexString(aesKeyHex);
             using var reader = new IoStore.IoStoreReader(utocPath, aesKey);
             Console.WriteLine($"Opened IoStore: {reader.ContainerName}");
             Console.WriteLine($"  TOC Version: {reader.Toc.Version}");
@@ -1473,7 +1475,7 @@ public partial class Program
                         relPath = relPath.Substring(1); // Remove leading slash
                     
                     relPath = relPath.Replace('/', Path.DirectorySeparatorChar);
-                    if (!relPath.EndsWith(".uasset"))
+                    if (!relPath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
                         relPath += ".uasset";
 
                     string outputAssetPath = Path.Combine(outputDir, relPath);
@@ -2528,8 +2530,8 @@ public partial class Program
                 // Additional CLI-equivalent operations for parity
                 "dump" => DumpAssetJson(request.FilePath, request.UsmapPath),
                 "skeletal_mesh_info" => GetSkeletalMeshInfoJson(request.FilePath, request.UsmapPath),
-                "to_json" => ToJsonJson(request.FilePath, request.UsmapPath, request.OutputPath),
-                "from_json" => FromJsonJson(request.FilePath, request.OutputPath, request.UsmapPath),
+                "to_json" or "batch_to_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath),
+                "from_json" or "batch_from_json" => FromJsonJson(request.FilePath, request.FilePaths, request.OutputPath, request.UsmapPath),
                 "cityhash" => CityHashJson(request.FilePath),
                 "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
                 "inspect_zen" => InspectZenJson(request.FilePath),
@@ -4042,7 +4044,7 @@ public partial class Program
         var asset = LoadAsset(uassetPath, usmapPath);
         asset.UseSeparateBulkDataFiles = true;
         
-        string uexpPath = uassetPath.Replace(".uasset", ".uexp");
+        string uexpPath = Path.ChangeExtension(uassetPath, ".uexp");
         if (!File.Exists(uexpPath))
         {
             return new { success = false, message = "No .uexp file found", fixed_count = 0 };
@@ -4400,7 +4402,7 @@ public partial class Program
         if (args.Length < 3)
         {
             Console.Error.WriteLine("Usage: UAssetTool dump_zen_from_game <paks_path> <package_path> [output_file]");
-            Console.Error.WriteLine("Example: UAssetTool dump_zen_from_game \"E:\\Game\\Paks\" \"/Game/Marvel/Characters/1057/1057001/Meshes/SK_1057_1057001\" original.bin");
+            Console.Error.WriteLine("Example: UAssetTool dump_zen_from_game \"/path/to/Game/Paks\" \"/Game/Marvel/Characters/1057/1057001/Meshes/SK_1057_1057001\" original.bin");
             return 1;
         }
 
@@ -4686,7 +4688,7 @@ public partial class Program
             Console.Error.WriteLine("  --no-compress         - Disable compression");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Example:");
-            Console.Error.WriteLine("  clone_mod_iostore \"E:\\Game\\Paks\" \"MyMod\" \"/Game/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001\"");
+            Console.Error.WriteLine("  clone_mod_iostore \"/path/to/Game/Paks\" \"MyMod\" \"/Game/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001\"");
             return 1;
         }
 
@@ -5524,7 +5526,7 @@ public partial class Program
                     relPath = ResolveGamePathToContent(relPath);
                     
                     relPath = relPath.Replace('/', Path.DirectorySeparatorChar);
-                    if (!relPath.EndsWith(".uasset"))
+                    if (!relPath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
                         relPath += ".uasset";
                     
                     string outputAssetPath = Path.Combine(outputDir, relPath);
@@ -5653,7 +5655,7 @@ public partial class Program
                 return new UAssetResponse { Success = false, Message = "No .uasset files found in input directory" };
             
             // Determine output paths
-            string outputBase = outputPath.EndsWith(".utoc") ? outputPath.Substring(0, outputPath.Length - 5) : outputPath;
+            string outputBase = outputPath.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase) ? outputPath.Substring(0, outputPath.Length - 5) : outputPath;
             string utocPath = outputBase + ".utoc";
             string pakPath = outputBase + ".pak";
             string mount = string.IsNullOrEmpty(mountPoint) ? "../../../" : mountPoint;
@@ -5838,7 +5840,7 @@ public partial class Program
             if (uassetFiles.Count == 0)
                 return new UAssetResponse { Success = false, Message = "No .uasset files found in input directory" };
             
-            string utocPath = outputPath.EndsWith(".utoc") ? outputPath : outputPath + ".utoc";
+            string utocPath = outputPath.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase) ? outputPath : outputPath + ".utoc";
             string pakPath = Path.ChangeExtension(utocPath, ".pak");
             
             // Convert each asset to Zen format and write to IoStore
@@ -6272,11 +6274,7 @@ public partial class Program
         
         try
         {
-            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
-            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
-            {
-                asset.Mappings = new Usmap(usmapPath);
-            }
+            var asset = LoadAsset(filePath, usmapPath);
             
             var result = new Dictionary<string, object>
             {
@@ -6316,11 +6314,7 @@ public partial class Program
         
         try
         {
-            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
-            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
-            {
-                asset.Mappings = new Usmap(usmapPath);
-            }
+            var asset = LoadAsset(filePath, usmapPath);
             
             var skExport = asset.Exports.OfType<UAssetAPI.ExportTypes.SkeletalMeshExport>().FirstOrDefault();
             if (skExport == null)
@@ -6346,59 +6340,197 @@ public partial class Program
         }
     }
     
-    private static UAssetResponse ToJsonJson(string? filePath, string? usmapPath, string? outputPath)
+    private static UAssetResponse ToJsonJson(string? filePath, List<string>? filePaths, string? usmapPath, string? outputPath)
     {
-        if (string.IsNullOrEmpty(filePath))
-            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        // Batch mode: file_paths provided → parallel processing
+        bool isBatch = filePaths != null && filePaths.Count > 0;
         
-        try
+        if (!isBatch)
         {
-            var asset = new UAsset(filePath, EngineVersion.VER_UE5_3);
-            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            // Single file mode
+            if (string.IsNullOrEmpty(filePath))
+                return new UAssetResponse { Success = false, Message = "file_path or file_paths is required" };
+            
+            try
             {
-                asset.Mappings = new Usmap(usmapPath);
+                var asset = LoadAsset(filePath, usmapPath);
+                PreloadReferencedAssetsForSchemas(asset);
+                
+                string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
+                
+                if (!string.IsNullOrEmpty(outputPath))
+                {
+                    string? outDir = Path.GetDirectoryName(outputPath);
+                    if (!string.IsNullOrEmpty(outDir))
+                        Directory.CreateDirectory(outDir);
+                    File.WriteAllText(outputPath, jsonOutput, System.Text.Encoding.UTF8);
+                    return new UAssetResponse { Success = true, Message = $"JSON saved to {outputPath}" };
+                }
+                
+                return new UAssetResponse { Success = true, Message = jsonOutput };
             }
-            
-            string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
-            
-            if (!string.IsNullOrEmpty(outputPath))
+            catch (Exception ex)
             {
-                File.WriteAllText(outputPath, jsonOutput);
-                return new UAssetResponse { Success = true, Message = $"JSON saved to {outputPath}" };
+                return new UAssetResponse { Success = false, Message = $"Failed to convert to JSON: {ex.Message}" };
             }
-            
-            return new UAssetResponse { Success = true, Message = jsonOutput };
         }
-        catch (Exception ex)
+        
+        // Batch parallel mode
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "output_path (output directory) is required for batch mode" };
+        
+        Directory.CreateDirectory(outputPath);
+        
+        // Load mappings once upfront to avoid file locking in parallel threads
+        Usmap? mappings = LoadMappings(usmapPath);
+        
+        int successCount = 0;
+        int failCount = 0;
+        var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        
+        Parallel.ForEach(filePaths!, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, fp =>
         {
-            return new UAssetResponse { Success = false, Message = $"Failed to convert to JSON: {ex.Message}" };
-        }
+            try
+            {
+                var asset = LoadAssetWithMappings(fp, mappings);
+                PreloadReferencedAssetsForSchemas(asset);
+                
+                string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
+                string jsonOutputPath = Path.Combine(outputPath, Path.GetFileNameWithoutExtension(fp) + ".json");
+                File.WriteAllText(jsonOutputPath, jsonOutput, System.Text.Encoding.UTF8);
+                
+                Interlocked.Increment(ref successCount);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{Path.GetFileName(fp)}: {ex.Message}");
+                Interlocked.Increment(ref failCount);
+            }
+        });
+        
+        sw.Stop();
+        
+        var data = new Dictionary<string, object>
+        {
+            ["success_count"] = successCount,
+            ["fail_count"] = failCount,
+            ["total"] = filePaths!.Count,
+            ["elapsed_ms"] = sw.ElapsedMilliseconds
+        };
+        if (!errors.IsEmpty)
+            data["errors"] = errors.ToList();
+        
+        return new UAssetResponse
+        {
+            Success = failCount == 0,
+            Message = $"Batch to_json: {successCount}/{filePaths!.Count} succeeded in {sw.ElapsedMilliseconds}ms",
+            Data = data
+        };
     }
     
-    private static UAssetResponse FromJsonJson(string? jsonPath, string? outputPath, string? usmapPath)
+    private static UAssetResponse FromJsonJson(string? jsonPath, List<string>? filePaths, string? outputPath, string? usmapPath)
     {
-        if (string.IsNullOrEmpty(jsonPath))
-            return new UAssetResponse { Success = false, Message = "file_path (JSON path) is required" };
-        if (string.IsNullOrEmpty(outputPath))
-            return new UAssetResponse { Success = false, Message = "output_path is required" };
+        // Batch mode: file_paths provided → parallel processing
+        bool isBatch = filePaths != null && filePaths.Count > 0;
         
-        try
+        if (!isBatch)
         {
-            string jsonContent = File.ReadAllText(jsonPath);
-            var asset = UAsset.DeserializeJson(jsonContent);
+            // Single file mode
+            if (string.IsNullOrEmpty(jsonPath))
+                return new UAssetResponse { Success = false, Message = "file_path or file_paths is required" };
+            if (string.IsNullOrEmpty(outputPath))
+                return new UAssetResponse { Success = false, Message = "output_path is required" };
             
-            if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            try
             {
-                asset.Mappings = new Usmap(usmapPath);
+                string jsonContent = File.ReadAllText(jsonPath);
+                var asset = UAsset.DeserializeJson(jsonContent);
+                
+                if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+                {
+                    asset.Mappings = new Usmap(usmapPath);
+                }
+                
+                asset.FilePath = Path.GetFullPath(outputPath);
+                PreloadReferencedAssetsForSchemas(asset);
+                
+                string? outDir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrEmpty(outDir))
+                    Directory.CreateDirectory(outDir);
+                
+                asset.Write(outputPath);
+                return new UAssetResponse { Success = true, Message = $"Asset saved to {outputPath}" };
             }
-            
-            asset.Write(outputPath);
-            return new UAssetResponse { Success = true, Message = $"Asset saved to {outputPath}" };
+            catch (Exception ex)
+            {
+                return new UAssetResponse { Success = false, Message = $"Failed to convert from JSON: {ex.Message}" };
+            }
         }
-        catch (Exception ex)
+        
+        // Batch parallel mode
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "output_path (output directory) is required for batch mode" };
+        
+        Directory.CreateDirectory(outputPath);
+        
+        // Load mappings once, shared across threads (read-only after construction)
+        Usmap? mappings = null;
+        if (!string.IsNullOrEmpty(usmapPath) && File.Exists(usmapPath))
+            mappings = new Usmap(usmapPath);
+        
+        int successCount = 0;
+        int failCount = 0;
+        var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        
+        Parallel.ForEach(filePaths!, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, jp =>
         {
-            return new UAssetResponse { Success = false, Message = $"Failed to convert from JSON: {ex.Message}" };
-        }
+            try
+            {
+                string jsonContent = File.ReadAllText(jp, System.Text.Encoding.UTF8);
+                var asset = UAsset.DeserializeJson(jsonContent);
+                
+                if (asset == null)
+                {
+                    errors.Add($"{Path.GetFileName(jp)}: Failed to deserialize JSON");
+                    Interlocked.Increment(ref failCount);
+                    return;
+                }
+                
+                asset.Mappings = mappings;
+                string uassetOutputPath = Path.Combine(outputPath, Path.GetFileNameWithoutExtension(jp) + ".uasset");
+                asset.FilePath = Path.GetFullPath(uassetOutputPath);
+                PreloadReferencedAssetsForSchemas(asset);
+                asset.Write(uassetOutputPath);
+                
+                Interlocked.Increment(ref successCount);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{Path.GetFileName(jp)}: {ex.Message}");
+                Interlocked.Increment(ref failCount);
+            }
+        });
+        
+        sw.Stop();
+        
+        var data = new Dictionary<string, object>
+        {
+            ["success_count"] = successCount,
+            ["fail_count"] = failCount,
+            ["total"] = filePaths!.Count,
+            ["elapsed_ms"] = sw.ElapsedMilliseconds
+        };
+        if (!errors.IsEmpty)
+            data["errors"] = errors.ToList();
+        
+        return new UAssetResponse
+        {
+            Success = failCount == 0,
+            Message = $"Batch from_json: {successCount}/{filePaths!.Count} succeeded in {sw.ElapsedMilliseconds}ms",
+            Data = data
+        };
     }
     
     private static UAssetResponse CityHashJson(string? pathString)

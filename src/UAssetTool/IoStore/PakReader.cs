@@ -672,7 +672,7 @@ public class PakReader : IDisposable
         // Use the OodleCompression class which handles DLL loading/downloading
         byte[]? result = OodleCompression.Decompress(data, uncompressedSize);
         if (result == null)
-            throw new InvalidDataException($"Oodle decompression failed. Make sure oo2core_9_win64.dll is available.");
+            throw new InvalidDataException($"Oodle decompression failed. Make sure the Oodle native library is in the application directory.");
         return result;
     }
 

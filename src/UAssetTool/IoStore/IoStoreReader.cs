@@ -937,9 +937,14 @@ public static class OodleDecompressor
         // Use the OodleCompression class which has proper P/Invoke setup
         if (!OodleCompression.IsAvailable)
         {
+            string libName = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux)
+                ? "liboo2corelinux64.so.9"
+                : System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX)
+                    ? "liboo2coremac64.9.dylib"
+                    : "oo2core_9_win64.dll";
             throw new NotSupportedException(
-                "Oodle decompression requires the native oo2core_9_win64.dll library. " +
-                "Please ensure it's in the application directory or system PATH.");
+                $"Oodle decompression requires the native Oodle library ({libName}). " +
+                "Please ensure it's in the application directory.");
         }
 
         var decompressed = OodleCompression.Decompress(compressedData, uncompressedSize);

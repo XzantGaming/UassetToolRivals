@@ -476,6 +476,23 @@ UAssetTool
 {"action": "import_from_json", "file_path": "...", "json_data": "..."}
 ```
 
+**JSON Conversion (single + batch parallel)**
+```json
+{"action": "to_json", "file_path": "...", "usmap_path": "...", "output_path": "..."}
+{"action": "to_json", "file_paths": [...], "usmap_path": "...", "output_path": "output_dir/"}
+{"action": "from_json", "file_path": "...", "output_path": "...", "usmap_path": "..."}
+{"action": "from_json", "file_paths": [...], "output_path": "output_dir/", "usmap_path": "..."}
+```
+When `file_paths` (array) is provided instead of `file_path`, processing is automatic parallel via `Parallel.ForEach`. The `batch_to_json` and `batch_from_json` action names are also accepted as aliases.
+
+**Asset Inspection**
+```json
+{"action": "dump", "file_path": "...", "usmap_path": "..."}
+{"action": "cityhash", "file_path": "path/string/to/hash"}
+{"action": "inspect_zen", "file_path": "..."}
+{"action": "clone_mod_iostore", "file_path": "...", "output_path": "..."}
+```
+
 **Texture**
 ```json
 {"action": "get_texture_info", "file_path": "..."}

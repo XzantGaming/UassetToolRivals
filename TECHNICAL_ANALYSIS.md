@@ -359,22 +359,12 @@ Working backwards from `PACKAGE_FILE_TAG` (0x9E2A83C1):
 
 When converting modder-cooked StaticMesh assets via `create_mod_iostore`:
 
-1. **Versioned Properties** — Kept as-is (no unversioned conversion)
-2. **ScreenSize Expansion** — 64→128 bytes (binary patch)
-3. **NavCollision** — Left untouched (game handles variable sizes)
+1. **Unversioned Property Conversion** — If the asset has versioned (tagged) properties (`HasUnversionedProperties=false`), re-serializes with unversioned properties using the usmap schema. This is required because Marvel Rivals expects unversioned properties and crashes with `EXCEPTION_ACCESS_VIOLATION` on versioned StaticMesh assets.
+2. **LWC Inflation** — After unversioned conversion, `FBoxSphereBounds` is inflated by +28 bytes for Large World Coordinates (float→double for Origin, BoxExtent, SphereRadius).
+3. **ScreenSize Expansion** — 64→128 bytes (binary patch)
+4. **NavCollision** — Left untouched (game handles variable sizes)
 
-### Why Unversioned Conversion is Disabled
-
-UAssetAPI's usmap schema produces **different global property indices** than the game's runtime class hierarchy:
-
-| Source | Property Indices |
-|--------|------------------|
-| Game runtime | 2, 3, 5 |
-| UAssetAPI usmap | 17, 18, 19, 28 |
-
-This mismatch causes `Bad export index` crashes because the game misreads property data when the unversioned header encodes wrong indices. The game's StaticMesh parent hierarchy contributes only 2 properties before StaticMesh's own, while UAssetAPI's usmap resolution thinks it contributes 17.
-
-**Solution:** Keep the modder's original versioned (tagged) properties. The game's async loader can handle versioned properties as long as the binary Extras (FStaticMeshRenderData) are correctly formatted.
+**Note:** The unversioned conversion uses `ReserializePropertiesOnly()` which re-serializes only the tagged property section while preserving the binary Extras (FStaticMeshRenderData) byte-for-byte. The original unversioned header replay mechanism ensures byte-perfect output for assets that were already unversioned.
 
 ### Export Layout
 
@@ -1911,10 +1901,21 @@ UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]
 
 ### Interactive JSON API
 
+**GUI Backend (inline JSON data):**
 ```json
 {"action": "export_to_json", "file_path": "path/to/asset.uasset", "usmap_path": "path/to/mappings.usmap"}
 {"action": "import_from_json", "file_path": "path/to/output.uasset", "usmap_path": "...", "json_data": "..."}
 ```
+
+**File-based (single + batch parallel):**
+```json
+{"action": "to_json", "file_path": "asset.uasset", "usmap_path": "...", "output_path": "out.json"}
+{"action": "to_json", "file_paths": ["a.uasset", "b.uasset"], "usmap_path": "...", "output_path": "output_dir/"}
+{"action": "from_json", "file_path": "asset.json", "output_path": "out.uasset", "usmap_path": "..."}
+{"action": "from_json", "file_paths": ["a.json", "b.json"], "output_path": "output_dir/", "usmap_path": "..."}
+```
+
+When `file_paths` (array) is provided, processing uses `Parallel.ForEach` with `Environment.ProcessorCount` threads. The usmap is loaded once and shared across threads. Batch responses include `success_count`, `fail_count`, `total`, and `elapsed_ms`. The action names `batch_to_json` and `batch_from_json` are accepted as aliases.
 
 ### JSON Structure
 

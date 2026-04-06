@@ -29,6 +29,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using UAssetAPI.PropertyTypes.Objects;
 
@@ -59,8 +60,51 @@ public enum PakCompression : byte
 
 public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid
 {
+    private static bool _resolverRegistered = false;
+
+    /// <summary>
+    /// Get the platform-specific native library filename for repak.
+    /// </summary>
+    private static string GetPlatformLibraryName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return "repak_bind.dll";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return "librepak_bind.so";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return "librepak_bind.dylib";
+        return "repak_bind.dll";
+    }
+
+    /// <summary>
+    /// Register a DllImport resolver so the runtime finds the correct repak library per platform.
+    /// </summary>
+    private static void RegisterResolver()
+    {
+        if (_resolverRegistered) return;
+        _resolverRegistered = true;
+
+        NativeLibrary.SetDllImportResolver(typeof(RePakInterop).Assembly, (libraryName, assembly, searchPath) =>
+        {
+            if (libraryName == RePakInterop.NativeLib)
+            {
+                string platformLib = GetPlatformLibraryName();
+                // Try beside the executable first
+                string fullPath = Path.Combine(AppContext.BaseDirectory, platformLib);
+                if (NativeLibrary.TryLoad(fullPath, out IntPtr handle))
+                    return handle;
+                // Try current directory
+                if (NativeLibrary.TryLoad(platformLib, assembly, searchPath, out handle))
+                    return handle;
+            }
+            return IntPtr.Zero;
+        });
+    }
+
     public PakBuilder() : base(true)
     {
+        RegisterResolver();
+
         try
         {
             SetHandle(RePakInterop.pak_builder_new());
@@ -69,12 +113,25 @@ public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid
         {
             if (ex is DllNotFoundException || ex is BadImageFormatException)
             {
-                // extract dll if needed
-                using (var resource = typeof(PropertyData).Assembly.GetManifestResourceStream("UAssetAPI.repak_bind.dll"))
+                // Extract embedded native lib for the current platform
+                string libName = GetPlatformLibraryName();
+                string embeddedResourceName = "UAssetAPI.repak_bind.dll"; // embedded resource is always the Windows DLL
+
+                // On non-Windows, the embedded Windows DLL won't work, so give a clear error
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    throw new DllNotFoundException(
+                        $"repak native library not found: {libName}. " +
+                        $"Place the platform-specific repak library ({libName}) beside the UAssetTool executable. " +
+                        $"Build repak for your platform from https://github.com/trumank/repak");
+                }
+
+                // Windows: extract embedded DLL
+                using (var resource = typeof(PropertyData).Assembly.GetManifestResourceStream(embeddedResourceName))
                 {
                     if (resource != null)
                     {
-                        using (var file = new FileStream("repak_bind.dll", FileMode.Create, FileAccess.Write))
+                        using (var file = new FileStream(libName, FileMode.Create, FileAccess.Write))
                         {
                             resource.CopyTo(file);
                         }

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net.Http;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace UAssetTool.IoStore;
@@ -47,12 +48,53 @@ public enum OodleCompressionLevel : int
 /// </summary>
 public static class OodleCompression
 {
-    private const string OODLE_DLL_NAME = "oo2core_9_win64.dll";
+    private const string OODLE_DLL_NAME = "oo2core_9_win64"; // logical name, resolved per-platform
     private const string OODLE_DOWNLOAD_URL = "https://github.com/new-world-tools/go-oodle/releases/download/v0.2.3-files/oo2core_9_win64.dll";
     private const long OODLE_MIN_VALID_SIZE = 500_000; // 500KB minimum
 
     private static bool _initialized = false;
     private static bool _available = false;
+    private static bool _resolverRegistered = false;
+
+    /// <summary>
+    /// Get the platform-specific Oodle library filename.
+    /// </summary>
+    private static string GetPlatformLibraryName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return "oo2core_9_win64.dll";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return "liboo2corelinux64.so.9";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return "liboo2coremac64.9.dylib";
+        return "oo2core_9_win64.dll";
+    }
+
+    /// <summary>
+    /// Register a DllImport resolver so the runtime finds the correct platform library.
+    /// </summary>
+    private static void RegisterResolver()
+    {
+        if (_resolverRegistered) return;
+        _resolverRegistered = true;
+
+        NativeLibrary.SetDllImportResolver(typeof(OodleCompression).Assembly, (libraryName, assembly, searchPath) =>
+        {
+            if (libraryName == OODLE_DLL_NAME || libraryName == "oo2core_9_win64.dll")
+            {
+                string platformLib = GetPlatformLibraryName();
+                // Try beside the executable first
+                string exePath = AppContext.BaseDirectory;
+                string fullPath = Path.Combine(exePath, platformLib);
+                if (NativeLibrary.TryLoad(fullPath, out IntPtr handle))
+                    return handle;
+                // Try system paths
+                if (NativeLibrary.TryLoad(platformLib, assembly, searchPath, out handle))
+                    return handle;
+            }
+            return IntPtr.Zero;
+        });
+    }
 
     [DllImport(OODLE_DLL_NAME, CallingConvention = CallingConvention.StdCall)]
     private static extern IntPtr OodleLZ_Compress(
@@ -103,7 +145,7 @@ public static class OodleCompression
     }
 
     /// <summary>
-    /// Initialize Oodle - download DLL if needed.
+    /// Initialize Oodle - download library if needed (Windows only).
     /// </summary>
     public static void Initialize()
     {
@@ -111,22 +153,33 @@ public static class OodleCompression
             return;
 
         _initialized = true;
+        RegisterResolver();
 
         try
         {
             string exePath = AppContext.BaseDirectory;
-            string dllPath = Path.Combine(exePath, OODLE_DLL_NAME);
+            string libName = GetPlatformLibraryName();
+            string libPath = Path.Combine(exePath, libName);
 
-            // Check if DLL exists and is valid
-            if (!IsOodleValid(dllPath))
+            // Check if library exists and is valid
+            if (!IsOodleValid(libPath))
             {
-                // Try to download
-                Console.Error.WriteLine($"[Oodle] Downloading Oodle library...");
-                DownloadOodle(dllPath);
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    // Auto-download only on Windows
+                    Console.Error.WriteLine($"[Oodle] Downloading Oodle library...");
+                    DownloadOodle(libPath);
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[Oodle] Oodle library not found: {libName}");
+                    Console.Error.WriteLine($"[Oodle] Place the Oodle library beside the executable to enable Oodle compression.");
+                    return;
+                }
             }
 
             // Try to load and test
-            if (File.Exists(dllPath))
+            if (File.Exists(libPath))
             {
                 // Test by calling GetCompressedBufferSizeNeeded
                 var size = OodleLZ_GetCompressedBufferSizeNeeded(OodleCompressor.Kraken, (IntPtr)1024);
@@ -136,6 +189,12 @@ public static class OodleCompression
                     Console.Error.WriteLine($"[Oodle] Initialized successfully");
                 }
             }
+        }
+        catch (DllNotFoundException)
+        {
+            Console.Error.WriteLine($"[Oodle] Native library not found for this platform ({RuntimeInformation.OSDescription}).");
+            Console.Error.WriteLine($"[Oodle] Expected: {GetPlatformLibraryName()}");
+            _available = false;
         }
         catch (Exception ex)
         {
