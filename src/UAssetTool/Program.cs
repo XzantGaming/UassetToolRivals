@@ -663,7 +663,7 @@ public partial class Program
             int threadCount = Math.Max(1, (Environment.ProcessorCount * 3) / 4); // 75% of cores
             Console.Error.WriteLine($"[CreateModIoStore]   Threads: {threadCount}");
 
-            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, string? error)>();
+            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, byte[]? uptnlData, byte[]? mubulkData, string? error)>();
             int processedCount = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -679,7 +679,15 @@ public partial class Program
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
                     if (File.Exists(ubulkPath)) ubulkData = File.ReadAllBytes(ubulkPath);
 
-                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, null));
+                    byte[]? uptnlData = null;
+                    string uptnlPath = Path.ChangeExtension(uassetPath, ".uptnl");
+                    if (File.Exists(uptnlPath)) uptnlData = File.ReadAllBytes(uptnlPath);
+
+                    byte[]? mubulkData = null;
+                    string mubulkPath = Path.ChangeExtension(uassetPath, ".m.ubulk");
+                    if (File.Exists(mubulkPath)) mubulkData = File.ReadAllBytes(mubulkPath);
+
+                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, uptnlData, mubulkData, null));
 
                     int count = Interlocked.Increment(ref processedCount);
                     if (count % 50 == 0 || count == uassetFiles.Count)
@@ -689,7 +697,7 @@ public partial class Program
                 }
                 catch (Exception ex)
                 {
-                    conversionResults.Add((assetName, uassetPath, null, "", null, null, ex.Message));
+                    conversionResults.Add((assetName, uassetPath, null, "", null, null, null, null, ex.Message));
                     Interlocked.Increment(ref processedCount);
                 }
             });
@@ -724,7 +732,7 @@ public partial class Program
 
                 try
                 {
-                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, _) = result;
+                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, uptnlData, mubulkData, _) = result;
 
                     // Create package ID using the /Game/... format
                     string gamePackagePath;
@@ -767,6 +775,24 @@ public partial class Program
                         string bulkFullPath = mountPoint + packagePath + ".ubulk";
                         ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
                         filePaths.Add(packagePath + ".ubulk");
+                    }
+
+                    // Handle .uptnl if exists
+                    if (uptnlData != null)
+                    {
+                        var optBulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.OptionalBulkData);
+                        string optBulkFullPath = mountPoint + packagePath + ".uptnl";
+                        ioStoreWriter.WriteChunk(optBulkChunkId, optBulkFullPath, uptnlData);
+                        filePaths.Add(packagePath + ".uptnl");
+                    }
+
+                    // Handle .m.ubulk if exists
+                    if (mubulkData != null)
+                    {
+                        var memBulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.MemoryMappedBulkData);
+                        string memBulkFullPath = mountPoint + packagePath + ".m.ubulk";
+                        ioStoreWriter.WriteChunk(memBulkChunkId, memBulkFullPath, mubulkData);
+                        filePaths.Add(packagePath + ".m.ubulk");
                     }
 
                     convertedCount++;
@@ -5693,7 +5719,7 @@ public partial class Program
             Console.Error.Flush();
             
             // Phase 1: Parallel conversion to Zen format (CPU-intensive)
-            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, string? error)>();
+            var conversionResults = new System.Collections.Concurrent.ConcurrentBag<(string assetName, string uassetPath, byte[]? zenData, string packagePath, ZenPackage.FZenPackage? zenPackage, byte[]? ubulkData, byte[]? uptnlData, byte[]? mubulkData, string? error)>();
             int processedCount = 0;
             
             Parallel.ForEach(uassetFiles, new ParallelOptions { MaxDegreeOfParallelism = threadCount }, uassetPath =>
@@ -5707,8 +5733,16 @@ public partial class Program
                     byte[]? ubulkData = null;
                     string ubulkPath = Path.ChangeExtension(uassetPath, ".ubulk");
                     if (File.Exists(ubulkPath)) ubulkData = File.ReadAllBytes(ubulkPath);
+
+                    byte[]? uptnlData = null;
+                    string uptnlPath = Path.ChangeExtension(uassetPath, ".uptnl");
+                    if (File.Exists(uptnlPath)) uptnlData = File.ReadAllBytes(uptnlPath);
+
+                    byte[]? mubulkData = null;
+                    string mubulkPath = Path.ChangeExtension(uassetPath, ".m.ubulk");
+                    if (File.Exists(mubulkPath)) mubulkData = File.ReadAllBytes(mubulkPath);
                     
-                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, null));
+                    conversionResults.Add((assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, uptnlData, mubulkData, null));
                     
                     int count = Interlocked.Increment(ref processedCount);
                     if (count % 50 == 0 || count == uassetFiles.Count)
@@ -5719,7 +5753,7 @@ public partial class Program
                 }
                 catch (Exception ex)
                 {
-                    conversionResults.Add((assetName, uassetPath, null, "", null, null, ex.Message));
+                    conversionResults.Add((assetName, uassetPath, null, "", null, null, null, null, ex.Message));
                     Interlocked.Increment(ref processedCount);
                 }
             });
@@ -5751,7 +5785,7 @@ public partial class Program
                 
                 try
                 {
-                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, _) = result;
+                    var (assetName, uassetPath, zenData, packagePath, zenPackage, ubulkData, uptnlData, mubulkData, _) = result;
                     
                     // Create package ID using the /Game/... format
                     string gamePackagePath;
@@ -5795,6 +5829,24 @@ public partial class Program
                         string bulkFullPath = mount + packagePath + ".ubulk";
                         ioStoreWriter.WriteChunk(bulkChunkId, bulkFullPath, ubulkData);
                         filePaths.Add(packagePath + ".ubulk");
+                    }
+
+                    // Handle .uptnl if exists
+                    if (uptnlData != null)
+                    {
+                        var optBulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.OptionalBulkData);
+                        string optBulkFullPath = mount + packagePath + ".uptnl";
+                        ioStoreWriter.WriteChunk(optBulkChunkId, optBulkFullPath, uptnlData);
+                        filePaths.Add(packagePath + ".uptnl");
+                    }
+
+                    // Handle .m.ubulk if exists
+                    if (mubulkData != null)
+                    {
+                        var memBulkChunkId = IoStore.FIoChunkId.FromPackageId(packageId, 0, IoStore.EIoChunkType.MemoryMappedBulkData);
+                        string memBulkFullPath = mount + packagePath + ".m.ubulk";
+                        ioStoreWriter.WriteChunk(memBulkChunkId, memBulkFullPath, mubulkData);
+                        filePaths.Add(packagePath + ".m.ubulk");
                     }
                     
                     converted++;
