@@ -350,6 +350,28 @@ public class IoStoreReader : IDisposable
         return fullPath;
     }
 
+    /// <summary>
+    /// Read a chunk by its file path (relative to mount point, e.g. "Marvel/Content/Marvel/.../T_Foo.uptnl")
+    /// Returns null if not found.
+    /// </summary>
+    public byte[]? ReadChunkByPath(string relativePath)
+    {
+        if (!_toc.FileMap.TryGetValue(relativePath, out uint tocEntryIndex))
+            return null;
+        if (tocEntryIndex >= _toc.Chunks.Count)
+            return null;
+        var chunkId = _toc.Chunks[(int)tocEntryIndex];
+        return ReadChunk(chunkId);
+    }
+
+    /// <summary>
+    /// Check if a file path exists in this container's directory index.
+    /// </summary>
+    public bool HasPath(string relativePath)
+    {
+        return _toc.FileMap.ContainsKey(relativePath);
+    }
+
     private void EnsureCasOpen()
     {
         _casStream ??= new FileStream(_ucasPath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -439,6 +461,7 @@ public class IoStoreToc
     public List<string> CompressionMethods { get; set; } = new();
     public Dictionary<FIoChunkIdRaw, uint> ChunkIdMap { get; set; } = new();
     public Dictionary<uint, string> FileMapRev { get; set; } = new();
+    public Dictionary<string, uint> FileMap { get; set; } = new();
     public string MountPoint { get; set; } = "";
     public byte[]? AesKey { get; set; }
     public FIoContainerId ContainerId { get; set; }
@@ -818,6 +841,7 @@ public class IoStoreToc
             if (file.userData < toc.Chunks.Count)
             {
                 toc.FileMapRev[file.userData] = fullPath;
+                toc.FileMap[fullPath] = file.userData;
             }
             
             fileIndex = file.nextFile;

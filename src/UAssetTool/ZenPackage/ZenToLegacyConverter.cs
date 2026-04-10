@@ -95,34 +95,16 @@ public class ZenToLegacyConverter
         {
             byte[]? bulkData = _context.ReadBulkData(_packageId, _sourceContainerIndex);
             byte[]? optionalBulkData = _context.ReadOptionalBulkData(_packageId, _sourceContainerIndex);
+            byte[]? memoryMappedBulkData = _context.ReadMemoryMappedBulkData(_packageId, _sourceContainerIndex);
             
-            // IMPORTANT: Merge OptionalBulkData into BulkData for mod compatibility.
-            // Mods cannot use separate .uptnl files - the legacy-to-Zen converter only handles .ubulk.
-            // OptionalBulkData contains high-res mips that must be preserved, so we concatenate them.
-            if (optionalBulkData != null && optionalBulkData.Length > 0)
-            {
-                if (bulkData != null && bulkData.Length > 0)
-                {
-                    // Merge: OptionalBulkData first (high-res mips), then BulkData (mid-res mips)
-                    byte[] merged = new byte[optionalBulkData.Length + bulkData.Length];
-                    Array.Copy(optionalBulkData, 0, merged, 0, optionalBulkData.Length);
-                    Array.Copy(bulkData, 0, merged, optionalBulkData.Length, bulkData.Length);
-                    bundle.BulkData = merged;
-                }
-                else
-                {
-                    // Only OptionalBulkData exists
-                    bundle.BulkData = optionalBulkData;
-                }
-            }
-            else if (bulkData != null && bulkData.Length > 0)
-            {
-                // Only regular BulkData exists
+            if (bulkData != null && bulkData.Length > 0)
                 bundle.BulkData = bulkData;
-            }
             
-            // Note: We intentionally do NOT set bundle.OptionalBulkData or MemoryMappedBulkData
-            // because the legacy-to-Zen converter doesn't support them for mods.
+            if (optionalBulkData != null && optionalBulkData.Length > 0)
+                bundle.OptionalBulkData = optionalBulkData;
+            
+            if (memoryMappedBulkData != null && memoryMappedBulkData.Length > 0)
+                bundle.MemoryMappedBulkData = memoryMappedBulkData;
         }
         
         return bundle;

@@ -1497,8 +1497,17 @@ public partial class Program
                         File.WriteAllBytes(outputBulkPath, legacyBundle.BulkData);
                     }
                     
-                    // Note: OptionalBulkData and MemoryMappedBulkData are now merged into BulkData
-                    // by ZenToLegacyConverter for mod compatibility (legacy-to-Zen doesn't support .uptnl)
+                    if (legacyBundle.OptionalBulkData != null && legacyBundle.OptionalBulkData.Length > 0)
+                    {
+                        string outputUptnlPath = Path.ChangeExtension(outputAssetPath, ".uptnl");
+                        File.WriteAllBytes(outputUptnlPath, legacyBundle.OptionalBulkData);
+                    }
+                    
+                    if (legacyBundle.MemoryMappedBulkData != null && legacyBundle.MemoryMappedBulkData.Length > 0)
+                    {
+                        string outputMBulkPath = Path.ChangeExtension(outputAssetPath, ".m.ubulk");
+                        File.WriteAllBytes(outputMBulkPath, legacyBundle.MemoryMappedBulkData);
+                    }
 
                     extractedPackages.Add(packageId);
                     converted++;
@@ -5549,6 +5558,22 @@ public partial class Program
                         string outputBulkPath = Path.ChangeExtension(outputAssetPath, ".ubulk");
                         File.WriteAllBytes(outputBulkPath, legacyBundle.BulkData);
                         extractedFiles.Add(Path.ChangeExtension(relPath, ".ubulk"));
+                    }
+                    
+                    // Write .uptnl if present
+                    if (legacyBundle.OptionalBulkData != null && legacyBundle.OptionalBulkData.Length > 0)
+                    {
+                        string outputUptnlPath = Path.ChangeExtension(outputAssetPath, ".uptnl");
+                        File.WriteAllBytes(outputUptnlPath, legacyBundle.OptionalBulkData);
+                        extractedFiles.Add(Path.ChangeExtension(relPath, ".uptnl"));
+                    }
+                    
+                    // Write .m.ubulk if present
+                    if (legacyBundle.MemoryMappedBulkData != null && legacyBundle.MemoryMappedBulkData.Length > 0)
+                    {
+                        string outputMBulkPath = Path.ChangeExtension(outputAssetPath, ".m.ubulk");
+                        File.WriteAllBytes(outputMBulkPath, legacyBundle.MemoryMappedBulkData);
+                        extractedFiles.Add(Path.ChangeExtension(relPath, ".m.ubulk"));
                     }
                     
                     converted++;

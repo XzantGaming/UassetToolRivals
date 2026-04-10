@@ -583,91 +583,101 @@ public class FZenPackageContext : IDisposable
     }
 
     /// <summary>
-    /// Read optional bulk data (high-res mips) for a package from a container.
+    /// Read optional bulk data (high-res mips) for a package.
+    /// Uses path-based resolution since optional containers use different chunk IDs.
     /// </summary>
     public byte[]? ReadOptionalBulkData(ulong packageId, int containerIndex = -1)
     {
-        return ReadBulkDataOfType(packageId, IoStore.EIoChunkType.OptionalBulkData, containerIndex);
+        return ReadBulkDataByPath(packageId, ".uptnl", containerIndex);
     }
     
     /// <summary>
-    /// Read memory-mapped bulk data for a package from a container.
+    /// Read memory-mapped bulk data for a package.
+    /// Uses path-based resolution since optional containers use different chunk IDs.
     /// </summary>
     public byte[]? ReadMemoryMappedBulkData(ulong packageId, int containerIndex = -1)
     {
-        return ReadBulkDataOfType(packageId, IoStore.EIoChunkType.MemoryMappedBulkData, containerIndex);
+        return ReadBulkDataByPath(packageId, ".m.ubulk", containerIndex);
     }
     
     /// <summary>
-    /// Read bulk data chunks of a specific type for a package.
-    /// For OptionalBulkData and MemoryMappedBulkData, searches ALL containers
-    /// since these chunk types are often stored in separate optional containers.
+    /// Read bulk data by resolving the package's file path and changing the extension.
+    /// Optional/MemoryMapped containers use different chunk IDs than the main container,
+    /// so we must resolve by directory index path rather than package ID.
     /// </summary>
-    private byte[]? ReadBulkDataOfType(ulong packageId, IoStore.EIoChunkType chunkType, int containerIndex)
+    private byte[]? ReadBulkDataByPath(ulong packageId, string extension, int containerIndex)
     {
-        // Build list of containers to search
-        List<int> containersToSearch = new();
+        bool debug = Environment.GetEnvironmentVariable("DEBUG_BULK") == "1";
         
-        if (containerIndex >= 0 && containerIndex < _containers.Count)
-        {
-            containersToSearch.Add(containerIndex);
-        }
-        else if (_packageIdToChunk.TryGetValue(packageId, out var location))
-        {
-            containersToSearch.Add(location.ContainerIndex);
-        }
+        // Step 1: Find the ExportBundleData chunk and get its file path from the directory index
+        if (!_packageIdToChunk.TryGetValue(packageId, out var location))
+            return null;
         
-        // For optional/memory-mapped bulk data, also search all other containers
-        // since these are often stored in separate containers (e.g. pakchunk0_s1)
-        if (chunkType == IoStore.EIoChunkType.OptionalBulkData || 
-            chunkType == IoStore.EIoChunkType.MemoryMappedBulkData)
+        int sourceCI = containerIndex >= 0 ? containerIndex : location.ContainerIndex;
+        if (sourceCI < 0 || sourceCI >= _containers.Count)
+            return null;
+        
+        var sourceReader = _containers[sourceCI];
+        string? chunkPath = sourceReader.GetChunkPath(location.ChunkId);
+        if (string.IsNullOrEmpty(chunkPath))
         {
-            for (int i = 0; i < _containers.Count; i++)
-            {
-                if (!containersToSearch.Contains(i))
-                    containersToSearch.Add(i);
-            }
+            if (debug)
+                Console.Error.WriteLine($"[DEBUG_BULK] ReadBulkDataByPath: no path for packageId=0x{packageId:X16}");
+            return null;
         }
         
-        var bulkChunks = new List<(ushort Index, byte[] Data)>();
+        // Step 2: Get the relative path (without mount point) and change extension
+        // chunkPath = mountPoint + "/" + relativePath (e.g. "../../../Marvel/Content/Marvel/.../T_Foo.uasset")
+        // We need the relativePath part to match against other containers' FileMap
+        string mountPoint = sourceReader.Toc.MountPoint.TrimEnd('/');
+        string relativePath;
+        if (chunkPath.StartsWith(mountPoint + "/"))
+            relativePath = chunkPath.Substring(mountPoint.Length + 1);
+        else
+            relativePath = chunkPath;
         
-        foreach (int ci in containersToSearch)
+        // Change extension: .uasset -> .uptnl or .m.ubulk
+        string bulkRelPath;
+        if (extension == ".m.ubulk")
+        {
+            // .m.ubulk is a double extension
+            string baseName = Path.ChangeExtension(relativePath, null);
+            bulkRelPath = baseName + ".m.ubulk";
+        }
+        else
+        {
+            bulkRelPath = Path.ChangeExtension(relativePath, extension);
+        }
+        // Normalize to forward slashes
+        bulkRelPath = bulkRelPath.Replace('\\', '/');
+        
+        if (debug)
+            Console.Error.WriteLine($"[DEBUG_BULK] ReadBulkDataByPath: looking for '{bulkRelPath}' across {_containers.Count} containers");
+        
+        // Step 3: Search all containers for this file path
+        for (int ci = 0; ci < _containers.Count; ci++)
         {
             var reader = _containers[ci];
-            foreach (var chunk in reader.GetChunks())
+            try
             {
-                if (chunk.GetChunkType() == chunkType && chunk.Id == packageId)
+                byte[]? data = reader.ReadChunkByPath(bulkRelPath);
+                if (data != null && data.Length > 0)
                 {
-                    try
-                    {
-                        byte[] data = reader.ReadChunk(chunk);
-                        bulkChunks.Add((chunk.Index, data));
-                    }
-                    catch { }
+                    if (debug)
+                        Console.Error.WriteLine($"[DEBUG_BULK]   Found in container[{ci}] ({reader.ContainerName}): {data.Length} bytes");
+                    return data;
                 }
             }
-            // Stop searching once we find chunks in any container
-            if (bulkChunks.Count > 0)
-                break;
+            catch (Exception ex)
+            {
+                if (debug)
+                    Console.Error.WriteLine($"[DEBUG_BULK]   Error in container[{ci}] ({reader.ContainerName}): {ex.Message}");
+            }
         }
         
-        if (bulkChunks.Count == 0)
-            return null;
-            
-        bulkChunks.Sort((a, b) => a.Index.CompareTo(b.Index));
-        
-        if (bulkChunks.Count == 1)
-            return bulkChunks[0].Data;
-            
-        int totalSize = bulkChunks.Sum(c => c.Data.Length);
-        byte[] result = new byte[totalSize];
-        int offset = 0;
-        foreach (var (_, data) in bulkChunks)
-        {
-            Array.Copy(data, 0, result, offset, data.Length);
-            offset += data.Length;
-        }
-        return result;
+        if (debug)
+            Console.Error.WriteLine($"[DEBUG_BULK]   Not found in any container");
+        return null;
     }
     
     /// <summary>
