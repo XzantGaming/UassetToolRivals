@@ -1600,32 +1600,71 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool detect <uasset_path> [usmap_path]");
+            Console.Error.WriteLine("Usage: UAssetTool detect <path> [usmap_path]");
+            Console.Error.WriteLine("  <path> can be a .uasset file or a directory");
             return 1;
         }
 
-        string uassetPath = args[1];
+        string inputPath = args[1];
         string? usmapPath = args.Length > 2 ? args[2] : null;
 
-        if (!File.Exists(uassetPath))
+        // Single file
+        if (File.Exists(inputPath))
         {
-            Console.Error.WriteLine($"File not found: {uassetPath}");
-            return 1;
+            var asset = LoadAsset(inputPath, usmapPath);
+            var assetType = DetectAssetType(asset);
+            
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                path = inputPath,
+                asset_type = assetType,
+                export_count = asset.Exports.Count,
+                import_count = asset.Imports.Count
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            return 0;
         }
 
-        var asset = LoadAsset(uassetPath, usmapPath);
-        var assetType = DetectAssetType(asset);
-        
-        var result = new
+        // Directory (batch)
+        if (Directory.Exists(inputPath))
         {
-            path = uassetPath,
-            asset_type = assetType,
-            export_count = asset.Exports.Count,
-            import_count = asset.Imports.Count
-        };
+            Usmap? mappings = LoadMappings(usmapPath);
+            var uassetFiles = Directory.GetFiles(inputPath, "*.uasset", SearchOption.AllDirectories);
+            Console.Error.WriteLine($"Scanning {uassetFiles.Length} .uasset files...");
 
-        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
-        return 0;
+            var results = new List<object>();
+            foreach (var uassetPath in uassetFiles)
+            {
+                try
+                {
+                    var asset = LoadAssetWithMappings(uassetPath, mappings);
+                    string assetType = DetectAssetType(asset);
+                    results.Add(new
+                    {
+                        path = uassetPath,
+                        asset_type = assetType,
+                        file_name = Path.GetFileName(uassetPath)
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to process {uassetPath}: {ex.Message}");
+                }
+            }
+
+            var grouped = results.GroupBy(r => ((dynamic)r).asset_type)
+                                .Select(g => new { asset_type = g.Key, count = g.Count(), files = g.ToList() })
+                                .ToList();
+
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                total_files = uassetFiles.Length,
+                by_type = grouped
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            return 0;
+        }
+
+        Console.Error.WriteLine($"Path not found: {inputPath}");
+        return 1;
     }
     
     private static int CliFix(string[] args)
@@ -1650,67 +1689,7 @@ public partial class Program
         return 0;
     }
     
-    private static int CliBatchDetect(string[] args)
-    {
-        if (args.Length < 2)
-        {
-            Console.Error.WriteLine("Usage: UAssetTool batch_detect <directory> [usmap_path]");
-            return 1;
-        }
-
-        string directory = args[1];
-        string? usmapPath = args.Length > 2 ? args[2] : null;
-
-        if (!Directory.Exists(directory))
-        {
-            Console.Error.WriteLine($"Directory not found: {directory}");
-            return 1;
-        }
-
-        var results = new List<object>();
-        var uassetFiles = Directory.GetFiles(directory, "*.uasset", SearchOption.AllDirectories);
-
-        Console.Error.WriteLine($"Scanning {uassetFiles.Length} .uasset files...");
-
-        Usmap? mappings = LoadMappings(usmapPath);
-
-        foreach (var uassetPath in uassetFiles)
-        {
-            try
-            {
-                var asset = LoadAssetWithMappings(uassetPath, mappings);
-                string assetType = DetectAssetType(asset);
-
-                results.Add(new
-                {
-                    path = uassetPath,
-                    asset_type = assetType,
-                    file_name = Path.GetFileName(uassetPath)
-                });
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Failed to process {uassetPath}: {ex.Message}");
-            }
-        }
-
-        var grouped = results.GroupBy(r => ((dynamic)r).asset_type)
-                            .Select(g => new
-                            {
-                                asset_type = g.Key,
-                                count = g.Count(),
-                                files = g.ToList()
-                            })
-                            .ToList();
-
-        Console.WriteLine(JsonSerializer.Serialize(new
-        {
-            total_files = uassetFiles.Length,
-            by_type = grouped
-        }, new JsonSerializerOptions { WriteIndented = true }));
-
-        return 0;
-    }
+    private static int CliBatchDetect(string[] args) => CliDetect(args);
     
     private static int CliDump(string[] args)
     {
@@ -2495,14 +2474,17 @@ public partial class Program
         {
             return request.Action switch
             {
-                // Single file detection - all use unified DetectAssetType
+                // Unified type detection - returns proper UE class names
+                "detect_type" => DetectTypeUnified(request.FilePath, request.FilePaths, request.UsmapPath),
+                
+                // Legacy single file detection (backward compat)
                 "detect_texture" => DetectSingleAsset(request.FilePath, request.UsmapPath, "texture"),
                 "detect_mesh" => DetectSingleAsset(request.FilePath, request.UsmapPath, "skeletal_mesh"),
                 "detect_skeletal_mesh" => DetectSingleAsset(request.FilePath, request.UsmapPath, "skeletal_mesh"),
                 "detect_static_mesh" => DetectSingleAsset(request.FilePath, request.UsmapPath, "static_mesh"),
                 "detect_blueprint" => DetectSingleAsset(request.FilePath, request.UsmapPath, "blueprint"),
                 
-                // Batch detection - all use unified workflow
+                // Legacy batch detection (backward compat)
                 "batch_detect_skeletal_mesh" => BatchDetectAssetType(request.FilePaths, request.UsmapPath, "skeletal_mesh"),
                 "batch_detect_static_mesh" => BatchDetectAssetType(request.FilePaths, request.UsmapPath, "static_mesh"),
                 "batch_detect_texture" => BatchDetectAssetType(request.FilePaths, request.UsmapPath, "texture"),
@@ -3101,39 +3083,72 @@ public partial class Program
     
     /// <summary>
     /// Core asset type detection - single unified method for all asset types.
-    /// Returns: "static_mesh", "skeletal_mesh", "texture", "material_instance", "blueprint", "other"
+    /// Returns proper UE class names: "Texture2D", "StaticMesh", "SkeletalMesh",
+    /// "MaterialInstanceConstant", "MaterialInstance", "WidgetBlueprint", "AnimBlueprint", etc.
+    /// Returns "Unknown" if no recognizable export class is found.
     /// </summary>
     private static string DetectAssetType(UAsset asset)
     {
         foreach (var export in asset.Exports)
         {
             string className = GetExportClassName(asset, export);
+            if (className == "Unknown") continue;
             
-            // Check class name against known types
-            if (className.Equals("StaticMesh", StringComparison.OrdinalIgnoreCase))
-                return "static_mesh";
-            if (className.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
-                return "skeletal_mesh";
-            if (className.Equals("Texture2D", StringComparison.OrdinalIgnoreCase))
-                return "texture";
-            if (className.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase) ||
-                className.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase))
-                return "material_instance";
+            // Return the actual UE class name for known types
+            if (className.Equals("StaticMesh", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("Texture2D", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("TextureCube", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("VolumeTexture", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("TextureRenderTarget2D", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("Material", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("AnimSequence", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("AnimMontage", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("AnimComposite", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("BlendSpace", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("BlendSpace1D", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("Skeleton", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("PhysicsAsset", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("SoundWave", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("SoundCue", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("DataTable", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("CurveTable", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("StringTable", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("NiagaraSystem", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("NiagaraEmitter", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("ParticleSystem", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("Font", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("FontFace", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("UserDefinedStruct", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("UserDefinedEnum", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("MapBuildDataRegistry", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("World", StringComparison.OrdinalIgnoreCase) ||
+                className.Equals("Level", StringComparison.OrdinalIgnoreCase))
+                return className;
+            
+            // Blueprint types - return the actual class name
             if (className.Contains("Blueprint", StringComparison.OrdinalIgnoreCase))
-                return "blueprint";
+                return className;
             
-            // Check export type name (fallback)
-            string exportTypeName = export.GetType().Name;
-            if (exportTypeName.Contains("StaticMesh", StringComparison.OrdinalIgnoreCase))
-                return "static_mesh";
-            if (exportTypeName.Contains("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
-                return "skeletal_mesh";
-            if (exportTypeName.Contains("Texture2D", StringComparison.OrdinalIgnoreCase))
-                return "texture";
+            // Return as-is for any other recognized class from imports
+            return className;
         }
         
-        // No filename heuristics - rely only on actual asset class detection
-        return "other";
+        // Fallback: check C# export type name
+        foreach (var export in asset.Exports)
+        {
+            string exportTypeName = export.GetType().Name;
+            if (exportTypeName.Contains("Texture", StringComparison.OrdinalIgnoreCase))
+                return "Texture2D";
+            if (exportTypeName.Contains("StaticMesh", StringComparison.OrdinalIgnoreCase))
+                return "StaticMesh";
+            if (exportTypeName.Contains("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+                return "SkeletalMesh";
+        }
+        
+        return "Unknown";
     }
     
     /// <summary>
@@ -3153,12 +3168,32 @@ public partial class Program
     }
     
     /// <summary>
-    /// Check if asset matches a specific type
+    /// Check if asset matches a specific type.
+    /// Accepts both UE class names (e.g. "Texture2D") and legacy target strings (e.g. "texture").
     /// </summary>
     private static bool IsAssetType(UAsset asset, string targetType)
     {
         string detectedType = DetectAssetType(asset);
-        return detectedType.Equals(targetType, StringComparison.OrdinalIgnoreCase);
+        
+        // Direct match (UE class name or exact)
+        if (detectedType.Equals(targetType, StringComparison.OrdinalIgnoreCase))
+            return true;
+        
+        // Map legacy target strings to UE class names
+        return targetType.ToLowerInvariant() switch
+        {
+            "texture" => detectedType.Equals("Texture2D", StringComparison.OrdinalIgnoreCase) ||
+                         detectedType.Equals("TextureCube", StringComparison.OrdinalIgnoreCase) ||
+                         detectedType.Equals("VolumeTexture", StringComparison.OrdinalIgnoreCase) ||
+                         detectedType.Equals("TextureRenderTarget2D", StringComparison.OrdinalIgnoreCase),
+            "skeletal_mesh" => detectedType.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase),
+            "static_mesh" => detectedType.Equals("StaticMesh", StringComparison.OrdinalIgnoreCase),
+            "material_instance" => detectedType.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase) ||
+                                   detectedType.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase),
+            "material" => detectedType.Equals("Material", StringComparison.OrdinalIgnoreCase),
+            "blueprint" => detectedType.Contains("Blueprint", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
     }
     
     /// <summary>
@@ -3249,6 +3284,101 @@ public partial class Program
         catch (Exception ex)
         {
             return new UAssetResponse { Success = false, Message = $"Batch detection error: {ex.Message}" };
+        }
+    }
+    
+    /// <summary>
+    /// Unified type detection for JSON API.
+    /// If file_path is provided: detect single file → returns { asset_type, export_count, import_count }
+    /// If file_paths is provided: detect batch → returns array of { path, asset_type, file_name }
+    /// Both can be provided simultaneously.
+    /// Returns proper UE class names (Texture2D, StaticMesh, SkeletalMesh, MaterialInstanceConstant, etc.)
+    /// </summary>
+    private static UAssetResponse DetectTypeUnified(string? filePath, List<string>? filePaths, string? usmapPath)
+    {
+        string? effectiveUsmapPath = usmapPath ?? Environment.GetEnvironmentVariable("USMAP_PATH");
+        
+        bool hasSingle = !string.IsNullOrEmpty(filePath);
+        bool hasBatch = filePaths != null && filePaths.Count > 0;
+        
+        if (!hasSingle && !hasBatch)
+            return new UAssetResponse { Success = false, Message = "file_path or file_paths required" };
+        
+        try
+        {
+            var data = new Dictionary<string, object?>();
+            
+            // Single file detection
+            if (hasSingle)
+            {
+                if (!File.Exists(filePath))
+                    return new UAssetResponse { Success = false, Message = $"File not found: {filePath}" };
+                
+                var asset = LoadAsset(filePath!, effectiveUsmapPath);
+                string assetType = DetectAssetType(asset);
+                
+                data["asset_type"] = assetType;
+                data["export_count"] = asset.Exports.Count;
+                data["import_count"] = asset.Imports.Count;
+                data["file_path"] = filePath;
+            }
+            
+            // Batch detection
+            if (hasBatch)
+            {
+                Usmap? mappings = LoadMappings(effectiveUsmapPath);
+                var results = new List<Dictionary<string, object?>>();
+                
+                foreach (var path in filePaths!)
+                {
+                    try
+                    {
+                        if (!File.Exists(path))
+                        {
+                            results.Add(new Dictionary<string, object?>
+                            {
+                                ["path"] = path,
+                                ["asset_type"] = null,
+                                ["error"] = "File not found"
+                            });
+                            continue;
+                        }
+                        
+                        var asset = LoadAssetWithMappings(path, mappings);
+                        string assetType = DetectAssetType(asset);
+                        
+                        results.Add(new Dictionary<string, object?>
+                        {
+                            ["path"] = path,
+                            ["file_name"] = Path.GetFileName(path),
+                            ["asset_type"] = assetType
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        results.Add(new Dictionary<string, object?>
+                        {
+                            ["path"] = path,
+                            ["asset_type"] = null,
+                            ["error"] = ex.Message
+                        });
+                    }
+                }
+                
+                data["results"] = results;
+                data["total_files"] = filePaths.Count;
+            }
+            
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = hasBatch ? $"Detected types for {filePaths!.Count} files" : $"Detected type: {data["asset_type"]}",
+                Data = data
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Detection error: {ex.Message}" };
         }
     }
     
