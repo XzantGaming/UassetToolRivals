@@ -7,12 +7,13 @@ A CLI tool for parsing, editing, and converting Unreal Engine 5 assets. Built on
 - **IoStore Mod Creation** - Create IoStore mod bundles (`.utoc`/`.ucas`/`.pak`) from legacy assets or PAK files
 - **IoStore Extraction** - Extract game assets from IoStore containers to legacy `.uasset`/`.uexp`/`.ubulk`/`.uptnl` format
 - **PAK Extraction** - Extract assets from legacy PAK files (Oodle, Zlib, Zstd, AES encryption)
-- **JSON Conversion** - Export `.uasset` to JSON and back for easy property editing
+- **JSON Conversion** - Export `.uasset` to JSON and back for easy property editing (includes compact CUE4Parse-style output)
 - **Texture Injection** - Inject PNG/TGA/DDS images into Texture2D assets with BC1/BC3/BC5/BC7 compression and mipmap generation
 - **Texture Extraction** - Extract Texture2D assets to PNG/TGA/DDS/BMP, including full-resolution mips from OptionalBulkData
 - **NiagaraSystem Editing** - Modify particle effect colors with structured ShaderLUT and ArrayColor parsing
 - **MaterialTag Injection** - Auto-inject per-slot gameplay tags from `MaterialTagAssetUserData` during mod creation
 - **StaticMesh Support** - ScreenSize expansion, unversioned property conversion, NavCollision handling
+- **Localization (LocRes) Parsing** - Parse `.locres` files to JSON with namespace/key lookup, search, and stats
 - **Blueprint Analysis** - Scan ChildBP assets for IsEnemy parameter redirects
 - **IoStore Inspection** - List packages and chunk types in IoStore containers
 - **GUI Backend** - JSON stdin/stdout API for frontend integration
@@ -340,9 +341,44 @@ UAssetTool to_json <uasset_path> [usmap_path] [output_dir]
 # Batch (all .uasset in directory, preserves structure)
 UAssetTool to_json <directory> [usmap_path] [output_dir]
 
+# Compact output (CUE4Parse-style, read-only, ~90% smaller)
+UAssetTool to_json <path> [usmap_path] [output_dir] --compact
+
 # JSON back to uasset
 UAssetTool from_json <json_path> <output_uasset_path> [usmap_path]
 ```
+
+**Options:**
+- `--compact` - Output compact, flat JSON similar to CUE4Parse's serialization. Properties are written as direct `"name": value` pairs without `$type` metadata. Read-only (no roundtrip deserialization). Ideal for data mining and external tool consumption.
+
+---
+
+## Localization (LocRes) Parsing
+
+Parse Unreal Engine `.locres` localization files and output as JSON:
+
+```bash
+# Full dump to JSON
+UAssetTool parse_locres <locres_path_or_dir> [--output <json_path>]
+
+# Stats only (namespace counts)
+UAssetTool parse_locres <path> --stats
+
+# Lookup specific entry
+UAssetTool parse_locres <path> --namespace "601_HeroUIAsset_1011_ST" --key "HeroUIAssetBPTable_10110010_HeroInfo_TName"
+
+# Search entries by text
+UAssetTool parse_locres <path> --search "BRUCE BANNER"
+```
+
+**Options:**
+- `--output <path>` - Write JSON to file instead of stdout
+- `--namespace <ns>` - Filter by namespace
+- `--key <key>` - Lookup specific key (requires `--namespace`)
+- `--search <term>` - Search keys and values for a term (case-insensitive)
+- `--stats` - Show per-namespace entry counts only
+
+**Output format:** JSON with `{ namespace: { key: localizedString } }` structure. Supports batch parsing of directories.
 
 ---
 
@@ -479,11 +515,19 @@ UAssetTool
 **JSON Conversion (single + batch parallel)**
 ```json
 {"action": "to_json", "file_path": "...", "usmap_path": "...", "output_path": "..."}
+{"action": "to_json", "file_path": "...", "usmap_path": "...", "output_path": "...", "compact": true}
+{"action": "compact_json", "file_path": "...", "usmap_path": "...", "output_path": "..."}
 {"action": "to_json", "file_paths": [...], "usmap_path": "...", "output_path": "output_dir/"}
 {"action": "from_json", "file_path": "...", "output_path": "...", "usmap_path": "..."}
 {"action": "from_json", "file_paths": [...], "output_path": "output_dir/", "usmap_path": "..."}
 ```
-When `file_paths` (array) is provided instead of `file_path`, processing is automatic parallel via `Parallel.ForEach`. The `batch_to_json` and `batch_from_json` action names are also accepted as aliases.
+When `file_paths` (array) is provided instead of `file_path`, processing is automatic parallel via `Parallel.ForEach`. The `batch_to_json` and `batch_from_json` action names are also accepted as aliases. Set `"compact": true` or use `"action": "compact_json"` for CUE4Parse-style output.
+
+**Localization**
+```json
+{"action": "parse_locres", "file_path": "path/to/Game.locres"}
+{"action": "parse_locres", "file_paths": ["en/Game.locres", "zh/Game.locres"]}
+```
 
 **Asset Inspection**
 ```json
@@ -555,6 +599,7 @@ UassetToolRivals/
     ├── UAssetTool/
     │   ├── Program.cs           # CLI entry point & command routing
     │   ├── UAssetTool.csproj
+    │   ├── CompactJsonSerializer.cs  # CUE4Parse-style compact JSON output
     │   ├── NiagaraService.cs    # Niagara particle editing
     │   ├── IoStore/             # IoStore/PAK reading & writing
     │   │   ├── IoStoreReader.cs
@@ -572,6 +617,7 @@ UassetToolRivals/
     │       ├── MaterialTagReader.cs     # MaterialTag auto-injection
     │       └── ScriptObjectsDatabase.cs # Engine class hash resolution
     └── UAssetAPI/               # Core UAsset parsing (modified fork)
+        ├── Localization/        # FTextLocalizationResource (.locres parser)
         └── ExportTypes/
             └── Texture/         # Texture2D, FByteBulkData
 ```

@@ -21,8 +21,10 @@ public class PakReader : IDisposable
 
     private readonly Stream _stream;
     private readonly byte[] _aesKey;
+    private readonly byte[] _standardAesKey; // Key without byte-swap for standard UE4 PAKs
     private readonly bool _ownsStream;
     private bool _disposed;
+    private bool _useStandardAes; // true = standard UE4 AES, false = repak byte-swapped AES
 
     // PAK metadata
     public int Version { get; private set; }
@@ -36,16 +38,19 @@ public class PakReader : IDisposable
     // Compression methods from footer
     private readonly string[] _compressionMethods = new string[5];
 
-    public PakReader(string pakPath, string? aesKeyHex = null)
-        : this(File.OpenRead(pakPath), aesKeyHex, ownsStream: true)
+    public PakReader(string pakPath, string? aesKeyHex = null, bool useStandardAes = false)
+        : this(File.OpenRead(pakPath), aesKeyHex, ownsStream: true, useStandardAes: useStandardAes)
     {
     }
 
-    public PakReader(Stream stream, string? aesKeyHex = null, bool ownsStream = false)
+    public PakReader(Stream stream, string? aesKeyHex = null, bool ownsStream = false, bool useStandardAes = false)
     {
         _stream = stream;
         _ownsStream = ownsStream;
-        _aesKey = ParseAesKey(aesKeyHex ?? DEFAULT_AES_KEY_HEX);
+        _useStandardAes = useStandardAes;
+        string keyHex = aesKeyHex ?? DEFAULT_AES_KEY_HEX;
+        _aesKey = ParseAesKey(keyHex);
+        _standardAesKey = ParseAesKeyStandard(keyHex);
         
         ReadPak();
     }
@@ -68,6 +73,20 @@ public class PakReader : IDisposable
             Array.Reverse(bytes, i, 4);
         }
 
+        return bytes;
+    }
+
+    /// <summary>
+    /// Parse AES key from hex string WITHOUT byte-swap (standard UE4 format)
+    /// </summary>
+    private static byte[] ParseAesKeyStandard(string hex)
+    {
+        hex = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex[2..] : hex;
+        byte[] bytes = new byte[hex.Length / 2];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        }
         return bytes;
     }
 
@@ -117,18 +136,18 @@ public class PakReader : IDisposable
         
         if (EncryptedIndex)
         {
+            // AES-256-ECB decryption with byte-swap (Marvel Rivals specific)
             indexData = AesDecrypt(rawIndex, _aesKey);
+            
+            byte[] hash1 = SHA1.HashData(indexData);
+            if (!hash1.SequenceEqual(expectedIndexHash))
+            {
+                Console.Error.WriteLine("[PakReader] Warning: Index hash mismatch after AES decryption");
+            }
         }
         else
         {
             indexData = rawIndex;
-        }
-
-        // Verify index hash
-        byte[] actualIndexHash = SHA1.HashData(indexData);
-        if (!actualIndexHash.SequenceEqual(expectedIndexHash))
-        {
-            Console.Error.WriteLine("[PakReader] Warning: Index hash mismatch (may still work)");
         }
 
         // 3. Parse index
@@ -150,7 +169,7 @@ public class PakReader : IDisposable
         _stream.Seek(-footerSize, SeekOrigin.End);
 
         // Skip encryption GUID (16 bytes)
-        reader.ReadBytes(16);
+        byte[] encGuid = reader.ReadBytes(16);
 
         // Is index encrypted (1 byte)
         EncryptedIndex = reader.ReadByte() != 0;
@@ -162,8 +181,6 @@ public class PakReader : IDisposable
 
         // Version (4 bytes)
         Version = reader.ReadInt32();
-        if (Version != 11)
-            Console.Error.WriteLine($"[PakReader] Warning: PAK version {Version}, expected 11");
 
         // Index offset (8 bytes)
         indexOffset = reader.ReadInt64();
@@ -173,6 +190,12 @@ public class PakReader : IDisposable
 
         // Index hash (20 bytes)
         indexHash = reader.ReadBytes(20);
+
+        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+        {
+            Console.Error.WriteLine($"[PakReader] Footer: version={Version}, encrypted={EncryptedIndex}, indexOffset={indexOffset}, indexSize={indexSize}");
+            Console.Error.WriteLine($"[PakReader] Footer: encGuid={BitConverter.ToString(encGuid)}, indexHash={BitConverter.ToString(indexHash)}");
+        }
 
         // Read compression methods (5 * 32 = 160 bytes)
         for (int i = 0; i < 5; i++)
@@ -236,7 +259,9 @@ public class PakReader : IDisposable
         {
             _stream.Seek(pathHashIndexOffset, SeekOrigin.Begin);
             byte[] rawPhi = dataReader.ReadBytes((int)pathHashIndexSize);
-            byte[] phiData = EncryptedIndex ? AesDecrypt(rawPhi, _aesKey) : rawPhi;
+            byte[] phiData = EncryptedIndex 
+                ? AesDecrypt(rawPhi, _aesKey) 
+                : rawPhi;
 
             using var phiStream = new MemoryStream(phiData);
             using var phiReader = new BinaryReader(phiStream);
@@ -257,7 +282,9 @@ public class PakReader : IDisposable
         {
             _stream.Seek(fullDirectoryIndexOffset, SeekOrigin.Begin);
             byte[] rawFdi = dataReader.ReadBytes((int)fullDirectoryIndexSize);
-            byte[] fdiData = EncryptedIndex ? AesDecrypt(rawFdi, _aesKey) : rawFdi;
+            byte[] fdiData = EncryptedIndex 
+                ? AesDecrypt(rawFdi, _aesKey) 
+                : rawFdi;
 
             using var fdiStream = new MemoryStream(fdiData);
             using var fdiReader = new BinaryReader(fdiStream);
@@ -305,6 +332,11 @@ public class PakReader : IDisposable
         using var reader = new BinaryReader(stream);
 
         uint bits = reader.ReadUInt32();
+
+        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+        {
+            Console.Error.WriteLine($"[PakReader] EncodedEntry bits=0x{bits:X8} at offset={offset}");
+        }
 
         // Extract flags (matching repak's read_encoded exactly)
         uint compressionSlot = (bits >> 23) & 0x3F;
@@ -359,6 +391,10 @@ public class PakReader : IDisposable
             for (uint i = 0; i < compressionBlockCount; i++)
             {
                 uint blockSize = reader.ReadUInt32();
+                if (i < 3 && Environment.GetEnvironmentVariable("DEBUG") == "1")
+                {
+                    Console.Error.WriteLine($"[PakReader]   Encoded block[{i}]: size={blockSize}, startRel={index}, endRel={index + blockSize}");
+                }
                 blocks.Add((index, index + blockSize));
                 if (isEncrypted)
                 {
@@ -402,7 +438,13 @@ public class PakReader : IDisposable
     }
 
     /// <summary>
-    /// Read entry data from PAK file using pre-calculated block info from encoded entry
+    /// Read entry data from PAK file (matching repak entry.rs read_file exactly).
+    /// 1. Seek to entry.offset
+    /// 2. Read inline FPakEntry header to skip past it
+    /// 3. Read ALL compressed data at once (aligned if encrypted)
+    /// 4. Decrypt entire blob with plain AES-256-ECB
+    /// 5. Truncate to actual compressed size
+    /// 6. Slice by block ranges for decompression
     /// </summary>
     private byte[] ReadEntryData(PakEntry entry, string path)
     {
@@ -413,86 +455,100 @@ public class PakReader : IDisposable
 
         // Handle empty files
         if (uncompressedSize == 0)
-        {
             return Array.Empty<byte>();
+
+        // Step 1: Seek to entry offset
+        _stream.Seek((long)entry.Offset, SeekOrigin.Begin);
+
+        // Step 2: Read the inline FPakEntry header to advance past it (matching repak Entry::read)
+        // This reads: offset(8) + compressed(8) + uncompressed(8) + compression(4) + hash(20)
+        // + blocks(if compressed: 4 + 16*N) + flags(1) + compression_block_size(4)
+        ReadInlineEntryHeader(entry);
+        long dataOffset = _stream.Position;
+
+        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+        {
+            Console.Error.WriteLine($"[PakReader] ReadEntryData '{path}': entryOffset={entry.Offset}, dataOffset={dataOffset}, structSize={dataOffset - (long)entry.Offset}, compressed={entry.CompressedSize}, uncompressed={uncompressedSize}, encrypted={isEncrypted}");
         }
 
-        // For uncompressed entries without blocks, calculate data offset
-        if (!isCompressed && (entry.Blocks == null || entry.Blocks.Count == 0))
+        // Step 3: Read ALL compressed data at once
+        long readSize = isEncrypted 
+            ? ((long)entry.CompressedSize + 15) & ~15L  // align to AES block size
+            : (long)entry.CompressedSize;
+        
+        byte[] data = new byte[readSize];
+        int bytesRead = _stream.Read(data, 0, (int)readSize);
+        if (bytesRead != (int)readSize)
+            throw new InvalidDataException($"Failed to read entry data: expected {readSize} bytes, got {bytesRead}");
+
+        // Step 4: Partial decryption (Marvel Rivals uses partial encryption via blake3 path hash)
+        // Only the first get_limit(path) bytes are encrypted, matching repak-rivals data.rs
+        // The path for get_limit must be root_path(mount_point, entry_path) = strip "../../../" from mount_point + "/" + path
+        if (isEncrypted)
         {
-            // Data starts after the inline entry header
-            ulong dataOffset = entry.Offset + GetSerializedEntrySize(null, 0);
-            _stream.Seek((long)dataOffset, SeekOrigin.Begin);
+            string rootPath = ComputeRootPath(MountPoint, path);
+            int limit = GetEncryptionLimit(rootPath);
+            if (limit > data.Length)
+                limit = data.Length;
+            // Align limit to AES block size (16 bytes)
+            limit = (limit + 15) & ~15;
+            if (limit > data.Length)
+                limit = data.Length;
             
-            int dataSize = (int)uncompressedSize;
-            if (isEncrypted)
+            if (limit > 0)
             {
-                dataSize = ((int)uncompressedSize + 15) & ~15;
+                byte[] toDecrypt = new byte[limit];
+                Array.Copy(data, toDecrypt, limit);
+                byte[] decrypted = AesDecrypt(toDecrypt, _aesKey);
+                Array.Copy(decrypted, 0, data, 0, limit);
             }
             
-            byte[] data = new byte[dataSize];
-            int bytesRead = _stream.Read(data, 0, dataSize);
-            if (bytesRead != dataSize)
-            {
-                throw new InvalidDataException($"Failed to read uncompressed data: expected {dataSize} bytes, got {bytesRead}");
-            }
+            // Truncate to actual compressed size
+            if (data.Length > (long)entry.CompressedSize)
+                Array.Resize(ref data, (int)entry.CompressedSize);
             
-            if (isEncrypted)
+            if (Environment.GetEnvironmentVariable("DEBUG") == "1")
             {
-                data = PartialDecrypt(data, path);
+                Console.Error.WriteLine($"[PakReader] Partial decrypt: rootPath='{rootPath}', limit={limit}, dataLen={data.Length}");
+                Console.Error.WriteLine($"[PakReader] After decrypt first 16 bytes: {BitConverter.ToString(data, 0, Math.Min(16, data.Length))}");
             }
+        }
+
+        // Step 6: Handle uncompressed entries
+        if (!isCompressed)
+        {
             if (data.Length > (int)uncompressedSize)
-            {
                 Array.Resize(ref data, (int)uncompressedSize);
-            }
             return data;
         }
 
-        // Compressed or has blocks: use pre-calculated block info
+        // Step 6b: For compressed entries, compute block ranges relative to data start 
+        // and decompress each block (matching repak's range computation for RelativeChunkOffsets)
         if (entry.Blocks == null || entry.Blocks.Count == 0)
-        {
             throw new InvalidDataException($"Compressed entry has no block info");
-        }
 
-        // Block size for calculating uncompressed size per block
+        long structSize = dataOffset - (long)entry.Offset;
         uint blockSize = entry.CompressionBlockSize > 0 ? entry.CompressionBlockSize : 65536;
 
-        // Decompress each block
         using var outputStream = new MemoryStream((int)uncompressedSize);
-        long entryBaseOffset = (long)entry.Offset;
 
         for (int blockIdx = 0; blockIdx < entry.Blocks.Count; blockIdx++)
         {
             var (blockStart, blockEnd) = entry.Blocks[blockIdx];
             
-            // Block offsets are RELATIVE to entry start position
-            long absoluteBlockStart = entryBaseOffset + (long)blockStart;
-            long blockCompressedSize = (long)(blockEnd - blockStart);
+            // Convert block offsets from entry-relative to data-relative
+            // repak: offset(index) = index - (data_offset - self.offset) = index - struct_size
+            int rangeStart = (int)((long)blockStart - structSize);
+            int rangeEnd = (int)((long)blockEnd - structSize);
             
-            if (blockCompressedSize <= 0)
-                continue;
-            
-            _stream.Seek(absoluteBlockStart, SeekOrigin.Begin);
-            byte[] blockData = new byte[blockCompressedSize];
-            int bytesRead = _stream.Read(blockData, 0, (int)blockCompressedSize);
-            if (bytesRead != blockCompressedSize)
+            if (rangeStart < 0 || rangeEnd > data.Length || rangeStart >= rangeEnd)
             {
-                throw new InvalidDataException($"Failed to read block {blockIdx}: expected {blockCompressedSize} bytes, got {bytesRead}");
+                Console.Error.WriteLine($"[PakReader] Block {blockIdx} out of range: rangeStart={rangeStart}, rangeEnd={rangeEnd}, dataLen={data.Length}");
+                throw new InvalidDataException($"Block {blockIdx} range [{rangeStart}..{rangeEnd}] out of bounds (data length: {data.Length})");
             }
 
-            if (isEncrypted)
-            {
-                int alignedSize = ((int)blockCompressedSize + 15) & ~15;
-                if (blockData.Length < alignedSize)
-                {
-                    Array.Resize(ref blockData, alignedSize);
-                }
-                blockData = AesDecrypt(blockData, _aesKey);
-                if (blockData.Length > blockCompressedSize)
-                {
-                    Array.Resize(ref blockData, (int)blockCompressedSize);
-                }
-            }
+            byte[] blockData = new byte[rangeEnd - rangeStart];
+            Array.Copy(data, rangeStart, blockData, 0, blockData.Length);
 
             // Calculate expected uncompressed size for this block
             long remainingUncompressed = (long)uncompressedSize - outputStream.Position;
@@ -501,6 +557,12 @@ public class PakReader : IDisposable
             if (blockUncompressedSize <= 0)
                 continue;
 
+            if (blockIdx == 0 && Environment.GetEnvironmentVariable("DEBUG") == "1")
+            {
+                Console.Error.WriteLine($"[PakReader] Block 0: range=[{rangeStart}..{rangeEnd}], compSize={blockData.Length}, uncompSize={blockUncompressedSize}");
+                Console.Error.WriteLine($"[PakReader] Block 0 first 16 bytes: {BitConverter.ToString(blockData, 0, Math.Min(16, blockData.Length))}");
+            }
+
             try
             {
                 byte[] decompressedBlock = Decompress(blockData, blockUncompressedSize, compressionMethod);
@@ -508,7 +570,7 @@ public class PakReader : IDisposable
             }
             catch (Exception)
             {
-                Console.Error.WriteLine($"[PakReader] Block {blockIdx} decompression failed: compressed={blockCompressedSize}, uncompressed={blockUncompressedSize}, method={compressionMethod}");
+                Console.Error.WriteLine($"[PakReader] Block {blockIdx} decompression failed: compSize={blockData.Length}, uncompSize={blockUncompressedSize}, method={compressionMethod}");
                 throw;
             }
         }
@@ -517,10 +579,58 @@ public class PakReader : IDisposable
     }
 
     /// <summary>
+    /// Read inline FPakEntry header to advance stream past it (matching repak Entry::read for V11).
+    /// Does NOT return entry data — just advances the reader position.
+    /// </summary>
+    private void ReadInlineEntryHeader(PakEntry entry)
+    {
+        using var reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
+        long startPos = _stream.Position;
+        
+        long ihOffset = reader.ReadInt64();       // offset (8)
+        long ihCompressed = reader.ReadInt64();    // compressed (8)
+        long ihUncompressed = reader.ReadInt64();  // uncompressed (8)
+        int ihCompMethod = reader.ReadInt32();     // compression method (4) - U32 for V11
+        reader.ReadBytes(20);                      // hash (20)
+        
+        int ihBlockCount = 0;
+        // For V11 (>= CompressionEncryption):
+        if (entry.CompressionSlot.HasValue)
+        {
+            // Read compression blocks array: count(4) + blocks(16*N)
+            ihBlockCount = reader.ReadInt32();
+            for (int i = 0; i < ihBlockCount; i++)
+            {
+                reader.ReadInt64(); // block start
+                reader.ReadInt64(); // block end
+            }
+        }
+        byte ihFlags = reader.ReadByte();          // flags (1)
+        uint ihBlockSize = reader.ReadUInt32();    // compression_block_size (4)
+        
+        long headerSize = _stream.Position - startPos;
+        
+        if (Environment.GetEnvironmentVariable("DEBUG") == "1")
+        {
+            Console.Error.WriteLine($"[PakReader] InlineHeader: offset={ihOffset}, comp={ihCompressed}, uncomp={ihUncompressed}, method={ihCompMethod}, flags=0x{ihFlags:X2}, blockSize={ihBlockSize}, blockCount={ihBlockCount}, headerSize={headerSize}");
+        }
+    }
+
+    /// <summary>
     /// Partially decrypt data based on path hash (from data.rs)
     /// </summary>
     private byte[] PartialDecrypt(byte[] data, string path)
     {
+        if (_useStandardAes)
+        {
+            // Standard UE4: full-block AES decryption
+            int alignedSize = (data.Length + 15) & ~15;
+            byte[] padded = new byte[alignedSize];
+            Array.Copy(data, padded, data.Length);
+            return StandardAesDecrypt(padded, _standardAesKey);
+        }
+
+        // Repak mode: partial encryption based on path hash
         int limit = GetEncryptionLimit(path);
         if (limit > data.Length)
             limit = data.Length;
@@ -559,6 +669,57 @@ public class PakReader : IDisposable
             limit = 0x1000;
 
         return (int)limit;
+    }
+
+    /// <summary>
+    /// Compute the root path for encryption limit calculation.
+    /// Matches repak-rivals' root_path(mount_point, path): concat with "/" separator,
+    /// deduplicate consecutive slashes, then strip "../../../" prefix.
+    /// </summary>
+    private static string ComputeRootPath(string mountPoint, string entryPath)
+    {
+        string combined = mountPoint + "/" + entryPath;
+        // Deduplicate consecutive slashes
+        var sb = new System.Text.StringBuilder(combined.Length);
+        bool lastWasSlash = false;
+        foreach (char c in combined)
+        {
+            if (c == '/')
+            {
+                if (!lastWasSlash)
+                    sb.Append(c);
+                lastWasSlash = true;
+            }
+            else
+            {
+                sb.Append(c);
+                lastWasSlash = false;
+            }
+        }
+        string result = sb.ToString();
+        // Strip "../../../" prefix
+        const string prefix = "../../../";
+        if (result.StartsWith(prefix))
+            result = result.Substring(prefix.Length);
+        return result;
+    }
+
+    /// <summary>
+    /// Standard AES-256-ECB decrypt (no byte-swapping, used by game's original PAK files)
+    /// </summary>
+    private static byte[] StandardAesDecrypt(byte[] data, byte[] key)
+    {
+        int paddedLength = (data.Length + 15) & ~15;
+        byte[] paddedData = new byte[paddedLength];
+        Array.Copy(data, paddedData, data.Length);
+
+        using var aes = Aes.Create();
+        aes.Key = key;
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+
+        using var decryptor = aes.CreateDecryptor();
+        return decryptor.TransformFinalBlock(paddedData, 0, paddedData.Length);
     }
 
     /// <summary>

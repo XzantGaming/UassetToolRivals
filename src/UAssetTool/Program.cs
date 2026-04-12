@@ -13,6 +13,7 @@ using UAssetAPI.ExportTypes.Texture;
 using UAssetAPI.Unversioned;
 using UAssetAPI.PropertyTypes.Objects;
 using UAssetAPI.PropertyTypes.Structs;
+using UAssetAPI.Localization;
 
 namespace UAssetTool;
 
@@ -80,6 +81,7 @@ public partial class Program
                 "extract_texture" => CliExtractTexture(args),
                 "batch_inject_texture" => CliBatchInjectTexture(args),
                 "batch_extract_texture" => CliBatchExtractTexture(args),
+                "parse_locres" => CliParseLocres(args),
                 "version" or "--version" or "-v" => CliVersion(),
                 "help" or "--help" or "-h" => CliHelp(),
                 _ => throw new Exception($"Unknown command: {command}")
@@ -123,6 +125,7 @@ public partial class Program
         Console.WriteLine("  Asset Editing:");
         Console.WriteLine("    fix <uasset_path> [usmap_path]          - Fix SerializeSize for meshes");
         Console.WriteLine("    to_json <path> [usmap] [output_dir]     - Convert uasset to JSON (file or directory)");
+        Console.WriteLine("      Options: --compact                    - CUE4Parse-style compact output (read-only)");
         Console.WriteLine("    from_json <path> <output> [usmap]       - Convert JSON back to uasset (file or directory)");
         Console.WriteLine("    inject_texture <base> <image> <output>  - Inject PNG/TGA/DDS into texture uasset");
         Console.WriteLine("      Options: --format BC7|BC3|BC1|BGRA8   - Compression format (default: BC7)");
@@ -159,6 +162,14 @@ public partial class Program
         Console.WriteLine("    cityhash <path_string>                   - Calculate CityHash64 for a path");
         Console.WriteLine("    clone_mod_iostore <utoc> <output>        - Clone/repackage a mod IoStore");
         Console.WriteLine("    list_iostore <utoc_path> [--aes <key>]   - List IoStore contents with ubulk status");
+        Console.WriteLine();
+        Console.WriteLine("  Localization:");
+        Console.WriteLine("    parse_locres <path> [options]             - Parse .locres file(s) to JSON");
+        Console.WriteLine("      Options: --output <path>               - Write JSON to file");
+        Console.WriteLine("               --namespace <ns>              - Filter by namespace");
+        Console.WriteLine("               --key <key>                   - Lookup specific key");
+        Console.WriteLine("               --search <term>               - Search keys/values");
+        Console.WriteLine("               --stats                       - Show namespace counts only");
         Console.WriteLine();
         Console.WriteLine("  Other:");
         Console.WriteLine("    version                                  - Show tool version");
@@ -1822,16 +1833,19 @@ public partial class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: UAssetTool to_json <path> [usmap_path] [output_dir]");
+            Console.Error.WriteLine("Usage: UAssetTool to_json <path> [usmap_path] [output_dir] [--compact]");
             Console.Error.WriteLine("  <path>       - Path to a .uasset file or directory containing .uasset files");
             Console.Error.WriteLine("  [usmap_path] - Optional path to .usmap mappings file");
             Console.Error.WriteLine("  [output_dir] - Optional output directory (default: same as input)");
+            Console.Error.WriteLine("  --compact    - Output compact CUE4Parse-style JSON (read-only, no roundtrip)");
             return 1;
         }
 
-        string inputPath = args[1];
-        string? usmapPath = args.Length > 2 ? args[2] : null;
-        string? outputDir = args.Length > 3 ? args[3] : null;
+        bool compact = args.Any(a => a == "--compact");
+        var positionalArgs = args.Where(a => !a.StartsWith("--")).ToArray();
+        string inputPath = positionalArgs[1];
+        string? usmapPath = positionalArgs.Length > 2 ? positionalArgs[2] : null;
+        string? outputDir = positionalArgs.Length > 3 ? positionalArgs[3] : null;
 
         int successCount = 0;
         int failCount = 0;
@@ -1863,9 +1877,11 @@ public partial class Program
 
                     var asset = LoadAsset(file, usmapPath);
                     PreloadReferencedAssetsForSchemas(asset);
-                    string json = asset.SerializeJson(true);
+                    string json = compact
+                        ? CompactJsonSerializer.Serialize(asset)
+                        : asset.SerializeJson(true);
                     File.WriteAllText(jsonOutputPath, json, System.Text.Encoding.UTF8);
-                    Console.WriteLine($"Converted: {file} -> {jsonOutputPath}");
+                    Console.WriteLine($"Converted{(compact ? " (compact)" : "")}: {file} -> {jsonOutputPath}");
                     successCount++;
                 }
                 catch (Exception ex)
@@ -1895,9 +1911,11 @@ public partial class Program
 
                 var asset = LoadAsset(inputPath, usmapPath);
                 PreloadReferencedAssetsForSchemas(asset);
-                string json = asset.SerializeJson(true);
+                string json = compact
+                    ? CompactJsonSerializer.Serialize(asset)
+                    : asset.SerializeJson(true);
                 File.WriteAllText(jsonOutputPath, json, System.Text.Encoding.UTF8);
-                Console.WriteLine($"Asset exported to JSON: {jsonOutputPath}");
+                Console.WriteLine($"Asset exported to JSON{(compact ? " (compact)" : "")}: {jsonOutputPath}");
                 successCount = 1;
             }
             catch (Exception ex)
@@ -2547,11 +2565,13 @@ public partial class Program
                 // Additional CLI-equivalent operations for parity
                 "dump" => DumpAssetJson(request.FilePath, request.UsmapPath),
                 "skeletal_mesh_info" => GetSkeletalMeshInfoJson(request.FilePath, request.UsmapPath),
-                "to_json" or "batch_to_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath),
+                "to_json" or "batch_to_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, request.Compact),
+                "compact_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, compact: true),
                 "from_json" or "batch_from_json" => FromJsonJson(request.FilePath, request.FilePaths, request.OutputPath, request.UsmapPath),
                 "cityhash" => CityHashJson(request.FilePath),
                 "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
                 "inspect_zen" => InspectZenJson(request.FilePath),
+                "parse_locres" => ParseLocresJson(request.FilePath, request.FilePaths),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -6192,6 +6212,12 @@ public class UAssetRequest
     /// </summary>
     [JsonPropertyName("obfuscate")]
     public bool Obfuscate { get; set; } = false;
+    
+    /// <summary>
+    /// Use compact CUE4Parse-style JSON output (read-only, no roundtrip)
+    /// </summary>
+    [JsonPropertyName("compact")]
+    public bool Compact { get; set; } = false;
 }
 
 public class UAssetResponse
@@ -6547,7 +6573,7 @@ public partial class Program
         }
     }
     
-    private static UAssetResponse ToJsonJson(string? filePath, List<string>? filePaths, string? usmapPath, string? outputPath)
+    private static UAssetResponse ToJsonJson(string? filePath, List<string>? filePaths, string? usmapPath, string? outputPath, bool compact = false)
     {
         // Batch mode: file_paths provided → parallel processing
         bool isBatch = filePaths != null && filePaths.Count > 0;
@@ -6563,7 +6589,9 @@ public partial class Program
                 var asset = LoadAsset(filePath, usmapPath);
                 PreloadReferencedAssetsForSchemas(asset);
                 
-                string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
+                string jsonOutput = compact
+                    ? CompactJsonSerializer.Serialize(asset)
+                    : asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
                 
                 if (!string.IsNullOrEmpty(outputPath))
                 {
@@ -6571,7 +6599,7 @@ public partial class Program
                     if (!string.IsNullOrEmpty(outDir))
                         Directory.CreateDirectory(outDir);
                     File.WriteAllText(outputPath, jsonOutput, System.Text.Encoding.UTF8);
-                    return new UAssetResponse { Success = true, Message = $"JSON saved to {outputPath}" };
+                    return new UAssetResponse { Success = true, Message = $"JSON{(compact ? " (compact)" : "")} saved to {outputPath}" };
                 }
                 
                 return new UAssetResponse { Success = true, Message = jsonOutput };
@@ -6603,7 +6631,9 @@ public partial class Program
                 var asset = LoadAssetWithMappings(fp, mappings);
                 PreloadReferencedAssetsForSchemas(asset);
                 
-                string jsonOutput = asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
+                string jsonOutput = compact
+                    ? CompactJsonSerializer.Serialize(asset)
+                    : asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
                 string jsonOutputPath = Path.Combine(outputPath, Path.GetFileNameWithoutExtension(fp) + ".json");
                 File.WriteAllText(jsonOutputPath, jsonOutput, System.Text.Encoding.UTF8);
                 
@@ -7166,6 +7196,248 @@ public partial class Program
         Console.WriteLine();
         Console.WriteLine($"Batch extract complete: {success} succeeded, {failed} errors, {skipped} skipped (not Texture2D)");
         return failed > 0 ? 1 : 0;
+    }
+
+    #endregion
+
+    #region LocRes Parsing
+
+    /// <summary>
+    /// CLI: Parse .locres file(s) and output as JSON.
+    /// Usage: UAssetTool parse_locres &lt;locres_path_or_dir&gt; [--output &lt;json_path&gt;] [--namespace &lt;ns&gt;] [--key &lt;key&gt;] [--stats]
+    /// </summary>
+    private static int CliParseLocres(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: UAssetTool parse_locres <locres_path_or_dir> [options]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Arguments:");
+            Console.Error.WriteLine("  <locres_path_or_dir>   Path to a .locres file or directory containing .locres files");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --output <path>        Write JSON output to file instead of stdout");
+            Console.Error.WriteLine("  --namespace <ns>       Filter to a specific namespace");
+            Console.Error.WriteLine("  --key <key>            Look up a specific key (requires --namespace)");
+            Console.Error.WriteLine("  --stats                Show statistics only (namespace count, entry count)");
+            Console.Error.WriteLine("  --search <term>        Search for entries containing the term in key or value");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Examples:");
+            Console.Error.WriteLine("  parse_locres en/Game.locres");
+            Console.Error.WriteLine("  parse_locres en/Game.locres --stats");
+            Console.Error.WriteLine("  parse_locres en/Game.locres --namespace \"601_HeroUIAsset_1011_ST\" --key \"HeroUIAssetBPTable_10110010_HeroInfo_TName\"");
+            Console.Error.WriteLine("  parse_locres en/Game.locres --search \"BRUCE BANNER\"");
+            Console.Error.WriteLine("  parse_locres en/Game.locres --output locres_dump.json");
+            return 1;
+        }
+
+        string inputPath = args[1];
+        string? outputPath = null;
+        string? filterNamespace = null;
+        string? filterKey = null;
+        string? searchTerm = null;
+        bool statsOnly = false;
+
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--output" && i + 1 < args.Length) outputPath = args[++i];
+            else if (args[i] == "--namespace" && i + 1 < args.Length) filterNamespace = args[++i];
+            else if (args[i] == "--key" && i + 1 < args.Length) filterKey = args[++i];
+            else if (args[i] == "--search" && i + 1 < args.Length) searchTerm = args[++i];
+            else if (args[i] == "--stats") statsOnly = true;
+        }
+
+        var locresFiles = new List<string>();
+        if (Directory.Exists(inputPath))
+        {
+            locresFiles.AddRange(Directory.GetFiles(inputPath, "*.locres", SearchOption.AllDirectories));
+            if (locresFiles.Count == 0)
+            {
+                Console.Error.WriteLine($"No .locres files found in: {inputPath}");
+                return 1;
+            }
+            Console.Error.WriteLine($"Found {locresFiles.Count} .locres file(s)");
+        }
+        else if (File.Exists(inputPath))
+        {
+            locresFiles.Add(inputPath);
+        }
+        else
+        {
+            Console.Error.WriteLine($"Path not found: {inputPath}");
+            return 1;
+        }
+
+        foreach (var locresPath in locresFiles)
+        {
+            try
+            {
+                Console.Error.WriteLine($"Parsing: {locresPath}");
+                var locres = new FTextLocalizationResource(locresPath);
+                Console.Error.WriteLine($"  Version: {locres.Version}, Namespaces: {locres.Entries.Count}, Total entries: {locres.TotalEntryCount}");
+
+                if (statsOnly)
+                {
+                    // Show per-namespace counts
+                    var stats = locres.Entries
+                        .OrderByDescending(ns => ns.Value.Count)
+                        .Select(ns => new { Namespace = ns.Key, Count = ns.Value.Count });
+                    string json = JsonSerializer.Serialize(new
+                    {
+                        file = locresPath,
+                        version = locres.Version.ToString(),
+                        namespace_count = locres.Entries.Count,
+                        total_entries = locres.TotalEntryCount,
+                        namespaces = stats
+                    }, new JsonSerializerOptions { WriteIndented = true });
+                    WriteOutput(json, outputPath);
+                    continue;
+                }
+
+                // Specific key lookup
+                if (!string.IsNullOrEmpty(filterNamespace) && !string.IsNullOrEmpty(filterKey))
+                {
+                    if (locres.TryGetString(filterNamespace, filterKey, out string? value))
+                    {
+                        var result = new { Namespace = filterNamespace, Key = filterKey, LocalizedString = value };
+                        string json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
+                        WriteOutput(json, outputPath);
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"  Key not found: [{filterNamespace}] {filterKey}");
+                    }
+                    continue;
+                }
+
+                // Filter by namespace
+                if (!string.IsNullOrEmpty(filterNamespace))
+                {
+                    if (locres.Entries.TryGetValue(filterNamespace, out var nsEntries))
+                    {
+                        var dict = new Dictionary<string, string>();
+                        foreach (var kv in nsEntries)
+                            dict[kv.Key] = kv.Value.LocalizedString;
+                        string json = JsonSerializer.Serialize(new
+                        {
+                            Namespace = filterNamespace,
+                            EntryCount = nsEntries.Count,
+                            Entries = dict
+                        }, new JsonSerializerOptions { WriteIndented = true });
+                        WriteOutput(json, outputPath);
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"  Namespace not found: {filterNamespace}");
+                    }
+                    continue;
+                }
+
+                // Search
+                if (!string.IsNullOrEmpty(searchTerm))
+                {
+                    var matches = new List<object>();
+                    foreach (var (ns, key, localizedString) in locres.GetAllEntries())
+                    {
+                        if (key.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ||
+                            localizedString.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matches.Add(new { Namespace = ns, Key = key, LocalizedString = localizedString });
+                        }
+                    }
+                    Console.Error.WriteLine($"  Found {matches.Count} matches for \"{searchTerm}\"");
+                    string json = JsonSerializer.Serialize(new { SearchTerm = searchTerm, MatchCount = matches.Count, Matches = matches },
+                        new JsonSerializerOptions { WriteIndented = true });
+                    WriteOutput(json, outputPath);
+                    continue;
+                }
+
+                // Full dump
+                var fullDump = new Dictionary<string, Dictionary<string, string>>();
+                foreach (var nsPair in locres.Entries)
+                {
+                    var inner = new Dictionary<string, string>();
+                    foreach (var kv in nsPair.Value)
+                        inner[kv.Key] = kv.Value.LocalizedString;
+                    fullDump[nsPair.Key] = inner;
+                }
+                string fullJson = JsonSerializer.Serialize(fullDump, new JsonSerializerOptions { WriteIndented = true });
+                WriteOutput(fullJson, outputPath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Error parsing {locresPath}: {ex.Message}");
+            }
+        }
+
+        return 0;
+    }
+
+    private static void WriteOutput(string content, string? outputPath)
+    {
+        if (!string.IsNullOrEmpty(outputPath))
+        {
+            string? dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8);
+            Console.Error.WriteLine($"  Written to: {outputPath}");
+        }
+        else
+        {
+            Console.WriteLine(content);
+        }
+    }
+
+    /// <summary>
+    /// JSON API: Parse .locres file(s).
+    /// </summary>
+    private static UAssetResponse ParseLocresJson(string? filePath, List<string>? filePaths)
+    {
+        var paths = new List<string>();
+        if (!string.IsNullOrEmpty(filePath))
+            paths.Add(filePath);
+        if (filePaths != null)
+            paths.AddRange(filePaths);
+
+        if (paths.Count == 0)
+            return new UAssetResponse { Success = false, Message = "file_path or file_paths required" };
+
+        try
+        {
+            var allEntries = new Dictionary<string, Dictionary<string, string>>();
+            int totalEntries = 0;
+
+            foreach (var path in paths)
+            {
+                if (!File.Exists(path))
+                    return new UAssetResponse { Success = false, Message = $"File not found: {path}" };
+
+                var locres = new FTextLocalizationResource(path);
+                totalEntries += locres.TotalEntryCount;
+
+                foreach (var nsPair in locres.Entries)
+                {
+                    if (!allEntries.TryGetValue(nsPair.Key, out var inner))
+                    {
+                        inner = new Dictionary<string, string>();
+                        allEntries[nsPair.Key] = inner;
+                    }
+                    foreach (var kv in nsPair.Value)
+                        inner[kv.Key] = kv.Value.LocalizedString;
+                }
+            }
+
+            return new UAssetResponse
+            {
+                Success = true,
+                Message = $"Parsed {paths.Count} .locres file(s): {allEntries.Count} namespaces, {totalEntries} entries",
+                Data = allEntries
+            };
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Error parsing .locres: {ex.Message}" };
+        }
     }
 
     #endregion

@@ -18,6 +18,8 @@ Technical documentation for UAssetTool's file format handling and data structure
 12. [IoStore Recompression](#iostore-recompression)
 13. [Script Objects Database](#script-objects-database)
 14. [JSON Serialization](#json-serialization)
+15. [Compact JSON Serialization](#compact-json-serialization)
+16. [Localization (LocRes) Parsing](#localization-locres-parsing)
 
 ---
 
@@ -1976,3 +1978,218 @@ All UAssetAPI property types are serialized with their `$type` discriminator for
 ### Encoding
 
 JSON files are written with UTF-8 encoding to preserve Unicode characters (Chinese, Korean, Japanese text in asset names).
+
+---
+
+## Compact JSON Serialization
+
+**Implementation:** `UAssetTool/CompactJsonSerializer.cs`
+
+A separate, read-only JSON serializer that produces CUE4Parse-style compact output. This format is ~90% smaller than UAssetAPI's standard JSON and is ideal for data mining, external tool consumption, and human inspection.
+
+### Design Principles
+
+- **Read-only** — No deserialization/roundtrip support. For roundtrip editing, use the standard `to_json`/`from_json` workflow.
+- **No metadata** — No `$type` discriminators, no `NameMap`, no `CustomVersionContainer`, no `ArrayIndex`/`IsZero` wrappers.
+- **Flat properties** — Properties are written as direct `"name": value` pairs.
+- **Does NOT modify** UAssetAPI's existing `SerializeJson`/`DeserializeJson`.
+
+### Output Structure
+
+```json
+[
+  {
+    "Type": "DataTable",
+    "Name": "UIHeroTable",
+    "Flags": "RF_Public | RF_Standalone | RF_Transactional",
+    "Class": "Class'/Script/Engine.DataTable'",
+    "Properties": { "RowStruct": "..." },
+    "Rows": {
+      "10110": {
+        "HeroID_72_...": 1011,
+        "Role_27_...": "EHeroRole::Tank",
+        "HeroInfoMainColor_60_...": { "R": 0.039, "G": 0.174, "B": 0.097, "A": 1, "Hex": "387458" }
+      }
+    }
+  }
+]
+```
+
+### Export Type Handling
+
+| Export Type | Output Format |
+|-------------|---------------|
+| **DataTable** | `{ Properties, Rows: { rowName: { props } } }` |
+| **StringTable** | `{ TableNamespace, StringTable: { key: value } }` |
+| **NormalExport** | `{ Properties: { name: value, ... } }` |
+
+### Property Type Mapping
+
+| Property Type | JSON Output |
+|---------------|-------------|
+| `IntPropertyData`, `FloatPropertyData`, `DoublePropertyData` | Numeric literal |
+| `BoolPropertyData` | `true`/`false` |
+| `StrPropertyData`, `NamePropertyData`, `TextPropertyData` | String or `{ TableId, Key, SourceString }` |
+| `EnumPropertyData` | `"EnumType::Value"` (with type prefix) |
+| `BytePropertyData` | Enum FName string or numeric byte |
+| `ArrayPropertyData`, `SetPropertyData` | JSON array |
+| `MapPropertyData` | JSON object `{ key: value }` |
+| `StructPropertyData` | JSON object (flattened for single-child specialized structs) |
+| `ObjectPropertyData` | Resolved path string (e.g., `"Class'/Script/Engine.DataTable'"`) |
+| `SoftObjectPropertyData` | `{ AssetPathName, SubPathString }` |
+| `LinearColorPropertyData` | `{ R, G, B, A, Hex }` (with sRGB hex) |
+| `VectorPropertyData` | `{ X, Y, Z }` |
+| `Vector2DPropertyData` | `{ X, Y }` |
+| `Vector4PropertyData`, `QuatPropertyData` | `{ X, Y, Z, W }` |
+| `RotatorPropertyData` | `{ Pitch, Yaw, Roll }` |
+| `GameplayTagContainerPropertyData` | JSON array of tag name strings |
+| `RawStructPropertyData` | Base64 string |
+| Unknown/unhandled | `"TypeName.ToString()"` fallback |
+
+### Struct Flattening
+
+When a `StructPropertyData` contains exactly one child that is a specialized type (LinearColor, Vector, Vector2D, etc.), the struct is **unwrapped** — the child's value is written directly instead of wrapping in an extra object layer. This matches CUE4Parse's behavior.
+
+### Color Hex Conversion
+
+LinearColor values include a `Hex` field with the sRGB hex color:
+
+```csharp
+Color srgb = LinearHelpers.Convert(linearColor);
+writer.WriteString("Hex", $"{srgb.R:X2}{srgb.G:X2}{srgb.B:X2}");
+```
+
+### Object Reference Resolution
+
+`FPackageIndex` values are resolved to human-readable paths:
+- **Imports** — Builds full path from outer chain: `"Class'/Script/Engine.DataTable'"`
+- **Exports** — Uses export name: `"Export:ExportName"`
+- **Null** — `null`
+
+### Size Comparison
+
+| Format | UIHeroTable Size | Ratio |
+|--------|-----------------|-------|
+| UAssetAPI full JSON | 14,663 KB | 100% |
+| **Compact JSON** | **1,517 KB** | **10%** |
+| CUE4Parse reference | 1,697 KB | 12% |
+
+### CLI Usage
+
+```bash
+UAssetTool to_json <path> [usmap] [output_dir] --compact
+```
+
+### JSON API
+
+```json
+{"action": "to_json", "file_path": "...", "usmap_path": "...", "compact": true}
+{"action": "compact_json", "file_path": "...", "usmap_path": "...", "output_path": "..."}
+```
+
+### Implementation
+
+Uses `System.Text.Json.Utf8JsonWriter` (not Newtonsoft) with `UnsafeRelaxedJsonEscaping` for clean output. The serializer recursively walks exports and properties via pattern matching on `PropertyData` subclasses, with subclass cases ordered before parent classes to avoid unreachable code.
+
+---
+
+## Localization (LocRes) Parsing
+
+**Implementation:** `UAssetAPI/Localization/FTextLocalizationResource.cs`, `UAssetTool/Program.cs`
+
+Parses Unreal Engine `.locres` (FTextLocalizationResource) binary files into structured JSON output.
+
+### LocRes File Format
+
+LocRes files contain localized string tables organized by namespace and key:
+
+```
+┌─────────────────────────────────────────┐
+│ Magic GUID (16 bytes)                   │
+├─────────────────────────────────────────┤
+│ Version (uint8)                         │
+├─────────────────────────────────────────┤
+│ Localized String Array (if version ≥ 2) │
+│ - int32 count                           │
+│ - FString[] strings (shared pool)       │
+├─────────────────────────────────────────┤
+│ Namespace Count (int32)                 │
+│ For each namespace:                     │
+│   ├── Namespace Key (FString)           │
+│   ├── Entry Count (int32)               │
+│   └── For each entry:                   │
+│       ├── String Key (FString)          │
+│       ├── Source String Hash (uint32)   │
+│       └── Localized String              │
+│           (index into shared array      │
+│            or inline FString)           │
+└─────────────────────────────────────────┘
+```
+
+### Key Features
+
+- **Namespace/key structure** — Entries organized as `{ namespace: { key: localizedString } }`
+- **Specific key lookup** — Query a single entry by namespace + key
+- **Text search** — Case-insensitive search across all keys and values
+- **Stats mode** — Per-namespace entry counts for overview
+- **Batch parsing** — Process entire directories of `.locres` files
+- **Multi-language** — Parse different language versions side by side
+
+### CLI Usage
+
+```bash
+# Full dump
+UAssetTool parse_locres <locres_path_or_dir> [--output <json_path>]
+
+# Stats only
+UAssetTool parse_locres <path> --stats
+
+# Specific entry lookup
+UAssetTool parse_locres <path> --namespace "NS" --key "Key"
+
+# Search
+UAssetTool parse_locres <path> --search "search term"
+```
+
+### JSON API
+
+```json
+{"action": "parse_locres", "file_path": "path/to/Game.locres"}
+{"action": "parse_locres", "file_paths": ["en/Game.locres", "zh/Game.locres"]}
+```
+
+Response contains `{ namespace: { key: localizedString } }` merged across all input files.
+
+### Output Examples
+
+**Full dump:**
+```json
+{
+  "601_HeroUIAsset_1011_ST": {
+    "HeroUIAssetBPTable_10110010_HeroInfo_TName": "BRUCE BANNER",
+    "HeroUIAssetBPTable_10110010_HeroInfo_RealName": "Bruce Banner"
+  },
+  "601_HeroUIAsset_1057_ST": { ... }
+}
+```
+
+**Stats:**
+```json
+{
+  "file": "en/Game.locres",
+  "version": "Optimized",
+  "namespace_count": 1247,
+  "total_entries": 48523,
+  "namespaces": [
+    { "Namespace": "601_HeroUIAsset_1011_ST", "Count": 42 },
+    ...
+  ]
+}
+```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `FTextLocalizationResource.cs` | Binary parser for `.locres` format (magic, version, shared strings, namespace/key entries) |
+| `Program.cs` | CLI `CliParseLocres()` and JSON API `ParseLocresJson()` methods |
