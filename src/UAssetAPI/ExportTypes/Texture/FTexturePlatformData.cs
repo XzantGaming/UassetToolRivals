@@ -52,43 +52,15 @@ namespace UAssetAPI.ExportTypes.Texture
 
         public void Read(AssetBinaryReader reader, bool bSerializeMipData = true, bool isUE5Cooked = false)
         {
-            // FTexturePlatformData::SerializeCooked (CUE4Parse approach)
-            // For UE5.0+ cooked assets with IsFilterEditorOnly, skip PlaceholderDerivedDataSize
-            // Standard UE5: 16 bytes, but Marvel Rivals uses 20 bytes of zeros before actual data
+            // FTexturePlatformData::SerializeCooked — CUE4Parse approach
+            // UE5.2+: 1 byte bUsingDerivedData flag + 15 bytes placeholder = 16 total
+            // UE5.0-5.1 (IsFilterEditorOnly): 16 bytes flat
             PlaceholderByteCount = 0;
             if (isUE5Cooked)
             {
-                // Dynamically detect placeholder bytes by looking for valid SizeX value
-                // Marvel Rivals has 20 bytes of zeros, standard UE5 has 16
-                // We scan ahead to find where SizeX (a power of 2, 1-8192) starts
-                long checkPos = reader.BaseStream.Position;
-                PlaceholderByteCount = 0;
-                
-                // Try different placeholder sizes: 16, 20, 24 (common values)
-                int[] tryPlaceholderSizes = { 16, 20, 24, 0 };
-                foreach (int trySize in tryPlaceholderSizes)
-                {
-                    reader.BaseStream.Position = checkPos + trySize;
-                    if (reader.BaseStream.Position + 12 > reader.BaseStream.Length) continue;
-                    
-                    int potentialSizeX = reader.ReadInt32();
-                    int potentialSizeY = reader.ReadInt32();
-                    uint potentialPackedData = reader.ReadUInt32();
-                    
-                    // Valid texture dimensions: power of 2, 1-8192
-                    bool validX = potentialSizeX >= 1 && potentialSizeX <= 8192 && (potentialSizeX & (potentialSizeX - 1)) == 0;
-                    bool validY = potentialSizeY >= 1 && potentialSizeY <= 8192 && (potentialSizeY & (potentialSizeY - 1)) == 0;
-                    bool validPacked = potentialPackedData <= 0x80000000; // Reasonable packed data
-                    
-                    if (validX && validY && validPacked)
-                    {
-                        PlaceholderByteCount = trySize;
-                        break;
-                    }
-                }
-                
-                reader.BaseStream.Position = checkPos;
-                PlaceholderBytes = reader.ReadBytes(PlaceholderByteCount);
+                const int PlaceholderDerivedDataSize = 16;
+                PlaceholderByteCount = PlaceholderDerivedDataSize;
+                PlaceholderBytes = reader.ReadBytes(PlaceholderDerivedDataSize);
             }
             
             // Read dimensions and packed data
@@ -126,8 +98,24 @@ namespace UAssetAPI.ExportTypes.Texture
                 Mips.Add(mip);
             }
 
-            // Read bIsVirtual (int32 as bool) - CUE4Parse reads this if VirtualTextures version is set
-            // For Marvel Rivals, this is always 0 (non-virtual)
+            // Check if using UE5.3+ DataResources format
+            bool hasDataResources = Mips.Count > 0 && Mips[0].BulkData?.Header?.DataResourceIndex >= 0;
+
+            if (hasDataResources)
+            {
+                // DataResources format: each mip header is just a 4-byte DataResourceIndex.
+                // The pixel data is at DataResource.SerialOffset in .uexp (or .ubulk),
+                // NOT inline in the stream after the headers.
+                // Populate mip dimensions from the header SizeX/SizeY, scaled per mip level.
+                for (int mi = 0; mi < Mips.Count; mi++)
+                {
+                    Mips[mi].SizeX = Math.Max(1, SizeX >> mi);
+                    Mips[mi].SizeY = Math.Max(1, SizeY >> mi);
+                    Mips[mi].SizeZ = 1;
+                }
+            }
+
+            // bIsVirtual (int32 as bool) comes right after mip headers
             bIsVirtual = reader.ReadInt32() != 0;
 
             // Update dimensions from first mip if available (CUE4Parse does this)

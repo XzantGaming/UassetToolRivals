@@ -49,9 +49,17 @@ namespace UAssetAPI.ExportTypes.Texture
                 return;
             }
 
-            // CUE4Parse approach: Check if data is inline by comparing offset to current position
-            // OR if ForceInlinePayload flag is set
-            // Note: For UE5.3+ with external bulk data, offset points to .ubulk file, not current stream
+            // UE5.3+ DataResources: The header only wrote a 4-byte DataResourceIndex.
+            // The pixel data is NOT at the current stream position — it's serialized after
+            // all mip headers (for inline) or in .ubulk (for external). Don't read here;
+            // FTexturePlatformData.Read() will read inline data from the correct position.
+            if (Header.DataResourceIndex >= 0)
+            {
+                Data = Array.Empty<byte>();
+                return;
+            }
+
+            // Legacy format: Check if data is inline by ForceInlinePayload flag
             bool isInline = Header.BulkDataFlags.HasFlag(EBulkDataFlags.BULKDATA_ForceInlinePayload);
 
             if (isInline)

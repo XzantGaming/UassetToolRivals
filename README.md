@@ -9,7 +9,7 @@ A CLI tool for parsing, editing, and converting Unreal Engine 5 assets. Built on
 - **PAK Extraction** - Extract assets from legacy PAK files (Oodle, Zlib, Zstd, AES encryption)
 - **JSON Conversion** - Export `.uasset` to JSON and back for easy property editing (includes compact CUE4Parse-style output)
 - **Texture Injection** - Inject PNG/TGA/DDS images into Texture2D assets with BC1/BC3/BC5/BC7 compression and mipmap generation
-- **Texture Extraction** - Extract Texture2D assets to PNG/TGA/DDS/BMP, including full-resolution mips from OptionalBulkData
+- **Texture Extraction** - Extract Texture2D assets to PNG/TGA/DDS/BMP with parallel batch support; handles inline (no `.ubulk`), external, and OptionalBulkData mips
 - **NiagaraSystem Editing** - Modify particle effect colors with structured ShaderLUT and ArrayColor parsing
 - **MaterialTag Injection** - Auto-inject per-slot gameplay tags from `MaterialTagAssetUserData` during mod creation
 - **StaticMesh Support** - ScreenSize expansion, unversioned property conversion, NavCollision handling
@@ -271,7 +271,7 @@ UAssetTool extract_texture T_Skin_D.uasset mip2.png --mip 2
 
 **Supported pixel formats:** PF_DXT1 (BC1), PF_DXT5 (BC3), PF_BC5 (BC5), PF_BC7, PF_B8G8R8A8
 
-The extractor reads pixel data from `.uexp` (inline mips), `.ubulk` (external bulk), and `.uptnl` (optional/high-res mips). If the requested mip has no data, it falls back to the next available mip.
+The extractor reads pixel data from `.uexp` (inline mips), `.ubulk` (external bulk), and `.uptnl` (optional/high-res mips). Handles UE5.3+ DataResources format including textures with no `.ubulk` file (e.g., UI hero portraits with non-power-of-2 dimensions like 134x134). If the requested mip has no data, it falls back to the next available mip.
 
 ### Batch Texture Injection
 
@@ -544,7 +544,10 @@ When `file_paths` (array) is provided instead of `file_path`, processing is auto
 {"action": "has_inline_texture_data", "file_path": "...", "usmap_path": "..."}
 {"action": "batch_strip_mipmaps_native", "file_paths": [...], "usmap_path": "..."}
 {"action": "batch_has_inline_texture_data", "file_paths": [...], "usmap_path": "..."}
+{"action": "extract_texture_png", "file_path": "...", "output_path": "out.png", "usmap_path": "...", "format": "png", "mip_index": 0}
+{"action": "batch_extract_texture_png", "file_paths": [...], "output_path": "out_dir/", "usmap_path": "...", "format": "png", "mip_index": 0, "parallel": true}
 ```
+The `batch_extract_texture_png` action processes all files in `file_paths`, outputs images named after the input files into `output_path` directory. Set `"parallel": true` for multi-threaded extraction. Supported formats: `png` (default), `tga`, `dds`, `bmp`.
 
 **Detection**
 ```json

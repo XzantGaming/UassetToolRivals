@@ -58,6 +58,14 @@ namespace UAssetAPI.ExportTypes.Texture
                 BulkData = new FByteBulkData();
             }
 
+            // For UE5.3+ DataResources format, dimensions are serialized AFTER all mip
+            // pixel data (not after each mip header). Skip here; FTexturePlatformData reads them.
+            if (BulkData?.Header?.DataResourceIndex >= 0)
+            {
+                // Dimensions will be populated by FTexturePlatformData.Read() from the tail section
+                return;
+            }
+
             // Read dimensions
             SizeX = reader.ReadInt32();
             SizeY = reader.ReadInt32();

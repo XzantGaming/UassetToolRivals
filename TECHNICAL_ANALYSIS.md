@@ -632,9 +632,12 @@ The Zen `BulkDataMapEntry.Flags` field determines where each bulk data chunk is 
 3. For requested mip index, get pixel data:
    a. Try GetData() (inline data from .uexp)
    b. If empty/wrong-sized, try ReadMipDataFromFiles():
-      - Check .ubulk at DataResource[i].SerialOffset
-      - Check .uptnl at DataResource[i].SerialOffset
-      - Check .m.ubulk at DataResource[i].SerialOffset
+      - DataResources path (UE5.3+):
+        · If Inline flag set → read from .uexp at SerialOffset
+        · Else try .ubulk, .uptnl, .m.ubulk at SerialOffset
+        · Fallback: try .uexp even when not flagged Inline
+          (zen-extracted assets may not set Inline flag)
+      - Legacy path: read from .ubulk at BulkDataOffsetInFile
    c. Validate data size against expected mip dimensions
    d. If invalid, fall back to next available mip
 4. Decode compressed data:
@@ -645,6 +648,45 @@ The Zen `BulkDataMapEntry.Flags` field determines where each bulk data chunk is 
    - DDS → raw compressed data with DDS header
 ```
 
+### UE5.3+ DataResources Format (Inline Textures Without .ubulk)
+
+Textures like UI hero portraits (`img_squarehead_*`) have all mip data inline in `.uexp` with no `.ubulk`. The UE5.3+ DataResources format differs from legacy bulk data:
+
+**Key differences from legacy format:**
+- Each mip header is just a **4-byte DataResourceIndex** (no dimensions, no inline data)
+- Mip dimensions are derived from PlatformData header `SizeX`/`SizeY >> mipLevel`
+- `FTexturePlatformData` skips exactly **16 bytes** of PlaceholderDerivedData (not a heuristic)
+- `bIsVirtual` follows immediately after all mip DR index headers
+- Pixel data location determined by `FObjectDataResource.SerialOffset` in `.uexp` or `.ubulk`
+
+**Parsing fixes applied:**
+| Component | Fix |
+|-----------|-----|
+| `FByteBulkData.Read()` | Early return when `DataResourceIndex >= 0` — don't read from stream |
+| `FTexture2DMipMap.Read()` | Skip SizeX/SizeY/SizeZ when using DataResources |
+| `FTexturePlatformData.Read()` | Fixed 16-byte placeholder, populate mip dims from header |
+| `TextureExtractor.ReadMipDataFromFiles()` | `.uexp` fallback when DR flags≠Inline but no `.ubulk` |
+
+### Batch Texture Extraction (JSON API)
+
+The `batch_extract_texture_png` action processes multiple textures with optional parallel execution:
+
+```json
+{
+  "action": "batch_extract_texture_png",
+  "file_paths": ["path/to/tex1.uasset", "path/to/tex2.uasset"],
+  "output_path": "output/directory",
+  "usmap_path": "mappings.usmap",
+  "format": "png",
+  "mip_index": 0,
+  "parallel": true
+}
+```
+
+- **Parallel mode** uses `Parallel.ForEach` with `MaxDegreeOfParallelism = Environment.ProcessorCount`
+- Thread-safe via `ConcurrentBag<T>` for results and `Interlocked.Increment` for counters
+- File I/O uses `FileShare.Read` on `.uasset`, `.uexp`, and `.usmap` to avoid sharing conflicts
+
 ### Implementation Files
 
 | File | Purpose |
@@ -653,6 +695,7 @@ The Zen `BulkDataMapEntry.Flags` field determines where each bulk data chunk is 
 | `TextureExtractor.cs` | uasset → image extraction with BC decoding and multi-file mip reading |
 | `FByteBulkData.cs` | Bulk data read/write with DataResourceIndex support |
 | `FByteBulkDataHeader.cs` | Bulk data metadata (flags, offset, size from DataResources) |
+| `FTexturePlatformData.cs` | Platform data with UE5.3+ DataResources mip dimension handling |
 
 ---
 

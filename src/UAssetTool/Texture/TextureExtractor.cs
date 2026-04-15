@@ -376,6 +376,22 @@ public class TextureExtractor
                         return bulkBytes;
                     }
                 }
+                
+                // No external bulk file found — fall back to .uexp
+                // (zen-extracted assets may not set Inline flag even though data is in .uexp)
+                string uexpFallback = Path.ChangeExtension(uassetPath, ".uexp");
+                if (File.Exists(uexpFallback))
+                {
+                    byte[] uexpBytes = File.ReadAllBytes(uexpFallback);
+                    long offset = dr.SerialOffset;
+                    if (offset >= 0 && offset + size <= uexpBytes.Length)
+                    {
+                        byte[] data = new byte[size];
+                        Array.Copy(uexpBytes, offset, data, 0, size);
+                        Console.WriteLine($"  Read {size} bytes from .uexp fallback DataResource[{header.DataResourceIndex}] at offset {offset}");
+                        return data;
+                    }
+                }
             }
         }
         

@@ -2572,6 +2572,8 @@ public partial class Program
                 "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
                 "inspect_zen" => InspectZenJson(request.FilePath),
                 "parse_locres" => ParseLocresJson(request.FilePath, request.FilePaths),
+                "extract_texture_png" => ExtractTextureToPngJson(request.FilePath, request.OutputPath, request.UsmapPath, request.MipIndex, request.Format),
+                "batch_extract_texture_png" => BatchExtractTexturePngJson(request.FilePaths, request.OutputPath, request.UsmapPath, request.MipIndex, request.Format, request.Parallel),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -6218,6 +6220,18 @@ public class UAssetRequest
     /// </summary>
     [JsonPropertyName("compact")]
     public bool Compact { get; set; } = false;
+    
+    /// <summary>
+    /// Mip level index for texture extraction (0 = largest)
+    /// </summary>
+    [JsonPropertyName("mip_index")]
+    public int MipIndex { get; set; } = 0;
+    
+    /// <summary>
+    /// Output format for texture extraction (png, tga, dds, bmp). Default: png
+    /// </summary>
+    [JsonPropertyName("format")]
+    public string? Format { get; set; }
 }
 
 public class UAssetResponse
@@ -7196,6 +7210,131 @@ public partial class Program
         Console.WriteLine();
         Console.WriteLine($"Batch extract complete: {success} succeeded, {failed} errors, {skipped} skipped (not Texture2D)");
         return failed > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// JSON API: Extract a Texture2D .uasset to an image file.
+    /// </summary>
+    private static UAssetResponse ExtractTextureToPngJson(string? filePath, string? outputPath, string? usmapPath, int mipIndex = 0, string? format = null)
+    {
+        if (string.IsNullOrEmpty(filePath))
+            return new UAssetResponse { Success = false, Message = "file_path is required" };
+        if (string.IsNullOrEmpty(outputPath))
+            return new UAssetResponse { Success = false, Message = "output_path is required" };
+
+        var outputFormat = ParseTextureFormat(format);
+
+        try
+        {
+            var result = Texture.TextureExtractor.Extract(filePath, outputPath, outputFormat, mipIndex, usmapPath);
+
+            if (result.Success)
+            {
+                return new UAssetResponse
+                {
+                    Success = true,
+                    Message = $"Extracted texture to {outputPath} ({result.Width}x{result.Height}, {result.PixelFormat})",
+                    Data = new { width = result.Width, height = result.Height, mip_count = result.MipCount, pixel_format = result.PixelFormat, output_path = result.OutputPath }
+                };
+            }
+            else
+            {
+                return new UAssetResponse { Success = false, Message = result.ErrorMessage ?? "Texture extraction failed" };
+            }
+        }
+        catch (Exception ex)
+        {
+            return new UAssetResponse { Success = false, Message = $"Error: {ex.Message}" };
+        }
+    }
+
+    /// <summary>
+    /// JSON API: Batch extract Texture2D .uasset files to images with optional parallel processing.
+    /// file_paths: list of .uasset paths
+    /// output_path: output directory (images named after input files)
+    /// parallel: true to process in parallel
+    /// </summary>
+    private static UAssetResponse BatchExtractTexturePngJson(List<string>? filePaths, string? outputDir, string? usmapPath, int mipIndex = 0, string? format = null, bool parallel = false)
+    {
+        if (filePaths == null || filePaths.Count == 0)
+            return new UAssetResponse { Success = false, Message = "file_paths is required (list of .uasset paths)" };
+        if (string.IsNullOrEmpty(outputDir))
+            return new UAssetResponse { Success = false, Message = "output_path is required (output directory)" };
+
+        var outputFormat = ParseTextureFormat(format);
+        string ext = outputFormat switch
+        {
+            Texture.TextureOutputFormat.TGA => ".tga",
+            Texture.TextureOutputFormat.DDS => ".dds",
+            Texture.TextureOutputFormat.BMP => ".bmp",
+            _ => ".png"
+        };
+
+        Directory.CreateDirectory(outputDir);
+
+        var results = new System.Collections.Concurrent.ConcurrentBag<object>();
+        int successCount = 0;
+        int failCount = 0;
+        int skipCount = 0;
+
+        void ProcessFile(string inputPath)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(inputPath);
+            string outPath = Path.Combine(outputDir, baseName + ext);
+
+            try
+            {
+                var result = Texture.TextureExtractor.Extract(inputPath, outPath, outputFormat, mipIndex, usmapPath);
+                if (result.Success)
+                {
+                    Interlocked.Increment(ref successCount);
+                    results.Add(new { file = inputPath, success = true, output_path = result.OutputPath, width = result.Width, height = result.Height, pixel_format = result.PixelFormat });
+                }
+                else if (result.ErrorMessage != null && result.ErrorMessage.Contains("TextureExport"))
+                {
+                    Interlocked.Increment(ref skipCount);
+                    results.Add(new { file = inputPath, success = false, skipped = true, error = result.ErrorMessage });
+                }
+                else
+                {
+                    Interlocked.Increment(ref failCount);
+                    results.Add(new { file = inputPath, success = false, skipped = false, error = result.ErrorMessage ?? "Unknown error" });
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Increment(ref failCount);
+                results.Add(new { file = inputPath, success = false, skipped = false, error = ex.Message });
+            }
+        }
+
+        if (parallel)
+        {
+            Parallel.ForEach(filePaths, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, ProcessFile);
+        }
+        else
+        {
+            foreach (var fp in filePaths)
+                ProcessFile(fp);
+        }
+
+        return new UAssetResponse
+        {
+            Success = failCount == 0,
+            Message = $"Batch extract: {successCount} succeeded, {failCount} failed, {skipCount} skipped out of {filePaths.Count} total",
+            Data = new { total = filePaths.Count, success = successCount, failed = failCount, skipped = skipCount, results = results.ToArray() }
+        };
+    }
+
+    private static Texture.TextureOutputFormat ParseTextureFormat(string? format)
+    {
+        return (format?.ToLowerInvariant()) switch
+        {
+            "tga" => Texture.TextureOutputFormat.TGA,
+            "dds" => Texture.TextureOutputFormat.DDS,
+            "bmp" => Texture.TextureOutputFormat.BMP,
+            _ => Texture.TextureOutputFormat.PNG
+        };
     }
 
     #endregion
