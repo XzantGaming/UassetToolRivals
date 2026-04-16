@@ -2573,7 +2573,7 @@ public partial class Program
                 "inspect_zen" => InspectZenJson(request.FilePath),
                 "parse_locres" => ParseLocresJson(request.FilePath, request.FilePaths),
                 "extract_texture_png" => ExtractTextureToPngJson(request.FilePath, request.OutputPath, request.UsmapPath, request.MipIndex, request.Format),
-                "batch_extract_texture_png" => BatchExtractTexturePngJson(request.FilePaths, request.OutputPath, request.UsmapPath, request.MipIndex, request.Format, request.Parallel),
+                "batch_extract_texture_png" => BatchExtractTexturePngJson(request.FilePaths, request.OutputPath, request.UsmapPath, request.MipIndex, request.Format, request.Parallel, request.BasePath),
                 
                 _ => new UAssetResponse { Success = false, Message = $"Unknown action: {request.Action}" }
             };
@@ -6232,6 +6232,13 @@ public class UAssetRequest
     /// </summary>
     [JsonPropertyName("format")]
     public string? Format { get; set; }
+    
+    /// <summary>
+    /// Base path for preserving relative directory structure in batch output.
+    /// When set, output files maintain their relative path from this base.
+    /// </summary>
+    [JsonPropertyName("base_path")]
+    public string? BasePath { get; set; }
 }
 
 public class UAssetResponse
@@ -7254,7 +7261,7 @@ public partial class Program
     /// output_path: output directory (images named after input files)
     /// parallel: true to process in parallel
     /// </summary>
-    private static UAssetResponse BatchExtractTexturePngJson(List<string>? filePaths, string? outputDir, string? usmapPath, int mipIndex = 0, string? format = null, bool parallel = false)
+    private static UAssetResponse BatchExtractTexturePngJson(List<string>? filePaths, string? outputDir, string? usmapPath, int mipIndex = 0, string? format = null, bool parallel = false, string? basePath = null)
     {
         if (filePaths == null || filePaths.Count == 0)
             return new UAssetResponse { Success = false, Message = "file_paths is required (list of .uasset paths)" };
@@ -7277,10 +7284,26 @@ public partial class Program
         int failCount = 0;
         int skipCount = 0;
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
         void ProcessFile(string inputPath)
         {
-            string baseName = Path.GetFileNameWithoutExtension(inputPath);
-            string outPath = Path.Combine(outputDir, baseName + ext);
+            // Determine output filename: preserve relative directory structure if basePath is set
+            string jsonFileName;
+            if (!string.IsNullOrEmpty(basePath))
+            {
+                string relativePath = Path.GetRelativePath(basePath, inputPath);
+                jsonFileName = Path.ChangeExtension(relativePath, ext);
+            }
+            else
+            {
+                jsonFileName = Path.GetFileNameWithoutExtension(inputPath) + ext;
+            }
+
+            string outPath = Path.Combine(outputDir, jsonFileName);
+            string? outDir = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(outDir))
+                Directory.CreateDirectory(outDir);
 
             try
             {
@@ -7318,11 +7341,13 @@ public partial class Program
                 ProcessFile(fp);
         }
 
+        sw.Stop();
+
         return new UAssetResponse
         {
             Success = failCount == 0,
-            Message = $"Batch extract: {successCount} succeeded, {failCount} failed, {skipCount} skipped out of {filePaths.Count} total",
-            Data = new { total = filePaths.Count, success = successCount, failed = failCount, skipped = skipCount, results = results.ToArray() }
+            Message = $"Batch extract: {successCount} succeeded, {failCount} failed, {skipCount} skipped out of {filePaths.Count} total ({sw.ElapsedMilliseconds}ms)",
+            Data = new { total = filePaths.Count, success = successCount, failed = failCount, skipped = skipCount, elapsed_ms = sw.ElapsedMilliseconds, results = results.ToArray() }
         };
     }
 
