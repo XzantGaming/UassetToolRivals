@@ -75,6 +75,38 @@ public struct FIoChunkId
         return ChunkType;
     }
 
+    /// <summary>
+    /// Create a ShaderCodeLibrary chunk ID from library name and format name.
+    /// The chunk ID is CityHash64(lowercase("{libraryName}-{formatName}")) with type ShaderCodeLibrary.
+    /// Reference: retoc/src/lib.rs create_shader_library_chunk_id
+    /// </summary>
+    public static FIoChunkId CreateShaderLibraryChunkId(string libraryName, string formatName)
+    {
+        string name = $"{libraryName}-{formatName}";
+        ulong hash = CityHash.CityHash64(name);
+        return Create(hash, 0, EIoChunkType.ShaderCodeLibrary);
+    }
+
+    /// <summary>
+    /// Create a ShaderCode chunk ID from a SHA1 hash of the shader group.
+    /// The first 11 bytes of the SHA1 hash are packed into the 12-byte chunk ID, with the last byte being the chunk type.
+    /// Reference: retoc/src/lib.rs create_shader_code_chunk_id
+    /// </summary>
+    public static FIoChunkId CreateShaderCodeChunkId(byte[] sha1Hash)
+    {
+        // Pack first 8 bytes as Id, next 2 as Index, next 1 as Padding, type = ShaderCode
+        ulong id = BitConverter.ToUInt64(sha1Hash, 0);
+        ushort index = BitConverter.ToUInt16(sha1Hash, 8);
+        byte padding = sha1Hash[10];
+        return new FIoChunkId
+        {
+            Id = id,
+            Index = index,
+            Padding = padding,
+            ChunkType = EIoChunkType.ShaderCode
+        };
+    }
+
     public override string ToString() => $"FIoChunkId({Id:X16}, {Index}, {ChunkType})";
 }
 

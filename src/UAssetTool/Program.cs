@@ -552,6 +552,7 @@ public partial class Program
         // Marvel Rivals AES key for obfuscation
         const string MARVEL_RIVALS_AES_KEY = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
         var uassetFiles = new List<string>();
+        var shaderBytecodeFiles = new List<string>();
         var tempDirsToCleanup = new List<string>();
 
         for (int i = 2; i < args.Length; i++)
@@ -600,9 +601,9 @@ public partial class Program
                     int extracted = 0;
                     foreach (var file in pakReader.Files)
                     {
-                        // Only extract .uasset, .uexp, and .ubulk files
+                        // Only extract .uasset, .uexp, .ubulk, and .ushaderbytecode files
                         string ext = Path.GetExtension(file).ToLowerInvariant();
-                        if (ext != ".uasset" && ext != ".uexp" && ext != ".ubulk")
+                        if (ext != ".uasset" && ext != ".uexp" && ext != ".ubulk" && ext != ".ushaderbytecode")
                             continue;
 
                         byte[] data = pakReader.Get(file);
@@ -623,6 +624,13 @@ public partial class Program
                         uassetFiles.Add(Path.GetFullPath(f));
                     }
                     Console.Error.WriteLine($"[CreateModIoStore]   Found {dirFiles.Length} .uasset files");
+
+                    // Find shader bytecode files
+                    var shaderDirFiles = Directory.GetFiles(tempDir, "*.ushaderbytecode", SearchOption.AllDirectories);
+                    foreach (var f in shaderDirFiles)
+                        shaderBytecodeFiles.Add(Path.GetFullPath(f));
+                    if (shaderDirFiles.Length > 0)
+                        Console.Error.WriteLine($"[CreateModIoStore]   Found {shaderDirFiles.Length} .ushaderbytecode files");
                 }
                 catch (Exception ex)
                 {
@@ -633,6 +641,10 @@ public partial class Program
             {
                 uassetFiles.Add(Path.GetFullPath(args[i]));
             }
+            else if (args[i].EndsWith(".ushaderbytecode", StringComparison.OrdinalIgnoreCase) && File.Exists(args[i]))
+            {
+                shaderBytecodeFiles.Add(Path.GetFullPath(args[i]));
+            }
             else if (Directory.Exists(args[i]))
             {
                 // Support directory input - recursively find all .uasset files
@@ -642,6 +654,13 @@ public partial class Program
                     uassetFiles.Add(Path.GetFullPath(f));
                 }
                 Console.Error.WriteLine($"Found {dirFiles.Length} .uasset files in directory: {args[i]}");
+                
+                // Also find shader bytecode files in the directory
+                var shaderDirFiles = Directory.GetFiles(args[i], "*.ushaderbytecode", SearchOption.AllDirectories);
+                foreach (var f in shaderDirFiles)
+                    shaderBytecodeFiles.Add(Path.GetFullPath(f));
+                if (shaderDirFiles.Length > 0)
+                    Console.Error.WriteLine($"Found {shaderDirFiles.Length} .ushaderbytecode files in directory: {args[i]}");
             }
             else if (File.Exists(args[i]))
             {
@@ -653,9 +672,9 @@ public partial class Program
             }
         }
 
-        if (uassetFiles.Count == 0)
+        if (uassetFiles.Count == 0 && shaderBytecodeFiles.Count == 0)
         {
-            Console.Error.WriteLine("Error: No valid .uasset files provided");
+            Console.Error.WriteLine("Error: No valid .uasset or .ushaderbytecode files provided");
             return 1;
         }
 
@@ -666,6 +685,8 @@ public partial class Program
 
             Console.Error.WriteLine($"[CreateModIoStore] Creating IoStore mod bundle: {outputBase}");
             Console.Error.WriteLine($"[CreateModIoStore]   Assets: {uassetFiles.Count}");
+            if (shaderBytecodeFiles.Count > 0)
+                Console.Error.WriteLine($"[CreateModIoStore]   Shader Libraries: {shaderBytecodeFiles.Count}");
             Console.Error.WriteLine($"[CreateModIoStore]   Compression: {(enableCompression ? "Oodle" : "None")}");
             Console.Error.WriteLine($"[CreateModIoStore]   Protection: {(enableEncryption ? "Obfuscated (FModel-proof)" : "None")}");
 
@@ -812,6 +833,25 @@ public partial class Program
                 {
                     errors.Add($"{result.assetName}: {ex.Message}");
                     Console.Error.WriteLine($"  ERROR writing {result.assetName}: {ex.Message}");
+                }
+            }
+
+            // Process shader bytecode files
+            int shaderLibsConverted = 0;
+            foreach (var shaderFile in shaderBytecodeFiles)
+            {
+                try
+                {
+                    byte[] shaderData = File.ReadAllBytes(shaderFile);
+                    string shaderLibPath = mountPoint + gamePathPrefix + Path.GetFileName(shaderFile);
+                    IoStore.ShaderLibraryConverter.ConvertAndWrite(shaderData, shaderLibPath, ioStoreWriter);
+                    filePaths.Add(gamePathPrefix + Path.GetFileName(shaderFile));
+                    shaderLibsConverted++;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Shader:{Path.GetFileName(shaderFile)}: {ex.Message}");
+                    Console.Error.WriteLine($"  ERROR converting shader library {Path.GetFileName(shaderFile)}: {ex.Message}");
                 }
             }
 
@@ -5854,8 +5894,14 @@ public partial class Program
             // Collect all uasset files
             var uassetFiles = Directory.GetFiles(inputDir, "*.uasset", SearchOption.AllDirectories).ToList();
             
-            if (uassetFiles.Count == 0)
-                return new UAssetResponse { Success = false, Message = "No .uasset files found in input directory" };
+            // Collect shader bytecode files
+            var shaderFiles = Directory.GetFiles(inputDir, "*.ushaderbytecode", SearchOption.AllDirectories).ToList();
+            
+            if (uassetFiles.Count == 0 && shaderFiles.Count == 0)
+                return new UAssetResponse { Success = false, Message = "No .uasset or .ushaderbytecode files found in input directory" };
+            
+            if (shaderFiles.Count > 0)
+                Console.Error.WriteLine($"[CreateModIoStore] Found {shaderFiles.Count} shader library file(s)");
             
             // Determine output paths
             string outputBase = outputPath.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase) ? outputPath.Substring(0, outputPath.Length - 5) : outputPath;
@@ -6009,7 +6055,43 @@ public partial class Program
                 }
             }
             
-            if (converted == 0)
+            // Phase 3: Process shader library files
+            int shaderLibsConverted = 0;
+            foreach (var shaderFile in shaderFiles)
+            {
+                try
+                {
+                    byte[] shaderData = File.ReadAllBytes(shaderFile);
+                    
+                    // Determine the UE package path from the file's relative path within the input directory
+                    string relativePath = Path.GetRelativePath(inputDir, shaderFile).Replace('\\', '/');
+                    // Strip any leading "Marvel/Content/" prefix if already present, otherwise prefix with mount-relative path
+                    string shaderLibPath;
+                    if (relativePath.StartsWith("Marvel/Content/", StringComparison.OrdinalIgnoreCase))
+                        shaderLibPath = mount + relativePath;
+                    else
+                        shaderLibPath = mount + "Marvel/Content/" + relativePath;
+                    
+                    IoStore.ShaderLibraryConverter.ConvertAndWrite(shaderData, shaderLibPath, ioStoreWriter);
+                    
+                    // Add shader library path to chunknames (without extension, matching retoc behavior)
+                    string relNoExt = relativePath;
+                    if (relNoExt.EndsWith(".ushaderbytecode", StringComparison.OrdinalIgnoreCase))
+                        relNoExt = relNoExt.Substring(0, relNoExt.Length - ".ushaderbytecode".Length);
+                    filePaths.Add(relNoExt + ".ushaderbytecode");
+                    
+                    shaderLibsConverted++;
+                    Console.Error.WriteLine($"[CreateModIoStore] Converted shader library: {Path.GetFileName(shaderFile)}");
+                    Console.Error.Flush();
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Shader:{Path.GetFileName(shaderFile)}: {ex.Message}");
+                    Console.Error.WriteLine($"[CreateModIoStore] Error converting shader library {Path.GetFileName(shaderFile)}: {ex.Message}");
+                }
+            }
+            
+            if (converted == 0 && shaderLibsConverted == 0)
             {
                 // Clean up empty files left by IoStoreWriter constructor
                 ioStoreWriter.Dispose();
@@ -6029,7 +6111,7 @@ public partial class Program
             return new UAssetResponse
             {
                 Success = true,
-                Message = $"Created IoStore mod bundle with {converted} assets",
+                Message = $"Created IoStore mod bundle with {converted} assets" + (shaderLibsConverted > 0 ? $" and {shaderLibsConverted} shader library(ies)" : ""),
                 Data = new Dictionary<string, object?>
                 {
                     ["utoc_path"] = utocPath,
