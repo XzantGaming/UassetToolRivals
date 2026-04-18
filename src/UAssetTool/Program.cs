@@ -2605,9 +2605,9 @@ public partial class Program
                 // Additional CLI-equivalent operations for parity
                 "dump" => DumpAssetJson(request.FilePath, request.UsmapPath),
                 "skeletal_mesh_info" => GetSkeletalMeshInfoJson(request.FilePath, request.UsmapPath),
-                "to_json" or "batch_to_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, request.Compact),
-                "compact_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, compact: true),
-                "from_json" or "batch_from_json" => FromJsonJson(request.FilePath, request.FilePaths, request.OutputPath, request.UsmapPath),
+                "to_json" or "batch_to_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, request.Compact, request.BasePath),
+                "compact_json" => ToJsonJson(request.FilePath, request.FilePaths, request.UsmapPath, request.OutputPath, compact: true, basePath: request.BasePath),
+                "from_json" or "batch_from_json" => FromJsonJson(request.FilePath, request.FilePaths, request.OutputPath, request.UsmapPath, request.BasePath),
                 "cityhash" => CityHashJson(request.FilePath),
                 "clone_mod_iostore" => CloneModIoStoreJson(request.FilePath, request.OutputPath),
                 "inspect_zen" => InspectZenJson(request.FilePath),
@@ -6676,7 +6676,7 @@ public partial class Program
         }
     }
     
-    private static UAssetResponse ToJsonJson(string? filePath, List<string>? filePaths, string? usmapPath, string? outputPath, bool compact = false)
+    private static UAssetResponse ToJsonJson(string? filePath, List<string>? filePaths, string? usmapPath, string? outputPath, bool compact = false, string? basePath = null)
     {
         // Batch mode: file_paths provided → parallel processing
         bool isBatch = filePaths != null && filePaths.Count > 0;
@@ -6737,7 +6737,22 @@ public partial class Program
                 string jsonOutput = compact
                     ? CompactJsonSerializer.Serialize(asset)
                     : asset.SerializeJson(Newtonsoft.Json.Formatting.Indented);
-                string jsonOutputPath = Path.Combine(outputPath, Path.GetFileNameWithoutExtension(fp) + ".json");
+
+                // Determine output path: preserve relative directory structure if basePath is set
+                string jsonFileName;
+                if (!string.IsNullOrEmpty(basePath))
+                {
+                    string relativePath = Path.GetRelativePath(basePath, fp);
+                    jsonFileName = Path.ChangeExtension(relativePath, ".json");
+                }
+                else
+                {
+                    jsonFileName = Path.GetFileNameWithoutExtension(fp) + ".json";
+                }
+                string jsonOutputPath = Path.Combine(outputPath, jsonFileName);
+                string? jsonDir = Path.GetDirectoryName(jsonOutputPath);
+                if (!string.IsNullOrEmpty(jsonDir))
+                    Directory.CreateDirectory(jsonDir);
                 File.WriteAllText(jsonOutputPath, jsonOutput, System.Text.Encoding.UTF8);
                 
                 Interlocked.Increment(ref successCount);
@@ -6769,7 +6784,7 @@ public partial class Program
         };
     }
     
-    private static UAssetResponse FromJsonJson(string? jsonPath, List<string>? filePaths, string? outputPath, string? usmapPath)
+    private static UAssetResponse FromJsonJson(string? jsonPath, List<string>? filePaths, string? outputPath, string? usmapPath, string? basePath = null)
     {
         // Batch mode: file_paths provided → parallel processing
         bool isBatch = filePaths != null && filePaths.Count > 0;
@@ -6839,7 +6854,22 @@ public partial class Program
                 }
                 
                 asset.Mappings = mappings;
-                string uassetOutputPath = Path.Combine(outputPath, Path.GetFileNameWithoutExtension(jp) + ".uasset");
+
+                // Determine output path: preserve relative directory structure if basePath is set
+                string uassetFileName;
+                if (!string.IsNullOrEmpty(basePath))
+                {
+                    string relativePath = Path.GetRelativePath(basePath, jp);
+                    uassetFileName = Path.ChangeExtension(relativePath, ".uasset");
+                }
+                else
+                {
+                    uassetFileName = Path.GetFileNameWithoutExtension(jp) + ".uasset";
+                }
+                string uassetOutputPath = Path.Combine(outputPath, uassetFileName);
+                string? uassetDir = Path.GetDirectoryName(uassetOutputPath);
+                if (!string.IsNullOrEmpty(uassetDir))
+                    Directory.CreateDirectory(uassetDir);
                 asset.FilePath = Path.GetFullPath(uassetOutputPath);
                 PreloadReferencedAssetsForSchemas(asset);
                 asset.Write(uassetOutputPath);
