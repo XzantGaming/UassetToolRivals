@@ -541,12 +541,29 @@ public class ZenConverter
     }
     
     /// <summary>
+    /// Get the display form of an Import's ObjectName, applying the FName Number suffix.
+    /// UE5 FName with Number > 0 renders as "BaseName_{Number-1}" (no zero-padding).
+    /// This MUST be applied before hashing/path-building, otherwise JSON files where
+    /// a name was stored as base+Number (e.g. retoc's "/Script/Hero" + Number=1023)
+    /// will silently produce a different path than JSON files where the same name
+    /// was stored with the number baked into the base (e.g. "/Script/Hero_1022" + 0).
+    /// </summary>
+    private static string GetImportObjectNameWithNumber(Import import)
+    {
+        string baseName = import.ObjectName?.Value?.Value ?? "None";
+        int number = import.ObjectName?.Number ?? 0;
+        if (number > 0)
+            return baseName + "_" + (number - 1);
+        return baseName;
+    }
+
+    /// <summary>
     /// Build the full object path for a script import (e.g., "/Script/Engine/StaticMesh")
     /// </summary>
     private static string BuildScriptObjectPath(UAsset asset, Import import)
     {
-        string objectName = import.ObjectName?.Value?.Value ?? "None";
-        
+        string objectName = GetImportObjectNameWithNumber(import);
+
         // For script objects, the path is typically: /Script/Package/ClassName
         // If this is a top-level import (outer is null), it's the package itself
         if (import.OuterIndex.Index == 0)
@@ -554,11 +571,11 @@ public class ZenConverter
             // Top-level import - this is the package itself (e.g., "/Script/Engine")
             return objectName;
         }
-        
+
         // Build the path by walking up the outer chain
         var pathParts = new List<string>();
         pathParts.Add(objectName);
-        
+
         var currentIndex = import.OuterIndex;
         while (currentIndex.Index != 0 && currentIndex.IsImport())
         {
@@ -566,7 +583,7 @@ public class ZenConverter
             if (outerImportIndex >= 0 && outerImportIndex < asset.Imports.Count)
             {
                 var outerImport = asset.Imports[outerImportIndex];
-                string outerName = outerImport.ObjectName?.Value?.Value ?? "None";
+                string outerName = GetImportObjectNameWithNumber(outerImport);
                 pathParts.Insert(0, outerName);
                 currentIndex = outerImport.OuterIndex;
             }
@@ -575,7 +592,7 @@ public class ZenConverter
                 break;
             }
         }
-        
+
         // The first part should be the package path (e.g., "/Script/Engine")
         // which already starts with /, so just join with /
         return string.Join("/", pathParts);
@@ -740,8 +757,10 @@ public class ZenConverter
         for (int i = 0; i < asset.Imports.Count; i++)
         {
             var import = asset.Imports[i];
-            string objectName = import.ObjectName?.Value?.Value ?? "";
-            
+            // Apply FName Number suffix so retoc-style JSON (base+Number) matches UAT-style
+            // JSON (number baked into base) when looking up script objects.
+            string objectName = GetImportObjectNameWithNumber(import);
+
             // Build the full object path to determine the package
             string objectPath = BuildScriptObjectPath(asset, import);
             
