@@ -1294,29 +1294,11 @@ public class ZenToLegacyConverter
                             
                             // Get base name and FName number separately
                             var (exportBaseName, exportNumber) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
-                            
-                            // Resolve the class of this export
-                            string className = OBJECT_CLASS_NAME;
-                            string classPackage = CORE_OBJECT_PACKAGE_NAME;
-                            
-                            if (!export.ClassIndex.IsNull() && export.ClassIndex.IsScriptImport() && _scriptObjects != null)
-                            {
-                                var classObj = _scriptObjects.GetScriptObject(export.ClassIndex);
-                                if (classObj != null)
-                                {
-                                    className = _scriptObjects.GetName(classObj.ObjectName);
-                                    // Get the class's outer (package)
-                                    if (!classObj.OuterIndex.IsNull())
-                                    {
-                                        var outerObj = _scriptObjects.GetScriptObject(classObj.OuterIndex);
-                                        if (outerObj != null)
-                                        {
-                                            classPackage = _scriptObjects.GetName(outerObj.ObjectName);
-                                        }
-                                    }
-                                }
-                            }
-                            
+
+                            // Resolve the class of this export (handles script imports,
+                            // package imports AND local exports - e.g. BP-generated classes)
+                            var (className, classPackage) = ResolveExportClassInfo(targetPackage, export.ClassIndex);
+
                             // Build the resolved import with proper class info
                             return new ResolvedZenImport
                             {
@@ -1346,24 +1328,8 @@ public class ZenToLegacyConverter
                         {
                             var export = targetPackage.ExportMap[0];
                             var (fbBaseName, fbNumber) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
-                            string className = OBJECT_CLASS_NAME;
-                            string classPackage = CORE_OBJECT_PACKAGE_NAME;
-                            
-                            if (!export.ClassIndex.IsNull() && export.ClassIndex.IsScriptImport() && _scriptObjects != null)
-                            {
-                                var classObj = _scriptObjects.GetScriptObject(export.ClassIndex);
-                                if (classObj != null)
-                                {
-                                    className = _scriptObjects.GetName(classObj.ObjectName);
-                                    if (!classObj.OuterIndex.IsNull())
-                                    {
-                                        var outerObj = _scriptObjects.GetScriptObject(classObj.OuterIndex);
-                                        if (outerObj != null)
-                                            classPackage = _scriptObjects.GetName(outerObj.ObjectName);
-                                    }
-                                }
-                            }
-                            
+                            var (className, classPackage) = ResolveExportClassInfo(targetPackage, export.ClassIndex);
+
                             return new ResolvedZenImport
                             {
                                 ClassPackage = classPackage,
@@ -1380,24 +1346,8 @@ public class ZenToLegacyConverter
                         {
                             var export = targetPackage.ExportMap[exportIdx];
                             var (fb2BaseName, fb2Number) = GetExportBaseNameAndNumber(targetPackage, export.ObjectName);
-                            string className = OBJECT_CLASS_NAME;
-                            string classPackage = CORE_OBJECT_PACKAGE_NAME;
-                            
-                            if (!export.ClassIndex.IsNull() && export.ClassIndex.IsScriptImport() && _scriptObjects != null)
-                            {
-                                var classObj = _scriptObjects.GetScriptObject(export.ClassIndex);
-                                if (classObj != null)
-                                {
-                                    className = _scriptObjects.GetName(classObj.ObjectName);
-                                    if (!classObj.OuterIndex.IsNull())
-                                    {
-                                        var outerObj = _scriptObjects.GetScriptObject(classObj.OuterIndex);
-                                        if (outerObj != null)
-                                            classPackage = _scriptObjects.GetName(outerObj.ObjectName);
-                                    }
-                                }
-                            }
-                            
+                            var (className, classPackage) = ResolveExportClassInfo(targetPackage, export.ClassIndex);
+
                             return new ResolvedZenImport
                             {
                                 ClassPackage = classPackage,
@@ -1597,6 +1547,98 @@ public class ZenToLegacyConverter
         var (baseName, number) = ParseNameWithNumber(fullName);
         int index = StoreOrFindName(baseName);
         return (index, number);
+    }
+
+    /// <summary>
+    /// Resolve the class (ClassName + ClassPackage) of an export belonging to a target package.
+    /// Handles all three FPackageObjectIndex kinds:
+    ///  - ScriptImport: class lives in /Script/* (looked up via ScriptObjectsDatabase)
+    ///  - PackageImport: class is a public export in a package imported by targetPackage
+    ///    (e.g. a Blueprint-generated class defined in another package)
+    ///  - Export: class is another export inside targetPackage itself (common for
+    ///    BP-generated classes that live in the same package as their CDO)
+    ///
+    /// Returns (ClassName, ClassPackage). Defaults to (Object, /Script/CoreUObject) when
+    /// resolution fails.
+    /// </summary>
+    private (string className, string classPackage) ResolveExportClassInfo(
+        FZenPackageHeader targetPackage, FPackageObjectIndex classIndex)
+    {
+        string className = OBJECT_CLASS_NAME;
+        string classPackage = CORE_OBJECT_PACKAGE_NAME;
+
+        if (classIndex.IsNull())
+            return (className, classPackage);
+
+        // Case 1: /Script/* class (engine type)
+        if (classIndex.IsScriptImport())
+        {
+            if (_scriptObjects == null) return (className, classPackage);
+            var classObj = _scriptObjects.GetScriptObject(classIndex);
+            if (classObj == null) return (className, classPackage);
+
+            className = _scriptObjects.GetName(classObj.ObjectName);
+            if (!classObj.OuterIndex.IsNull())
+            {
+                var outerObj = _scriptObjects.GetScriptObject(classObj.OuterIndex);
+                if (outerObj != null)
+                    classPackage = _scriptObjects.GetName(outerObj.ObjectName);
+            }
+            return (className, classPackage);
+        }
+
+        // Case 2: class is a public export of another package imported by targetPackage
+        // (e.g. Blueprint class defined in a sibling package)
+        if (classIndex.IsPackageImport())
+        {
+            var (pkgIdx, hashIdx) = classIndex.GetPackageImport();
+            if (pkgIdx < 0 || pkgIdx >= targetPackage.ImportedPackages.Count)
+                return (className, classPackage);
+
+            string importedPkgName = pkgIdx < targetPackage.ImportedPackageNames.Count
+                ? targetPackage.ImportedPackageNames[pkgIdx]
+                : string.Empty;
+            ulong importedPkgId = targetPackage.ImportedPackages[pkgIdx];
+
+            if (_context != null && hashIdx >= 0 && hashIdx < targetPackage.ImportedPublicExportHashes.Count)
+            {
+                ulong expHash = targetPackage.ImportedPublicExportHashes[hashIdx];
+                var classPkg = _context.GetPackage(importedPkgId);
+                if (classPkg != null)
+                {
+                    foreach (var exp in classPkg.ExportMap)
+                    {
+                        string expName = classPkg.GetName(exp.ObjectName, _scriptObjects);
+                        ulong computedHash = IoStore.CityHash.CityHash64(expName.ToLowerInvariant());
+                        if (exp.PublicExportHash == expHash || computedHash == expHash)
+                        {
+                            className = expName;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(importedPkgName))
+                classPackage = importedPkgName;
+            return (className, classPackage);
+        }
+
+        // Case 3: class is another export inside targetPackage itself
+        // (common: BP-generated class sits alongside its CDO in the same package)
+        if (classIndex.IsExport())
+        {
+            int expIdx = (int)classIndex.GetExportIndex();
+            if (expIdx >= 0 && expIdx < targetPackage.ExportMap.Count)
+            {
+                var classExp = targetPackage.ExportMap[expIdx];
+                className = targetPackage.GetName(classExp.ObjectName, _scriptObjects);
+                classPackage = targetPackage.SourcePackageName();
+            }
+            return (className, classPackage);
+        }
+
+        return (className, classPackage);
     }
 
     /// <summary>
