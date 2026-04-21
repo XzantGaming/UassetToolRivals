@@ -39,6 +39,13 @@ public class TextureExtractionResult
     public int MipCount { get; set; }
     public string? PixelFormat { get; set; }
     public string? OutputPath { get; set; }
+
+    /// <summary>
+    /// Encoded PNG bytes populated by <see cref="TextureExtractor.ExtractToPngBytes"/>,
+    /// or by <see cref="TextureExtractor.Extract"/> when no <c>outputPath</c> is provided.
+    /// Null for disk-backed extractions.
+    /// </summary>
+    public byte[]? PngBytes { get; set; }
 }
 
 /// <summary>
@@ -56,9 +63,21 @@ public class TextureExtractor
     /// <param name="mipIndex">Which mip to extract (0 = largest)</param>
     /// <param name="usmapPath">Optional path to usmap file for unversioned assets</param>
     /// <returns>Result of the extraction</returns>
+    /// <summary>
+    /// In-memory equivalent of <see cref="Extract"/>: decodes the texture and returns
+    /// PNG bytes in <see cref="TextureExtractionResult.PngBytes"/> without touching disk.
+    /// Intended for UI scenarios (hero icon grids, previews) where persistent extraction
+    /// isn't needed.
+    /// </summary>
+    public static TextureExtractionResult ExtractToPngBytes(
+        string uassetPath,
+        int mipIndex = 0,
+        string? usmapPath = null)
+        => Extract(uassetPath, outputPath: null, TextureOutputFormat.PNG, mipIndex, usmapPath);
+
     public static TextureExtractionResult Extract(
         string uassetPath,
-        string outputPath,
+        string? outputPath,
         TextureOutputFormat outputFormat = TextureOutputFormat.PNG,
         int mipIndex = 0,
         string? usmapPath = null)
@@ -261,49 +280,61 @@ public class TextureExtractor
                 return result;
             }
             
-            // Ensure output directory exists
-            string outputDir = Path.GetDirectoryName(outputPath) ?? ".";
-            if (!Directory.Exists(outputDir))
-                Directory.CreateDirectory(outputDir);
-            
-            // Save in requested format
-            switch (outputFormat)
+            // Output path missing → caller wants PNG bytes in memory (UI/preview flow).
+            // We still force PNG in that branch because DDS/TGA/BMP wouldn't feed a
+            // generic Avalonia/SKImage consumer without extra plumbing.
+            if (string.IsNullOrEmpty(outputPath))
             {
-                case TextureOutputFormat.PNG:
-                    if (!outputPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                        outputPath = Path.ChangeExtension(outputPath, ".png");
-                    image.SaveAsPng(outputPath);
-                    break;
-                    
-                case TextureOutputFormat.BMP:
-                    if (!outputPath.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
-                        outputPath = Path.ChangeExtension(outputPath, ".bmp");
-                    image.SaveAsBmp(outputPath);
-                    break;
-                    
-                case TextureOutputFormat.TGA:
-                    if (!outputPath.EndsWith(".tga", StringComparison.OrdinalIgnoreCase))
-                        outputPath = Path.ChangeExtension(outputPath, ".tga");
-                    image.SaveAsTga(outputPath);
-                    break;
-                    
-                case TextureOutputFormat.DDS:
-                    if (!outputPath.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
-                        outputPath = Path.ChangeExtension(outputPath, ".dds");
-                    // Write raw DDS with the original compressed data (no re-encoding)
-                    WriteDdsFile(outputPath, mipWidth, mipHeight, pixelFormat, pixelData);
-                    break;
+                using var ms = new MemoryStream();
+                image.SaveAsPng(ms);
+                result.PngBytes = ms.ToArray();
             }
-            
-            Console.WriteLine($"  Saved: {outputPath}");
-            
+            else
+            {
+                // Ensure output directory exists
+                string outputDir = Path.GetDirectoryName(outputPath) ?? ".";
+                if (!Directory.Exists(outputDir))
+                    Directory.CreateDirectory(outputDir);
+
+                // Save in requested format
+                switch (outputFormat)
+                {
+                    case TextureOutputFormat.PNG:
+                        if (!outputPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                            outputPath = Path.ChangeExtension(outputPath, ".png");
+                        image.SaveAsPng(outputPath);
+                        break;
+
+                    case TextureOutputFormat.BMP:
+                        if (!outputPath.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+                            outputPath = Path.ChangeExtension(outputPath, ".bmp");
+                        image.SaveAsBmp(outputPath);
+                        break;
+
+                    case TextureOutputFormat.TGA:
+                        if (!outputPath.EndsWith(".tga", StringComparison.OrdinalIgnoreCase))
+                            outputPath = Path.ChangeExtension(outputPath, ".tga");
+                        image.SaveAsTga(outputPath);
+                        break;
+
+                    case TextureOutputFormat.DDS:
+                        if (!outputPath.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                            outputPath = Path.ChangeExtension(outputPath, ".dds");
+                        // Write raw DDS with the original compressed data (no re-encoding)
+                        WriteDdsFile(outputPath, mipWidth, mipHeight, pixelFormat, pixelData);
+                        break;
+                }
+
+                Console.WriteLine($"  Saved: {outputPath}");
+                result.OutputPath = outputPath;
+            }
+
             result.Success = true;
             result.Width = mipWidth;
             result.Height = mipHeight;
             result.MipCount = platformData.Mips.Count;
             result.PixelFormat = pixelFormat;
-            result.OutputPath = outputPath;
-            
+
             image.Dispose();
             return result;
         }

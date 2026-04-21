@@ -1154,7 +1154,7 @@ public partial class Program
     /// Extract IoStore packages to legacy .uasset/.uexp format using native C# conversion.
     /// Usage: UAssetTool extract_iostore_legacy <utoc_path> <output_dir> [--script-objects <path>]
     /// </summary>
-    private static int CliExtractIoStoreLegacy(string[] args)
+    public static int CliExtractIoStoreLegacy(string[] args)
     {
         if (args.Length < 3)
         {
@@ -2526,7 +2526,7 @@ public partial class Program
         return 0;
     }
     
-    private static UAssetResponse ProcessRequest(UAssetRequest request)
+    public static UAssetResponse ProcessRequest(UAssetRequest request)
     {
         try
         {
